@@ -1,0 +1,34 @@
+# --- Secretos (R1) ---------------------------------------------------------
+# Los secretos reales NUNCA se trackean. Los *.example sí se trackean a propósito:
+# son la plantilla de setup y no contienen credenciales.
+secrets/*
+!secrets/*.example
+
+# .env local (docker compose, PostgreSQL, ALEXIS_API_TOKEN). Sólo el ejemplo se trackea.
+.env
+.env.*
+!.env.example
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# --- Frontend (build y dependencias) ----------------------------------------
+node_modules/
+apps/face/dist/
+
+# --- Estado de runtime (no es código) ---------------------------------------
+.cache/
+logs/
+workspace/
+*.log
+*.pid
+.alexis_host.pids
+
+# Marcadores de estado en caliente del voice bridge
+.alexis_host.pids
+*.played.json

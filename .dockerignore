@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/
+*.log
+.env
+
+# Secretos: la imagen NUNCA debe llevar credenciales (R1). Sólo las plantillas.
+secrets/*
+!secrets/*.example
+
+# Build y runtime
+node_modules/
+apps/face/dist/
+.cache/
+logs/
+workspace/
+*.pid
+.alexis_host.pids

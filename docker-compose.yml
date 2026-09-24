@@ -1,0 +1,47 @@
+# ALEXIS — infraestructura local.
+#
+# R6: no hay credenciales por defecto. `docker compose up` FALLA de forma explícita si
+# faltan POSTGRES_PASSWORD o ALEXIS_API_TOKEN en el entorno (sintaxis `:?` de Compose),
+# en lugar de arrancar con `change-me` o con el token vacío.
+#
+# Setup: cp .env.example .env  y define ambos valores. Ver docs/DEVELOPMENT.md §7.
+
+services:
+  alexis-api:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      # Fuera de development, la API exige token (ver apps/api/main.py).
+      ALEXIS_ENV: ${ALEXIS_ENV:-development}
+      ALEXIS_DATABASE_URL: postgresql://alexis:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio (definelo en .env)}@postgres:5432/alexis
+      ALEXIS_API_TOKEN: ${ALEXIS_API_TOKEN:?ALEXIS_API_TOKEN es obligatorio (definelo en .env)}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: alexis
+      POSTGRES_USER: alexis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio (definelo en .env)}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - alexis-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alexis -d alexis"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    image: nats:2
+    command: ["-js"]
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+
+volumes:
+  alexis-pgdata:

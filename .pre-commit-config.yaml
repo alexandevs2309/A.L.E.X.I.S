@@ -1,0 +1,17 @@
+repos:
+  - repo: local
+    hooks:
+      # R1: bloquea el commit si un archivo versionable trae una credencial real.
+      - id: check-secrets
+        name: check-secrets (R1: sin credenciales en texto plano)
+        entry: python3 scripts/check_secrets.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      # R1: los secretos de verdad nunca se versionan (sí los *.example).
+      - id: forbid-secrets-dir
+        name: forbid-secrets-dir (R1: secrets/ sólo contiene *.example)
+        entry: bash -c 'fail=0; for f in secrets/*; do [ -e "$f" ] || continue; case "$f" in *.example) ;; *) echo "prohibido versionar: $f"; fail=1;; esac; done; exit $fail'
+        language: system
+        pass_filenames: false
+        files: ^secrets/

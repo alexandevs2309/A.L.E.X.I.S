@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alexis"
+version = "0.3.0"
+description = "Autonomous Learning, Execution & Intelligence System"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.8",
+  "psycopg[binary]>=3.1",
+  "psycopg_pool>=3.2",
+  "numpy>=1.24,<3"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23"
+]
+desktop = [
+  "sounddevice>=0.4.6,<0.6",
+  "elevenlabs>=1.50,<3",
+  "edge-tts>=7"
+]
+
+[tool.setuptools.packages.find]
+include = ["alexis*", "apps*", "apps.api*", "apps.demo*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
