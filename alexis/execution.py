@@ -1,5 +1,7 @@
 from alexis.contracts import ExecutionResult, Observation
-from alexis.perception.activation import activation_reply
+from alexis.models import ModelRequest, ModelRouter, ModelTask, build_router_from_config
+from alexis.models.config import ModelConfig
+from alexis.perception.activation import activation_reply, is_activation_objective
 from alexis.security.sandbox import SandboxRunner
 from alexis.speech.tts import TTSResult, get_tts_provider, synthesize_with_fallback
 from alexis.tools.desktop import (
@@ -68,12 +70,64 @@ class SandboxExecutor:
         action_map: dict[str, str] | None = None,
         default_path: str = "README.txt",
         desktop_delegate: str | None = None,
+        model_router: ModelRouter | None = None,
     ):
         self.tools = tools
         self.sandbox = sandbox
         self.action_map = action_map or dict(ACTION_TOOL)
         self.default_path = default_path
         self.desktop_delegate = desktop_delegate
+        #: Router de modelos (Gemini/Ollama) para generar la respuesta hablada.
+        #: ``None`` = se construye desde el entorno; sin provider REAL se cae a frases fijas.
+        self.model_router = model_router
+
+    async def _spoken_reply(self, mission, desktop) -> str:
+        """Respuesta hablada generada por el Model Router si hay un provider REAL.
+
+        Devuelve ``""`` cuando no hay provider (o sólo contingencia) para que el
+        caller caiga a las frases deterministas: la contingencia (eco) NUNCA se
+        presenta como si pensara. El saludo de activación (palmada) también es
+        fijo a propósito, para que ALEXIS salude igual siempre.
+        """
+        objective = mission.goal.objective
+        if desktop is None and is_activation_objective(objective):
+            return ""
+        router = self.model_router
+        if router is None:
+            router = build_router_from_config(ModelConfig.from_env())
+        if not router.providers():
+            return ""
+        prompt = f"Pedido del usuario: {objective!r}."
+        if desktop is not None:
+            tool_name, args = desktop
+            prompt += (
+                f"\nSe ejecutó la herramienta de escritorio {tool_name}"
+                + (f" con argumentos {dict(args)}" if args else "")
+                + "."
+            )
+        system = (
+            "Eres ALEXIS, un asistente de voz en español. "
+            "Tu respuesta se convertirá en voz: escribe UNA sola frase breve, natural "
+            "y conversacional (como la dirías en voz alta), sin markdown, sin listas, "
+            "sin emojis y sin inventar acciones que no se ejecutaron."
+        )
+        try:
+            response = await router.complete(
+                ModelRequest(
+                    task=ModelTask.SYNTHESIZE,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=80,
+                    temperature=0.7,
+                    deadline_ms=15000,
+                )
+            )
+        except Exception:  # noqa: BLE001 — la voz nunca debe fallar por el modelo
+            return ""
+        if not response.is_real or response.error or not (response.text or "").strip():
+            return ""
+        spoken = " ".join(response.text.split())[:300].strip().strip('"“”')
+        return spoken
 
     async def _run_tool(self, mission, step, tool_name: str, extra: dict | None = None) -> ExecutionResult:
         try:
@@ -157,10 +211,12 @@ class SandboxExecutor:
         action = step.action
         if action == "respond":
             desktop = desktop_tool_for(mission.goal.objective)
-            if desktop is not None:
-                message = desktop_reply(desktop[0], **desktop[1])
-            else:
-                message = activation_reply(mission.goal.objective)
+            message = await self._spoken_reply(mission, desktop)
+            if not message:
+                if desktop is not None:
+                    message = desktop_reply(desktop[0], **desktop[1])
+                else:
+                    message = activation_reply(mission.goal.objective)
             tts: TTSResult = await synthesize_with_fallback(message, provider=get_tts_provider())
             return ExecutionResult(
                 success=True,

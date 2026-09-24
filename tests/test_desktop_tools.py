@@ -257,3 +257,64 @@ async def _desktop_mission(objective):
         allowed_actions=["understand", "analyze", "execute", "respond"],
     )
     return MissionEngine().create(objective, envelope)
+
+class _FakeLLMRouter:
+    def __init__(self, text: str):
+        self._text = text
+
+    def providers(self):
+        return [object()]
+
+    async def complete(self, request):
+        from alexis.models import ModelResponse
+
+        return ModelResponse(text=self._text)
+
+
+class TestExecutorRespondWithModel:
+    async def test_respond_uses_model_when_router_injected(self, tmp_path):
+        executor = SandboxExecutor(
+            tools=ToolRegistry(),
+            sandbox=SandboxRunner(workspace=tmp_path),
+            model_router=_FakeLLMRouter("Claro: el gráfico de bitcoin ya está en tu pantalla."),
+        )
+        mission = await _desktop_mission("abre binance")
+        step = PlanStep("respond", "confirma", "respond", RiskLevel.LOW)
+        result = await executor.execute(mission, step)
+        assert result.output["message"] == "Claro: el gráfico de bitcoin ya está en tu pantalla."
+
+    async def test_respond_falls_back_when_router_has_no_providers(self, tmp_path):
+        class _EmptyRouter(_FakeLLMRouter):
+            def providers(self):
+                return []
+
+        executor = SandboxExecutor(
+            tools=ToolRegistry(),
+            sandbox=SandboxRunner(workspace=tmp_path),
+            model_router=_EmptyRouter("no debo usarse"),
+        )
+        mission = await _desktop_mission("abre claude code")
+        step = PlanStep("respond", "confirma", "respond", RiskLevel.LOW)
+        result = await executor.execute(mission, step)
+        assert result.output["message"] == desktop_reply("claude.open")
+
+    async def test_activation_greeting_stays_canonical(self, tmp_path):
+        from alexis.perception.activation import ACTIVATION_MARKER
+
+        executor = SandboxExecutor(
+            tools=ToolRegistry(),
+            sandbox=SandboxRunner(workspace=tmp_path),
+            model_router=_FakeLLMRouter("no debo usarse para el saludo"),
+        )
+        from alexis.autonomy.mission import MissionEngine
+        from alexis.contracts import AutonomyLevel, MissionEnvelope
+
+        envelope = MissionEnvelope(
+            objective="palmada",
+            autonomy=AutonomyLevel.SUPERVISED,
+            allowed_actions=["understand", "analyze", "execute", "respond"],
+        )
+        mission = MissionEngine().create(f"{ACTIVATION_MARKER} activación", envelope)
+        step = PlanStep("respond", "saluda", "respond", RiskLevel.LOW)
+        result = await executor.execute(mission, step)
+        assert "¿En qué te ayudo" in result.output["message"]

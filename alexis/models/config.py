@@ -53,6 +53,13 @@ class ModelConfig:
     cost_per_1k_tokens: float = 0.0
     priority: int = 50
     extra_providers: list[str] = field(default_factory=list)
+    #: Ruta de chat personalizada del provider principal (p. ej. la API
+    #: OpenAI-compat de Gemini usa `/v1beta/openai/chat/completions`).
+    endpoint: str = ""
+    #: Endpoint/modelo independientes para el provider extra (p. ej. Ollama local),
+    #: para poder tener Gemini (cloud) primario y Ollama local de respaldo.
+    extra_base_url: str = ""
+    extra_model: str = ""
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "ModelConfig":
@@ -78,6 +85,9 @@ class ModelConfig:
             extra_providers=[
                 p.strip() for p in (get("ALEXIS_MODEL_EXTRA_PROVIDERS") or "").split(",") if p.strip()
             ],
+            endpoint=(get("ALEXIS_MODEL_ENDPOINT") or "").strip(),
+            extra_base_url=(get("ALEXIS_MODEL_EXTRA_BASE_URL") or "").strip(),
+            extra_model=(get("ALEXIS_MODEL_EXTRA_MODEL") or "").strip(),
         )
 
     def allow_degraded(self) -> bool:
@@ -88,11 +98,14 @@ class ModelConfig:
         providers: list[ModelProvider] = []
         names = [self.provider] + [p for p in self.extra_providers if p != self.provider]
         for name in names:
+            is_primary = name == self.provider
             if name == "local_http":
                 from alexis.models.providers.local_http import LocalHTTPProvider
 
                 provider = LocalHTTPProvider(
-                    base_url=self.base_url, model=self.model_name or None, timeout=self.timeout_s
+                    base_url=self.extra_base_url if (not is_primary and self.extra_base_url) else self.base_url,
+                    model=(self.extra_model if (not is_primary and self.extra_model) else self.model_name) or None,
+                    timeout=self.timeout_s,
                 )
             elif name == "openai_compatible":
                 from alexis.models.providers.openai_compatible import OpenAICompatibleProvider
@@ -102,6 +115,7 @@ class ModelConfig:
                     model=self.model_name or None,
                     cost_per_1k_tokens=self.cost_per_1k_tokens,
                     timeout=self.timeout_s,
+                    **({"endpoint": self.endpoint} if self.endpoint else {}),
                 )
             elif name == "omniroute":
                 from alexis.models.providers.omniroute import OmniRouteProvider
