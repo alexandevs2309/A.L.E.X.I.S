@@ -32,3 +32,4 @@ workspace/
 # Marcadores de estado en caliente del voice bridge
 .alexis_host.pids
 *_played.json
+alexis/.desktop_bridge_done.json
