@@ -179,6 +179,15 @@ class HTTPChatProvider(ModelProvider):
                 latency_ms=int((time.monotonic() - started) * 1000),
             )
         text, data, tokens_in, tokens_out = self.parse_response(raw)
+        if not text:
+            return ModelResponse(
+                text="",
+                provider=self.id,
+                model=self.model,
+                outcome=ModelOutcome.UNAVAILABLE,
+                error="respuesta vacía del proveedor (finish sin contenido)",
+                latency_ms=int((time.monotonic() - started) * 1000),
+            )
         cost = self.cost_per_1k_tokens / 1000.0 * (tokens_in + tokens_out)
         return ModelResponse(
             text=text,
