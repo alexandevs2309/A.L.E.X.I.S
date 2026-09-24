@@ -223,7 +223,9 @@ class TestExecutorDesktopDispatch:
         mission = await self._mission("abre https://ejemplo.dev/x", tmp_path)
         step = PlanStep("respond", "confirma", "respond", RiskLevel.LOW)
         result = await executor.execute(mission, step)
-        assert result.output["message"] == "Listo, abrí https://ejemplo.dev/x en el navegador."
+        message = result.output["message"]
+        assert "ejemplo.dev/x" in message
+        assert "abrí https://ejemplo.dev/x en el navegador" not in message
 
 
 class TestVerifierDesktop:

@@ -194,19 +194,67 @@ def desktop_tool_for(objective: str) -> tuple[str, dict] | None:
     return desktop_intent(objective)
 
 
+def _pick_phrase(templates: tuple[str, ...], seat: str) -> str:
+    """Elige una frase de forma determinista a partir de una clave estable:
+    el mismo pedido produce siempre la misma variante, y pedidos distintos
+    pueden variar para que ALEXIS no suene repetitiva."""
+    return templates[sum(ord(c) for c in seat) % len(templates)]
+
+
+def _short_url(url: str) -> str:
+    """Mostrar URL de forma legible para el habla (sin esquema ni www)."""
+    u = (url or "").strip()
+    u = u.replace("https://", "").replace("http://", "").replace("www.", "")
+    return u.rstrip("/")
+
+
 def desktop_reply(action: str, **kwargs) -> str:
     """Respuesta honesta (español) que el orchestrador usa al despachar una
-    tool de escritorio. Nunca inventa que se abrió algo que no se abrió."""
-    url = (kwargs.get("url") or "").strip()
-    replies = {
-        "spotify.play": "Listo, puse la canción en Spotify.",
-        "chrome.open_url": f"Listo, abrí {url or 'esa URL'} en el navegador.",
-        "claude.open": "Listo, abrí Claude Code en el navegador.",
-        "binance.open": "Listo, abrí el gráfico de bitcoin.",
-        "cursor.open": "Listo, abrí Cursor.",
-        "tts.speak": "Listo, lo dije en voz alta.",
+    tool de escritorio. Nunca inventa que se abrió algo que no se abrió, y
+    evita el "Listo, abrí X" genérico: cada herramienta tiene frases propias."""
+    url = _short_url(kwargs.get("url") or "")
+    text = (kwargs.get("text") or "").strip()
+    templates = {
+        "spotify.play": (
+            "Dejé el tema puesto en Spotify.",
+            "Reproduciendo: Spotify ya está sonando.",
+            "Listo, la canción quedó puesta en Spotify.",
+        ),
+        "chrome.open_url": (
+            "Abrí {u} — échale un vistazo.",
+            "Hecho: {u} quedó abierto en tu navegador.",
+            "Ahí va {u}, abierto en el navegador.",
+        ),
+        "claude.open": (
+            "Claude Code ya está abierto, listo para trabajar.",
+            "Te dejé Claude Code en el navegador.",
+            "Ahí está Claude, abierto y preparado.",
+        ),
+        "binance.open": (
+            "Te puse el gráfico de bitcoin en Binance.",
+            "El gráfico de bitcoin ya está en pantalla.",
+            "Listo: Binance con el gráfico de bitcoin.",
+        ),
+        "cursor.open": (
+            "Cursor abierto, con el archivo nuevo listo.",
+            "Te abrí Cursor en una ventana nueva.",
+            "Cursor listo en tu escritorio.",
+        ),
+        "tts.speak": (
+            "Dicho: {t}",
+            "En voz alta: {t}",
+            "Lo dije: {t}",
+        ),
     }
-    return replies.get(action, "Listo, acción de escritorio realizada.")
+    if action == "tts.speak" and not text:
+        return _pick_phrase(
+            ("Listo, lo dije en voz alta.", "Dicho, por mi voz.", "Sí, ya hablé."),
+            action,
+        )
+    if action in templates:
+        seat = kwargs.get("url") or kwargs.get("text") or action
+        return _pick_phrase(templates[action], seat).format(u=url or "esa página", t=text or "")
+    return _pick_phrase(("Hecho.", "Listo.", "Va.", "Sin problema."), action)
 
 
 def cursor_open(*, launcher: subprocess.Popen | None = None, new_window: bool = True, executable: str | None = None) -> dict:
