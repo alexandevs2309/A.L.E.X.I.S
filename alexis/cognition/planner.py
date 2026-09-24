@@ -2,7 +2,7 @@ from alexis.contracts import Plan, PlanStep, RiskLevel
 from alexis.capabilities import ACTION_TO_CAPABILITY
 from alexis.perception.activation import is_activation_objective
 from alexis.tools.desktop import desktop_tool_for
-from alexis.tools.filesystem import classify_objective_intent
+from alexis.tools.filesystem import classify_objective_intent, is_informational_objective
 
 
 class Planner:
@@ -37,6 +37,14 @@ class Planner:
             ])
 
         intent = classify_objective_intent(objective)
+        if is_informational_objective(objective):
+            return Plan(mission.id, [
+                PlanStep("understand", f"Understand the question: {objective}", "analyze", RiskLevel.LOW,
+                         "reasoner", capability="cognition.understand"),
+                PlanStep("respond", "Answer conversationally in Spanish", "respond", RiskLevel.LOW,
+                         "responder", ["understand"], capability="tts.speak"),
+            ])
+
         delicate = intent == "destructive"
         execute_capability = {
             "write": "fs.write",

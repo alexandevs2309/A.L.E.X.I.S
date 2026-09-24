@@ -13,7 +13,7 @@ from alexis.tools.desktop import (
     open_claude,
     spotify_play,
 )
-from alexis.tools.filesystem import classify_objective_intent, extract_workspace_path
+from alexis.tools.filesystem import classify_objective_intent, extract_workspace_path, is_informational_objective
 from alexis.tools.registry import ToolRegistry
 
 ANALYSIS_ACTIONS = {"understand", "analyze", "review"}
@@ -215,6 +215,11 @@ class SandboxExecutor:
             if not message:
                 if desktop is not None:
                     message = desktop_reply(desktop[0], **desktop[1])
+                elif is_informational_objective(mission.goal.objective):
+                    message = (
+                        "No pude responder eso ahora mismo con mi modelo; "
+                        "vuelve a intentarlo en unos segundos."
+                    )
                 else:
                     message = activation_reply(mission.goal.objective)
             tts: TTSResult = await synthesize_with_fallback(message, provider=get_tts_provider())

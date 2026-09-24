@@ -4,7 +4,7 @@ from alexis.contracts import Verification
 from alexis.perception.activation import is_activation_objective
 from alexis.security.sandbox import SandboxError, SandboxRunner
 from alexis.tools.desktop import desktop_tool_for
-from alexis.tools.filesystem import classify_objective_intent, extract_workspace_path
+from alexis.tools.filesystem import classify_objective_intent, extract_workspace_path, is_informational_objective
 
 
 class BasicVerifier:
@@ -79,6 +79,36 @@ class FilesystemVerifier:
                 evidence=evidence,
                 confidence=0.5,
                 notes=f"La misión pedía {tool_name} pero no fue despachada (sin evidencia de dispatch en results).",
+            )
+
+        if is_informational_objective(objective):
+            answered = any(
+                r.get("success")
+                and r.get("step") == "respond"
+                and isinstance(r.get("output"), dict)
+                and (r["output"].get("message") or "").strip()
+                for r in (mission.results or [])
+            )
+            if answered:
+                return Verification(
+                    passed=True,
+                    evidence=[
+                        "verifier=FilesystemVerifier",
+                        f"objective={objective}",
+                        "chat_answered=True",
+                    ],
+                    confidence=0.9,
+                    notes="Pregunta/información respondida de voz; no había archivos que tocar.",
+                )
+            return Verification(
+                passed=False,
+                evidence=[
+                    "verifier=FilesystemVerifier",
+                    f"objective={objective}",
+                    "chat_answered=False",
+                ],
+                confidence=0.5,
+                notes="La misión era informativa pero no quedó evidencia de una respuesta hablada.",
             )
 
         intent = classify_objective_intent(objective)

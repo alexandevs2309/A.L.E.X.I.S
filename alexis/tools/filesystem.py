@@ -62,6 +62,40 @@ def extract_workspace_path(objective: str) -> str | None:
     return m.group(1).strip("./")
 
 
+#: Marcas de texto que hacen de un objetivo una petición INFORMATIVA (pregunta o
+#: conversación) en lugar de una tarea de archivos. Para que la ruta chat entre,
+#: además, el objetivo NO puede nombrar un archivo del workspace ni tener un
+#: intent de acción (escribir/borrar/soportado).
+CONVERSATIONAL_MARKERS = (
+    "?",
+    "qué es", "que es", "qué ", "que ",
+    "cómo", "como ", "cuándo", "cuando ", "dónde", "donde ",
+    "quién", "quien ", "cuál", "cual ", "cuánto", "cuanto ",
+    "por qué", "por que", "porque ",
+    "dime", "dime ", "cuéntame", "cuentame ",
+    "háblame", "hablame ", "conversa", "habla",
+    "resumen", "resume ", "explica",
+    "qué puedes", "que puedes", "qué eres", "que eres", "quién eres", "quien eres",
+    "eres", "información", "info sobre",
+)
+
+
+def is_informational_objective(objective: str) -> bool:
+    """True si el objetivo es una pregunta/información, no una tarea accionable.
+
+    No es IA: reglas deterministas. La activación (palmada) y las órdenes de
+    escritorio se deciden antes, así que aquí solo excluimos archivos reales y
+    mutations."""
+    low = " ".join((objective or "").lower().split())
+    if not low:
+        return False
+    if extract_workspace_path(low):
+        return False
+    if classify_objective_intent(low) != "read":
+        return False
+    return any(m in low for m in CONVERSATIONAL_MARKERS)
+
+
 def _load_result(stdout: str):
     marker = "ALEXIS_RESULT="
     idx = stdout.rfind(marker)
