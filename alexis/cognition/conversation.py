@@ -12,6 +12,7 @@ Lo que este módulo NO hace: autorizar capabilities. La propuesta del modelo via
 construye la capa que ya lo hacía (`EnvelopeBuilder` en F2.5).
 """
 
+import inspect
 import json
 import logging
 
@@ -99,6 +100,10 @@ class ConversationSession:
 
         mission = self.create_mission(intent)
         await self._publish(TURN_FINISHED, {"kind": intent.kind.value, "mission_id": mission.id})
+        if self.enqueue is not None:
+            result = self.enqueue(mission)
+            if inspect.isawaitable(result):
+                await result
         return UserReply(
             text=self._task_acknowledgement(intent, outcome),
             kind="answer",

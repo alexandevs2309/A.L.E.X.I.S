@@ -330,6 +330,22 @@ class IntentClassifier:
                 outcome=response.outcome.value, meta=meta,
             )
 
+        # Un modelo pequeño puede "desclasificar" frases con verbo de tarea claro
+        # (greeting/capability_query). Si las reglas ven TASK literal, manda la regla:
+        # la precisión de los verbos pesa más que la salida débil del modelo 1B.
+        if intent.kind is not IntentKind.TASK:
+            rule = self.rule_based.classify(text, brief)
+            if rule.kind is IntentKind.TASK:
+                rule.model_meta = {
+                    **(meta or {}),
+                    "source": "deterministic",
+                    "fallback_reason": "el modelo desclasificó un verbo de tarea claro; reglas deterministas pesan más",
+                    "model_outcome": response.outcome.value,
+                    "cognition_outcome": ModelOutcome.DEGRADED.value,
+                }
+                self.last_proposal = None
+                return rule
+
         intent.model_meta = {**meta, "source": "model", "validated": True}
         self.last_proposal = CapabilityProposal(
             capabilities=list(intent.requested_capabilities),

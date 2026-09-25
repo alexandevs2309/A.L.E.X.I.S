@@ -19,6 +19,8 @@ from alexis.autonomy.task_runner import TaskRunner
 from alexis.capabilities import build_catalog
 from alexis.cognition.conversation import ConversationSession
 from alexis.cognition.intent_classifier import IntentClassifier
+from alexis.cognition.loop import CognitiveRuntime
+from alexis.cognition.planner_model import ModelPlanner, PlanValidator
 from alexis.contracts import AutonomyLevel, MissionEnvelope, MissionState
 from alexis.cognition.planner import Planner
 from alexis.core.runtime import AlexisRuntime
@@ -26,6 +28,7 @@ from alexis.events.bus import EventBus
 from alexis.execution import SandboxExecutor
 from alexis.experience.presenter import present
 from alexis.learning.system import ExperienceLearner
+from alexis.memory.provider import InProcessMemoryProvider, PostgresMemoryProvider
 from alexis.memory.store import InMemoryMemory
 from alexis.models.config import ModelConfig
 from alexis.models.degraded import EchoModel
@@ -71,6 +74,7 @@ def init_storage():
     try:
         db = Database()
         asyncio.run_coroutine_threadsafe(_open_and_migrate(db), LOOP).result(timeout=10)
+        STORAGE["db"] = db
         STORAGE["mission"] = MissionRepository(db)
         STORAGE["event"] = EventRepository(db)
         STORAGE["audit"] = AuditRepository(db)
@@ -191,6 +195,7 @@ RUNTIME = AlexisRuntime(
         tools=TOOLS,
         sandbox=SANDBOX,
         desktop_delegate="host" if os.environ.get("ALEXIS_DESKTOP_MODE", "host") == "host" else None,
+        voice_mode_provider=lambda: voice_mode_on(),
     ),
     verifier=FilesystemVerifier(workspace=WORKSPACE),
     memory=InMemoryMemory(),
@@ -230,11 +235,20 @@ WORLD.upsert(
         {"tools": [t.name for t in TOOLS.list() if t.name not in {f.name for f in FS_TOOLS}]},
     )
 )
+for _tool in TOOLS.list():
+    WORLD.declare_tool(
+        _tool.name,
+        {
+            "sandbox": getattr(_tool, "sandbox_profile", None),
+            "timeout": getattr(_tool, "timeout", None),
+        },
+    )
 
 # --- Self Model: autoconocimiento operacional + presencia (F0-Self + F1 Capabilities). ---
 # Se actualiza consumiendo los eventos reales del bus; el frontend solo dibuja.
 SELF = SelfModel(
     capabilities=[s.id for s in CAPABILITIES.specs()],  # catálogo completo (incl. missing)
+    available=[s.id for s in CAPABILITIES.enabled()],  # lo que ALEXIS puede hacer de verdad
     resources={
         "workspace": str(WORKSPACE),
         "sandbox_no_network": True,
@@ -301,6 +315,8 @@ def _create_mission_from_intent(intent):
         capabilities=ENABLED_CAPABILITIES,
     )
     mission = MISSIONS.create(envelope.objective, envelope)
+    RUNNING[mission.id] = mission
+    STATE["mission_id"] = mission.id
     # La propuesta del modelo se guarda como PROPUESTA auditable, nunca como permiso.
     mission.context["intent"] = intent.to_dict()
     if intent.requested_capabilities:
@@ -321,6 +337,54 @@ CONVERSATION = ConversationSession(
     capability_registry=CAPABILITIES,
 )
 
+# --- F2.1/Fase 1: Cognitive Runtime (ALEXIS_COGNITIVE=1) --------------------
+# Con el flag apagado (por defecto) el runtime legacy recorre el plan una vez, igual
+# que hasta ahora. Con el flag activo, `AlexisRuntime.run_mission` pide una decisión
+# antes de cada acción y vuelve a decidir después de observar. Mismo executor, misma
+# policy, mismo verifier: lo que cambia es quién decide el siguiente paso.
+if os.environ.get("ALEXIS_COGNITIVE", "0") == "1":
+
+    async def _cognitive_execute(mission, step, tool_name=None):
+        if RUNNER is not None:
+            async def _run(_mission, _step):
+                return await RUNTIME.executor.execute(_mission, _step, tool_name=tool_name)
+
+            result, task = await RUNNER.run_step(mission, step, _run)
+            if task.status.value == "failed":
+                await RUNNER.close_open_tasks(mission.id, status="cancelled")
+            return result
+        return await RUNTIME.executor.execute(mission, step, tool_name=tool_name)
+
+    memory_provider = None
+    if STORAGE.get("db") is not None:
+        memory_provider = PostgresMemoryProvider(STORAGE["db"])
+    else:
+        memory_provider = InProcessMemoryProvider(RUNTIME.memory)
+    print(f"[cognitive] memoria: {memory_provider.id}")
+
+    RUNTIME.plan_validator = PlanValidator(catalog=CAPABILITIES, policy=RUNTIME.policy)
+    if os.environ.get("ALEXIS_MODEL_PLANNER", "0") == "1":
+        RUNTIME.plan_model = ModelPlanner(MODEL_ROUTER, catalog=CAPABILITIES)
+        print("[cognitive] ModelPlanner activo (ALEXIS_MODEL_PLANNER=1): el modelo propone, el validador decide")
+    else:
+        print("[cognitive] plan por reglas (ALEXIS_MODEL_PLANNER != 1); el ModelPlanner está disponible")
+
+    RUNTIME.cognitive = CognitiveRuntime(
+        policy=RUNTIME.policy,
+        gate=RUNTIME.gate,
+        executor=RUNTIME.executor,
+        verifier=RUNTIME.verifier,
+        execute=_cognitive_execute,
+        model_router=MODEL_ROUTER,
+        memory=memory_provider,
+        self_model=SELF,
+        world=WORLD,
+        plan_validator=RUNTIME.plan_validator,
+    )
+    print("[cognitive] CognitiveRuntime activo (ALEXIS_COGNITIVE=1): decide→policy→execute→observe→evaluate")
+else:
+    print("[cognitive] runtime legacy (ALEXIS_COGNITIVE != 1): el plan se recorre una vez")
+
 # --- Percepción: la palmada es solo una FUENTE de eventos. -------------------
 # El cereor es ALEXIS: el evento se convierte en una misión de activación que
 # atraviesa el mismo pipeline (planner → policy → executor → verifier) que el chat.
@@ -328,6 +392,7 @@ ACTIVATION_COOLDOWN_S = 10.0
 
 
 def on_clap_event(event) -> None:
+    set_voice_mode(True)
     now = time.time()
     if now - STATE.get("last_clap_at", 0.0) < ACTIVATION_COOLDOWN_S:
         return
@@ -378,6 +443,7 @@ async def run_mission(mission):
     RUNNING[mission.id] = mission
     verification = RUNTIME.latest_verification
     STATE["verification"] = verification if verification and verification["mission_id"] == mission.id else None
+    _touch_voice()
     await _announce_voice(mission)
 
 
@@ -409,6 +475,45 @@ def _voice_dir() -> Path:
     return Path(_PROJECT_ROOT) / ".cache" / "tts"
 
 
+# --- Modo voz (palmada = trigger, estilo ChatGPT). --------------------------
+# Es una SESIÓN: la palmada lo ACTIVA y ALEXIS habla mientras haya interacción
+# de voz/mic; si no hay actividad durante _VOICE_IDLE_S vuelve solo a texto.
+# El default es texto (OFF): solo la palmada (o el toggle manual) lo enciende.
+_VOICE_MODE_DEFAULT = os.environ.get("ALEXIS_VOICE_MODE_DEFAULT", "0").strip().lower() in ("1", "on", "true", "yes")
+_VOICE_IDLE_S = float(os.environ.get("ALEXIS_VOICE_IDLE_S", "30"))
+
+
+def _touch_voice() -> None:
+    STATE["voice_last_activity"] = time.time()
+
+
+def voice_mode_on() -> bool:
+    """Estado REAL del modo voz; se apaga solo tras _VOICE_IDLE_S sin actividad."""
+    if not STATE.get("voice_mode", _VOICE_MODE_DEFAULT):
+        return False
+    if time.time() - STATE.get("voice_last_activity", 0.0) > _VOICE_IDLE_S:
+        STATE["voice_mode"] = False
+        asyncio.run_coroutine_threadsafe(
+            EVENTS.publish("voice.mode", {"enabled": False, "reason": "idle"}), LOOP
+        )
+        return False
+    return True
+
+
+def set_voice_mode(enabled: bool) -> dict:
+    STATE["voice_mode"] = bool(enabled)
+    if enabled:
+        _touch_voice()
+    asyncio.run_coroutine_threadsafe(
+        EVENTS.publish("voice.mode", {"enabled": STATE["voice_mode"], "reason": "manual"}), LOOP
+    )
+    return {"enabled": STATE["voice_mode"]}
+
+
+STATE["voice_mode"] = _VOICE_MODE_DEFAULT
+_touch_voice()
+
+
 def _publish_voice(path: str, mission_id: str) -> bool:
     """Copia el audio sintetizado con nombre ÚNICO en la carpeta que vigila el
     `voice_bridge` del host: así se reproduce por los altavoces aunque el mismo
@@ -437,6 +542,8 @@ async def _announce_voice(mission) -> None:
     - El resto de misiones sin paso `respond` reciben un resumen hablado honesto.
     """
     if mission.state not in (MissionState.COMPLETED, MissionState.FAILED, MissionState.BLOCKED):
+        return
+    if not voice_mode_on():
         return
     for res in reversed(mission.results or []):
         out = res.get("output") or {}
@@ -571,6 +678,7 @@ class Handler(BaseHTTPRequestHandler):
                 "enabled": WORKER is not None,
                 "active": (WORKER.active.id if WORKER is not None and WORKER.active is not None else None),
             },
+            "voice_mode": voice_mode_on(),
         }
 
     def _send_file(self, abspath: str):
@@ -678,6 +786,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         elif path == "/state":
             self._send_json(self._state_payload())
+        elif path == "/voice-mode":
+            self._send_json({"enabled": voice_mode_on()})
         else:
             self._send_json({"error": "not found"}, 404)
 
@@ -757,9 +867,13 @@ class Handler(BaseHTTPRequestHandler):
                 asyncio.run_coroutine_threadsafe(STORAGE["mission"].upsert(mission), LOOP)
             asyncio.run_coroutine_threadsafe(EVENTS.publish("mission.cancelled", mission.id), LOOP)
             self._send_json({"id": mission.id, "state": mission.state.value})
+        elif path == "/voice-mode":
+            length = int(self.headers.get("Content-Length", 0))
+            data = json.loads(self.rfile.read(length) or b"{}")
+            self._send_json(set_voice_mode(bool(data.get("enabled", voice_mode_on()))))
         elif path == "/clap":
             on_clap_event({"source": "simulated"})
-            self._send_json({"ok": True, "note": "clap simulated - pipeline de activación disparado"})
+            self._send_json({"ok": True, "note": "clap simulated - modo voz activado y pipeline de activación disparado"})
         else:
             self._send_json({"error": "not found"}, 404)
 

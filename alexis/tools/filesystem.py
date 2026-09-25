@@ -77,6 +77,10 @@ CONVERSATIONAL_MARKERS = (
     "resumen", "resume ", "explica",
     "qué puedes", "que puedes", "qué eres", "que eres", "quién eres", "quien eres",
     "eres", "información", "info sobre",
+    "recomiénd", "recomienda", "recomiende", "sugiere", "sugiero", "sugerir",
+    "propón", "propon ", "dame ", "dame", "quiero saber", "podrías", "podrias ",
+    "puedes ", "consejo", "sugerencia", "ayúdame", "ayudame",
+    "el mejor", "la mejor", "cuál crees", "cual crees", "pídele", "pideme",
 )
 
 

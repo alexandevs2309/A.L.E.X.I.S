@@ -46,6 +46,7 @@ _STATE_PRESENCE = {
     "running": "working",
     "verifying": "verifying",
     "waiting_approval": "waiting_for_approval",
+    "waiting_clarification": "waiting_for_approval",
     "recovering": "recovering",
     "completed": "success",
     "failed": "error",

@@ -92,6 +92,12 @@ def plan_to_dict(plan: Plan) -> list[dict]:
             "depends_on": list(s.depends_on),
             "requires_approval": s.requires_approval,
             "capability": _step_capability(s),
+            "requires_input": dict(getattr(s, "requires_input", {}) or {}),
+            "verification": getattr(s, "verification", None),
+            "proposed_by": getattr(s, "proposed_by", None),
+            "rationale": getattr(s, "rationale", None),
+            "args": dict(getattr(s, "args", {}) or {}),
+            "expected": getattr(s, "expected", None),
         }
         for s in plan.steps
     ]
@@ -108,6 +114,12 @@ def plan_from_dict(raw: list[dict], mission_id: str) -> Plan:
             depends_on=list(s.get("depends_on", [])),
             requires_approval=bool(s.get("requires_approval", False)),
             capability=s.get("capability"),
+            requires_input=dict(s.get("requires_input") or {}),
+            verification=s.get("verification"),
+            proposed_by=s.get("proposed_by"),
+            rationale=s.get("rationale"),
+            args=dict(s.get("args") or {}),
+            expected=s.get("expected"),
         )
         for s in raw
     ]

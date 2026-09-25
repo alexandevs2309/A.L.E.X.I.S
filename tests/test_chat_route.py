@@ -150,3 +150,77 @@ async def test_chat_route_end_to_end_planner_executor_verifier(tmp_path, fake_tt
     verification = await FilesystemVerifier(workspace=tmp_path).verify(mission, plan)
     assert result.output["message"] == "Mi mejor cualidad es la honestidad al confirmar lo que hago."
     assert verification.passed is True
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_downgrade_a_clear_task_verb():
+    """Un modelo pequeño que desclasifica un verbo de tarea claro pierde ante las reglas."""
+    from alexis.cognition.intent_classifier import IntentClassifier
+    from alexis.models import ModelResponse
+
+    class _WeakModel:
+        def providers(self):
+            return [object()]
+
+        async def complete(self, request):
+            return ModelResponse(text='{"kind":"greeting","objective":null,"confidence":0.95}')
+
+    clf = IntentClassifier(_WeakModel())
+    intent = await clf.classify("crea un archivo llamado prueba.txt en el workspace con contenido hola mundo")
+    assert intent.is_task is True
+    assert intent.model_meta.get("source") == "deterministic"
+    assert intent.model_meta.get("cognition_outcome") == "degraded"
+    assert "verb" in intent.model_meta.get("fallback_reason", "")
+
+
+@pytest.mark.asyncio
+async def test_task_turn_is_enqueued_after_creation():
+    """P3.1: un turno TASK crea la misión Y la encola para que el worker la corra."""
+    from alexis.cognition.contracts import Intent, IntentKind
+    from alexis.cognition.conversation import ConversationSession
+
+    enqueued = []
+
+    class _TaskClassifier:
+        async def classify(self, utterance, brief):
+            return Intent(kind=IntentKind.TASK, utterance=utterance, objective=utterance, confidence=0.7)
+
+    def create_mission(intent):
+        mission = MissionEngine().create(
+            intent.objective,
+            MissionEnvelope(
+                objective=intent.objective,
+                autonomy=AutonomyLevel.SUPERVISED,
+                allowed_actions=["understand", "respond"],
+            ),
+        )
+        return mission
+
+    async def enqueue_fn(mission):
+        enqueued.append(mission)
+
+    session = ConversationSession(classifier=_TaskClassifier(), self_model=None, create_mission=create_mission, enqueue=enqueue_fn)
+    reply = await session.handle_turn("crea un archivo prueba.txt")
+    assert reply.mission_id is not None
+    assert len(enqueued) == 1
+    assert enqueued[0].id == reply.mission_id
+
+
+@pytest.mark.asyncio
+async def test_non_task_turn_is_not_enqueued():
+    from alexis.cognition.contracts import Intent, IntentKind
+    from alexis.cognition.conversation import ConversationSession
+
+    enqueued = []
+
+    class _GreetingClassifier:
+        async def classify(self, utterance, brief):
+            return Intent(kind=IntentKind.GREETING, utterance=utterance, confidence=0.9)
+
+    async def enqueue_fn(mission):
+        enqueued.append(mission)
+
+    session = ConversationSession(classifier=_GreetingClassifier(), self_model=None, enqueue=enqueue_fn)
+    reply = await session.handle_turn("hola alexis")
+    assert reply.mission_id is None
+    assert enqueued == []

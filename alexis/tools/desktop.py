@@ -166,10 +166,12 @@ def desktop_intent(text: str) -> tuple[str, dict] | None:
     if "spotify" in low or "música" in low or "musica" in low or "canción" in low or "cancion" in low:
         return ("spotify.play", {})
 
-    if "voz alta" in low or "por voz" in low or "pronuncia" in low or "en voz" in low or "dime" in low:
+    if any(k in low for k in ("voz alta", "por voz", "pronuncia", "en voz", "repite",
+                              "lee en voz", "dime en voz", "dilo en voz")):
         # tts: el texto a pronunciar es lo que sigue a «dime/pronuncia ... en voz».
         phrase = t
-        for marker in ("dime ", "pronuncia ", "dilo en voz alta", "por voz", "en voz alta"):
+        for marker in ("dime ", "pronuncia ", "repite ", "dilo en voz alta", "por voz",
+                       "en voz alta", "en voz", "lee en voz"):
             phrase = phrase.replace(marker, "")
         text2 = " ".join(phrase.split())
         text2 = text2.strip(" .!?")
@@ -274,6 +276,27 @@ def cursor_open(*, launcher: subprocess.Popen | None = None, new_window: bool = 
         return {"ok": False, "exe": exe, "reason": str(e)}
 
 
+def _run_tts_coro(factory):
+    """Ejecuta la corutina de síntesis aunque ya haya un event loop corriendo
+    (el executor de ALEXIS corre dentro del loop; `asyncio.run()` directo crashea)."""
+    import asyncio
+
+    try:
+        return asyncio.run(factory())
+    except RuntimeError:
+        import threading
+
+        box = {}
+
+        def _runner():
+            box["r"] = asyncio.run(factory())
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+        return box["r"]
+
+
 def tts_speak(text: str, provider=None) -> dict:
     if not (text or "").strip():
         return {"ok": False, "reason": "sin texto"}
@@ -281,9 +304,7 @@ def tts_speak(text: str, provider=None) -> dict:
 
     p = provider if provider is not None else get_tts_provider()
     try:
-        import asyncio
-
-        result = asyncio.run(p.synthesize(text))
+        result = _run_tts_coro(lambda: p.synthesize(text))
         return {
             "ok": result.ok,
             "text": text,

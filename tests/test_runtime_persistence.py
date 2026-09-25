@@ -26,8 +26,7 @@ from alexis.storage.repositories import (
 from alexis.verification import BasicVerifier
 
 
-def _runtime():
-    db = Database()
+def _runtime(db):
     return db, AlexisRuntime(
         planner=Planner(),
         policy=PolicyEngine(),
@@ -44,10 +43,8 @@ def _runtime():
 
 
 @pytest.mark.asyncio
-async def test_runtime_completes_and_persists_across_restart():
-    db, runtime = _runtime()
-    await db.open()
-    await db.migrate()
+async def test_runtime_completes_and_persists_across_restart(db, test_dsn):
+    runtime = _runtime(db)[1]
 
     mission = MissionEngine().create(
         "Persistir y recuperar",
@@ -63,7 +60,7 @@ async def test_runtime_completes_and_persists_across_restart():
 
     await db.close()
 
-    db2 = Database()
+    db2 = Database(test_dsn)
     await db2.open()
     recovered = await MissionRepository(db2).get(mission.id)
     assert recovered is not None
@@ -82,10 +79,8 @@ async def test_runtime_completes_and_persists_across_restart():
 
 
 @pytest.mark.asyncio
-async def test_runtime_persists_waiting_approval():
-    db, runtime = _runtime()
-    await db.open()
-    await db.migrate()
+async def test_runtime_persists_waiting_approval(db, test_dsn):
+    runtime = _runtime(db)[1]
 
     mission = MissionEngine().create(
         "Requerirá aprobación",
@@ -100,7 +95,7 @@ async def test_runtime_persists_waiting_approval():
 
     await db.close()
 
-    db2 = Database()
+    db2 = Database(test_dsn)
     await db2.open()
     recovered = await MissionRepository(db2).get(mission.id)
     await db2.close()

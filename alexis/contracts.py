@@ -22,6 +22,7 @@ class MissionState(str, Enum):
     RUNNING = "running"
     VERIFYING = "verifying"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_CLARIFICATION = "waiting_clarification"
     BLOCKED = "blocked"
     RECOVERING = "recovering"
     COMPLETED = "completed"
@@ -79,6 +80,10 @@ class PlanStep:
     verification: str | None = None
     proposed_by: str | None = None
     rationale: str | None = None
+    # F2.5 — ModelPlanner: argumentos que el plan propone para la capability y qué
+    # se espera que ocurra (criterio de éxito del paso). Al final, retrocompatible.
+    args: dict[str, Any] = field(default_factory=dict)
+    expected: str | None = None
 
 
 @dataclass

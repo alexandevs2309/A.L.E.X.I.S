@@ -50,18 +50,37 @@ class AutonomyGate:
         level = mission.envelope.autonomy
         capability = getattr(step, "capability", None)
 
-        if action in READ_ONLY_ACTIONS:
-            return GateDecision(
-                True,
-                f"({level.value}): paso sin efectos de escritura ({action})",
-                capability=capability,
-            )
-
         base = policy.evaluate(mission, step)
         if not base.allowed:
             return GateDecision(
                 False,
                 f"({level.value}): no ejecuto '{action}' — {base.reason}",
+                matched_rule=base.matched_rule,
+                capability=capability,
+            )
+
+        # La exigencia de la Policy es vinculante en cualquier nivel de autonomía (H3):
+        # un paso no puede anularla. El flag del paso, en cambio, es asesor y lo
+        # interpreta el nivel: en ASSIST/SUPERVISED exige aprobación; en AUTONOMOUS
+        # manda el envelope (`approval_required`), que es la declaración del usuario.
+        policy_required = bool(base.requires_approval)
+        required = bool(step.requires_approval or policy_required)
+
+        if action in READ_ONLY_ACTIONS:
+            # Ser read-only NO es un permiso: la policy se consulta igual. Lo único que
+            # la lectura no compra es saltarse una aprobación que la policy o el propio
+            # paso exigen (p. ej. una capability crítica marcada como tal).
+            if required:
+                return GateDecision(
+                    True,
+                    f"({level.value}): paso de lectura que sí requiere aprobación — {base.reason}",
+                    requires_approval=True,
+                    matched_rule=base.matched_rule,
+                    capability=capability,
+                )
+            return GateDecision(
+                True,
+                f"({level.value}): paso sin efectos de escritura ({action}) — {base.reason}",
                 matched_rule=base.matched_rule,
                 capability=capability,
             )
@@ -93,31 +112,43 @@ class AutonomyGate:
                     requires_approval=True,
                     capability=capability,
                 )
+            if policy_required:
+                return GateDecision(
+                    True,
+                    f"({level.value}): la policy exige aprobación para este paso "
+                    f"({base.reason}; matched_rule={base.matched_rule})",
+                    requires_approval=True,
+                    matched_rule=base.matched_rule,
+                    capability=capability,
+                )
             return GateDecision(
                 True,
-                f"(autonomous): ejecuto sola dentro del envelope (intent={intent or action}, "
+                f"({level.value}): ejecuto sola dentro del envelope (intent={intent or action}, "
                 f"confianza={score:.2f} ≥ umbral={self.threshold:.2f})",
                 capability=capability,
             )
 
         if level is AutonomyLevel.ASSIST:
-            if action in WRITE_ACTIONS:
+            if action in WRITE_ACTIONS or required:
                 return GateDecision(
                     True,
                     "(assist): propongo el efecto, no lo ejecuto sin tu aprobación "
-                    f"(intent={intent or action})",
+                    f"(intent={intent or action}" + (f"; {base.reason}" if required else "") + ")",
                     requires_approval=True,
+                    matched_rule=base.matched_rule,
                     capability=capability,
                 )
             return GateDecision(
                 True, f"(assist): ejecuto automáticamente lo read-only ({action})", capability=capability
             )
 
-        if step.requires_approval:
+        if required:
             return GateDecision(
                 True,
-                f"(supervised): efecto delicado del plan → requiere aprobación (confianza={score:.2f})",
+                f"({level.value}): requiere aprobación (paso={step.requires_approval}, "
+                f"policy={base.requires_approval}; {base.reason})",
                 requires_approval=True,
+                matched_rule=base.matched_rule,
                 capability=capability,
             )
         return GateDecision(

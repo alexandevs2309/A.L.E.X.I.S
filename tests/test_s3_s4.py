@@ -32,7 +32,6 @@ from alexis.learning.system import ExperienceLearner
 from alexis.memory.store import InMemoryMemory
 from alexis.security.policy import PolicyEngine
 from alexis.security.sandbox import SandboxRunner
-from alexis.storage.db import Database
 from alexis.storage.repositories import (
     AuditRepository,
     CheckpointRepository,
@@ -47,10 +46,9 @@ from alexis.tools.registry import ToolRegistry
 from alexis.verification import FilesystemVerifier
 
 
-def _build():
+def _build(db):
     ws = pathlib.Path(tempfile.mkdtemp())
     (ws / "reporte.txt").write_text("informe de prueba\nlinea 2\n", encoding="utf-8")
-    db = Database()
     tools = ToolRegistry()
     tools.register_all(build_filesystem_tools(ws))
     sandbox = SandboxRunner(ws)
@@ -75,12 +73,12 @@ def _build():
         event_bus=runtime.events,
     )
     runtime.task_runner = runner
-    return db, runtime, runner, ws
+    return runtime, runner, ws
 
 
 @pytest.mark.asyncio
-async def test_read_mission_real_tasks_and_completion():
-    db, runtime, runner, ws = _build()
+async def test_read_mission_real_tasks_and_completion(db):
+    runtime, runner, ws = _build(db)
     await db.open()
     await db.migrate()
 
@@ -113,8 +111,8 @@ async def test_read_mission_real_tasks_and_completion():
 
 
 @pytest.mark.asyncio
-async def test_write_intent_runs_auto_and_creates():
-    db, runtime, runner, ws = _build()
+async def test_write_intent_runs_auto_and_creates(db):
+    runtime, runner, ws = _build(db)
     await db.open()
     await db.migrate()
 
@@ -145,8 +143,8 @@ async def test_write_intent_runs_auto_and_creates():
 
 
 @pytest.mark.asyncio
-async def test_destructive_intent_requires_approval_then_removes():
-    db, runtime, runner, ws = _build()
+async def test_destructive_intent_requires_approval_then_removes(db):
+    runtime, runner, ws = _build(db)
     await db.open()
     await db.migrate()
 
@@ -187,8 +185,8 @@ async def test_destructive_intent_requires_approval_then_removes():
 
 
 @pytest.mark.asyncio
-async def test_unsupported_intent_fails_honest():
-    db, runtime, runner, ws = _build()
+async def test_unsupported_intent_fails_honest(db):
+    runtime, runner, ws = _build(db)
     await db.open()
     await db.migrate()
 
@@ -213,8 +211,8 @@ async def test_unsupported_intent_fails_honest():
 
 
 @pytest.mark.asyncio
-async def test_read_intent_runs_without_approval():
-    db, runtime, runner, ws = _build()
+async def test_read_intent_runs_without_approval(db):
+    runtime, runner, ws = _build(db)
     await db.open()
     await db.migrate()
 
@@ -235,8 +233,8 @@ async def test_read_intent_runs_without_approval():
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_resumes_not_restarts():
-    db, runtime, runner, ws = _build()
+async def test_checkpoint_resumes_not_restarts(db):
+    runtime, runner, ws = _build(db)
     await db.open()
     await db.migrate()
 
@@ -266,8 +264,8 @@ async def test_checkpoint_resumes_not_restarts():
 
 
 @pytest.mark.asyncio
-async def test_scheduler_recovers_stale_leases():
-    db, runtime, runner, ws = _build()
+async def test_scheduler_recovers_stale_leases(db):
+    runtime, runner, ws = _build(db)
     await db.open()
     await db.migrate()
 

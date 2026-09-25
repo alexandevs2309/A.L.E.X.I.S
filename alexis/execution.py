@@ -1,8 +1,12 @@
+import asyncio
+import time
+import typing
+
 from alexis.contracts import ExecutionResult, Observation
-from alexis.models import ModelRequest, ModelRouter, ModelTask, build_router_from_config
+from alexis.models import ModelRequest, ModelRouter, ModelTask
 from alexis.models.config import ModelConfig
 from alexis.perception.activation import activation_reply, is_activation_objective
-from alexis.security.sandbox import SandboxRunner
+from alexis.security.sandbox import SandboxError, SandboxRunner
 from alexis.speech.tts import TTSResult, get_tts_provider, synthesize_with_fallback
 from alexis.tools.desktop import (
     chrome_open,
@@ -18,6 +22,18 @@ from alexis.tools.registry import ToolRegistry
 
 ANALYSIS_ACTIONS = {"understand", "analyze", "review"}
 ACTION_TOOL = {"research": "fs.read", "execute": "fs.read", "verify": "fs.stat"}
+
+#: Capabilities que identifican su tool sin ambigüedad. Si el paso la declara, manda la
+#: capability y no la acción: validar `fs.stat` y ejecutar `fs.read` sería incoherente.
+_CAPABILITY_TOOL = {
+    "fs.read": "fs.read",
+    "fs.stat": "fs.stat",
+    "fs.write": "fs.write",
+    "fs.remove": "fs.remove",
+}
+
+#: Capabilities cuyo `path` vive dentro del sandbox del proyecto.
+_SANDBOX_CAPABILITY_PREFIXES = ("fs.", "research.", "verification.")
 
 _DESKTOP_HOSTS = {
     "chrome.open_url": lambda a: chrome_open(url=a.get("url") or ""),
@@ -71,6 +87,7 @@ class SandboxExecutor:
         default_path: str = "README.txt",
         desktop_delegate: str | None = None,
         model_router: ModelRouter | None = None,
+        voice_mode_provider: typing.Callable[[], bool] | None = None,
     ):
         self.tools = tools
         self.sandbox = sandbox
@@ -80,22 +97,22 @@ class SandboxExecutor:
         #: Router de modelos (Gemini/Ollama) para generar la respuesta hablada.
         #: ``None`` = se construye desde el entorno; sin provider REAL se cae a frases fijas.
         self.model_router = model_router
+        #: Modo voz del demo (como el toggle de ChatGPT). ``None`` = siempre voz.
+        #: Si devuelve False, el `respond` NO sintetiza audio (modo solo texto).
+        self.voice_mode_provider = voice_mode_provider
 
     async def _spoken_reply(self, mission, desktop) -> str:
-        """Respuesta hablada generada por el Model Router si hay un provider REAL.
+        """Respuesta hablada generada por un modelo REAL (Gemini/Ollama).
 
-        Devuelve ``""`` cuando no hay provider (o sólo contingencia) para que el
-        caller caiga a las frases deterministas: la contingencia (eco) NUNCA se
-        presenta como si pensara. El saludo de activación (palmada) también es
-        fijo a propósito, para que ALEXIS salude igual siempre.
+        En producción (sin ``model_router`` inyectado) se lanzan los providers en
+        paralelo y gana el primero que devuelva texto válido: ALEXIS responde con la
+        latencia del proveedor más rápido en cada momento. Devuelve ``""`` cuando
+        ninguno responde para que el caller caiga a las frases honestas: la
+        contingencia (eco) NUNCA se presenta como si pensara. El saludo de activación
+        (palmada) es fijo a propósito.
         """
         objective = mission.goal.objective
         if desktop is None and is_activation_objective(objective):
-            return ""
-        router = self.model_router
-        if router is None:
-            router = build_router_from_config(ModelConfig.from_env())
-        if not router.providers():
             return ""
         prompt = f"Pedido del usuario: {objective!r}."
         if desktop is not None:
@@ -106,30 +123,107 @@ class SandboxExecutor:
                 + "."
             )
         system = (
-            "Eres ALEXIS, un asistente de voz en español. "
-            "Tu respuesta se convertirá en voz: escribe UNA sola frase breve, natural "
-            "y conversacional (como la dirías en voz alta), sin markdown, sin listas, "
-            "sin emojis y sin inventar acciones que no se ejecutaron."
+            "Eres ALEXIS, un asistente de voz en español. Responde lo que se te pida "
+            "con la información útil y concreta en UNA o DOS frases breves (máximo 45 "
+            "palabras), natural y conversacional, sin markdown, sin listas, sin emojis, "
+            "terminando con punto, y sin inventar acciones que no se ejecutaron."
         )
-        try:
-            response = await router.complete(
-                ModelRequest(
-                    task=ModelTask.SYNTHESIZE,
-                    system=system,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=80,
-                    temperature=0.7,
-                    deadline_ms=15000,
-                )
-            )
-        except Exception:  # noqa: BLE001 — la voz nunca debe fallar por el modelo
-            return ""
-        if not response.is_real or response.error or not (response.text or "").strip():
-            return ""
-        spoken = " ".join(response.text.split())[:300].strip().strip('"“”')
-        return spoken
+        request = ModelRequest(
+            task=ModelTask.SYNTHESIZE,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=70,
+            temperature=0.7,
+            deadline_ms=20000,
+        )
+        if self.model_router is not None:
+            if not self.model_router.providers():
+                return ""
+            try:
+                response = await self.model_router.complete(request)
+            except Exception:  # noqa: BLE001 — la voz nunca debe fallar por el modelo
+                return ""
+            return self._valid_text(response)
+        best = ""
+        for _ in range(2):
+            try:
+                text = await self._race_providers(ModelConfig.from_env().build_providers(), request)
+            except Exception:  # noqa: BLE001 — red/tiempos nunca tumban la voz
+                break
+            if not text:
+                break
+            best = text
+            if self._complete_enough(text):
+                return text
+        return self._repair_punctuation(best)
 
-    async def _run_tool(self, mission, step, tool_name: str, extra: dict | None = None) -> ExecutionResult:
+    @staticmethod
+    def _valid_text(response) -> str:
+        if not response or not response.is_real or response.error or not (response.text or "").strip():
+            return ""
+        return " ".join(response.text.split())[:500].strip().strip('"“”')
+
+    @staticmethod
+    def _complete_enough(text: str) -> bool:
+        return len(text) >= 30 and text.rstrip().endswith((".", "!", "?", "…", "”", '"', ")"))
+
+    @staticmethod
+    def _repair_punctuation(text: str) -> str:
+        """Cierra la respuesta si el modelo se quedó a medio camino (sin puntuación)."""
+        t = " ".join(text.split()).strip()
+        if not t:
+            return ""
+        last = t[-1]
+        if last in ".!?:…\"”¿¡'":
+            return t
+        idx = max(t.rfind("."), t.rfind("!"), t.rfind("?"))
+        if idx > len(t) * 0.4:
+            t = t[: idx + 1].strip()
+        if t and t[-1] not in ".!?":
+            t += "."
+        return t
+
+    async def _race_providers(self, providers: list, request: ModelRequest) -> str:
+        """Lanza todos los providers a la vez; devuelve el primer texto REAL válido."""
+        usable = [p for p in providers if getattr(p, "available", False)]
+        if not usable:
+            return ""
+        per_provider_timeout = max(request.deadline_ms, 1000) / 1000.0
+        tasks = {
+            asyncio.create_task(
+                asyncio.wait_for(p.complete(request), timeout=per_provider_timeout)
+            )
+            for p in usable
+        }
+        wall = time.monotonic() + per_provider_timeout + 1.0
+        pending = set(tasks)
+        try:
+            while pending:
+                left = wall - time.monotonic()
+                if left <= 0:
+                    break
+                done, pending = await asyncio.wait(
+                    pending, timeout=left, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    try:
+                        text = self._valid_text(task.result())
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if text:
+                        return text
+        finally:
+            for task in pending:
+                task.cancel()
+        return ""
+
+    async def _run_tool(self, mission, step, tool_name: str, args: dict | None = None) -> ExecutionResult:
+        """Ejecuta una tool con arguments ya decididos.
+
+        `args` es lo que recibe la herramienta, sin fusiones posteriores. Si no se pasa,
+        la fuente es `PlanStep.args` (H2) y, en su defecto, el path legacy derivado del
+        objetivo. Nunca se mezclan ambos: no hay un segundo origen de verdad.
+        """
         try:
             tool = self.tools.get(tool_name)
         except KeyError:
@@ -138,16 +232,20 @@ class SandboxExecutor:
                 error=f"no hay tool registrada '{tool_name}'",
                 observations=[Observation(f"tool.{tool_name}", {"status": "missing"}, trusted=True)],
             )
-        path = extract_workspace_path(mission.goal.objective) or self.default_path
-        args = {"path": path}
-        if extra:
-            args.update(extra)
+        final_args = dict(args) if args is not None else self._step_args(mission, step)
+        denial = self._perimeter_denial(step, tool_name, final_args)
+        if denial:
+            return ExecutionResult(
+                success=False,
+                error=denial,
+                observations=[Observation(f"tool.{tool_name}", {"status": "out_of_perimeter"}, trusted=True)],
+            )
         try:
-            output = await tool.handler(args)
+            output = await tool.handler(final_args)
         except Exception as exc:  # noqa: BLE001 — el error debe terminar el paso, no la misión
             output = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         ok = isinstance(output, dict) and output.get("ok") is True
-        observation = Observation(f"tool.{tool_name}", output, trusted=True)
+        observation = Observation(f"tool.{tool_name}", {"args": final_args, **output} if isinstance(output, dict) else output, trusted=True)
         if not ok:
             return ExecutionResult(
                 success=False,
@@ -156,6 +254,43 @@ class SandboxExecutor:
                 observations=[observation],
             )
         return ExecutionResult(success=True, output=output, observations=[observation])
+
+    def _step_args(self, mission, step, *, allow_default: bool = True) -> dict:
+        """Argumentos del paso. `PlanStep.args` es la fuente de verdad (H2).
+
+        Sin args en el paso (planner por reglas, camino legacy) se mantiene la
+        derivación histórica desde el objetivo. `allow_default=False` para operaciones
+        destructivas: si el objetivo no nombra un archivo, se falla con honestidad en
+        lugar de apuntar a un path por defecto.
+        """
+        validated = dict(getattr(step, "args", {}) or {})
+        if validated:
+            return validated
+        path = extract_workspace_path(mission.goal.objective)
+        if path:
+            return {"path": path}
+        return {"path": self.default_path} if allow_default else {}
+
+    def _perimeter_denial(self, step, tool_name: str, args: dict) -> str | None:
+        """Última frontera: el path que se va a ejecutar debe estar en el perímetro.
+
+        La validación del plan ya avisa de esto con un motivo legible; esto cubre el
+        caso en que los args cambian DESPUÉS de validarse: la herramienta ni se llama.
+        """
+        capability = getattr(step, "capability", None) or ""
+        if not capability.startswith(_SANDBOX_CAPABILITY_PREFIXES):
+            return None
+        path = args.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        try:
+            self.sandbox.resolve_in_workspace(path)
+        except SandboxError as exc:
+            return (
+                f"el paso '{getattr(step, 'id', '?')}' pide '{path}', que está fuera del "
+                f"perímetro autorizado: {exc}"
+            )
+        return None
 
     async def _dispatch_desktop(self, mission, step, desktop: tuple[str, dict]) -> ExecutionResult:
         tool_name, extra = desktop
@@ -207,7 +342,13 @@ class SandboxExecutor:
         except Exception as exc:  # noqa: BLE001 — razones honestas, sin fingir éxito
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    async def execute(self, mission, step) -> ExecutionResult:
+    async def execute(self, mission, step, *, tool_name: str | None = None) -> ExecutionResult:
+        """Ejecuta un paso.
+
+        `tool_name` es el override que el Cognitive Runtime puede proponer al replanear
+        (misma acción, tool distinta). Por defecto es `None`: el comportamiento legacy
+        (acción → tool por `ACTION_TOOL` + intención del objetivo) no cambia.
+        """
         action = step.action
         if action == "respond":
             desktop = desktop_tool_for(mission.goal.objective)
@@ -222,7 +363,18 @@ class SandboxExecutor:
                     )
                 else:
                     message = activation_reply(mission.goal.objective)
-            tts: TTSResult = await synthesize_with_fallback(message, provider=get_tts_provider())
+            voice_on = self.voice_mode_provider() if self.voice_mode_provider is not None else True
+            if voice_on:
+                tts: TTSResult = await synthesize_with_fallback(message, provider=get_tts_provider())
+            else:
+                tts = TTSResult(
+                    ok=False,
+                    provider="voice-mode-off",
+                    message="modo voz desactivado (respuesta solo en texto)",
+                    path=None,
+                    format="none",
+                    error="voice_mode_off",
+                )
             return ExecutionResult(
                 success=True,
                 output={
@@ -258,33 +410,41 @@ class SandboxExecutor:
 
         intent = classify_objective_intent(mission.goal.objective)
         if action in ANALYSIS_ACTIONS:
-            path = extract_workspace_path(mission.goal.objective) or self.default_path
             return ExecutionResult(
                 success=True,
                 output={
                     "analysis": step.description,
                     "objective": mission.goal.objective,
-                    "target_path": path,
+                    "target_path": self._step_args(mission, step).get("path"),
                     "constraints": mission.goal.constraints,
                     "intent": intent,
                 },
                 observations=[
                     Observation(
                         source="planner",
-                        content={"step": step.id, "analysis": step.description, "target_path": path, "intent": intent},
+                        content={
+                            "step": step.id,
+                            "analysis": step.description,
+                            "target_path": self._step_args(mission, step).get("path"),
+                            "intent": intent,
+                        },
                         trusted=True,
                     )
                 ],
             )
 
+        override = tool_name
+        if override is None:
+            override = _CAPABILITY_TOOL.get(getattr(step, "capability", None) or "")
         if action == "research":
-            tool_name = "fs.stat" if intent in {"write", "destructive"} else "fs.read"
+            resolved_tool = "fs.stat" if intent in {"write", "destructive"} else "fs.read"
         elif action == "execute":
-            tool_name = "fs.remove" if intent == "destructive" else ("fs.write" if intent == "write" else "fs.read")
+            resolved_tool = "fs.remove" if intent == "destructive" else ("fs.write" if intent == "write" else "fs.read")
         else:
-            tool_name = self.action_map.get(action)
+            resolved_tool = self.action_map.get(action)
+        tool_name = override or resolved_tool
 
-        if intent == "unsupported" and action == "execute":
+        if intent == "unsupported" and action == "execute" and override is None:
             return ExecutionResult(
                 success=False,
                 error=(
@@ -304,22 +464,19 @@ class SandboxExecutor:
             )
 
         if tool_name == "fs.write":
-            path = extract_workspace_path(mission.goal.objective) or self.default_path
-            return await self._run_tool(
-                mission,
-                step,
-                tool_name,
-                {"path": path, "content": write_placeholder_content(mission.goal.objective), "overwrite": True},
-            )
+            args = self._step_args(mission, step)
+            args.setdefault("content", write_placeholder_content(mission.goal.objective))
+            args.setdefault("overwrite", True)
+            return await self._run_tool(mission, step, tool_name, args)
 
         if tool_name == "fs.remove":
-            path = extract_workspace_path(mission.goal.objective)
-            if not path:
+            args = self._step_args(mission, step, allow_default=False)
+            if not args.get("path"):
                 return ExecutionResult(
                     success=False,
                     error="No nombraste el archivo a borrar (ej.: «borra el archivo notas.txt»).",
                     observations=[Observation("executor", {"status": "no_path", "action": action}, trusted=True)],
                 )
-            return await self._run_tool(mission, step, tool_name)
+            return await self._run_tool(mission, step, tool_name, args)
 
         return await self._run_tool(mission, step, tool_name)

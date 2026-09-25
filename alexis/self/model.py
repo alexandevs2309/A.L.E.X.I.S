@@ -47,10 +47,14 @@ def _tool_names(tools):
 
 
 class SelfModel:
-    def __init__(self, *, identity=None, capabilities=None, resources=None):
+    def __init__(self, *, identity=None, capabilities=None, available=None, resources=None):
         self.identity = dict(identity or DEFAULT_IDENTITY)
         self.capabilities = list(capabilities or [])  # catálogo total (incl. no disponibles)
-        self.available = list(capabilities or [])  # disponibles (habilitadas por política)
+        #: Lo que ALEXIS puede hacer DE VERDAD. Si no se declara, se supone todo el
+        #: catálogo (comportamiento histórico), pero un runtime que conoce sus
+        #: capabilities debe pasar la lista habilitada: afirmar que tiene una
+        #: capacidad `missing` es exactamente la deshonestidad que este modelo evita.
+        self.available = list(available if available is not None else (capabilities or []))
         self.resources = dict(resources or {})
         self.current_state = "idle"
         self.transient = {"listening": False, "speaking": False, "reflecting": False, "flag": None}

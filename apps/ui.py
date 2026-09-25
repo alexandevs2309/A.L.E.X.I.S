@@ -35,6 +35,12 @@ PAGE = """<!doctype html>
   #status { font-size:11px; letter-spacing:2px; text-transform:uppercase; color:var(--faint); }
   .sys-btn { background:none; border:1px solid var(--line); color:var(--dim); font-size:11px; letter-spacing:1px; padding:6px 10px; border-radius:6px; cursor:pointer; }
   .sys-btn:hover { border-color:var(--faint); color:var(--ink); }
+  .vm { display:inline-flex; align-items:center; gap:7px; }
+  .vm .dot { width:8px; height:8px; border-radius:50%; background:var(--faint); transition:background .2s; }
+  .vm button { background:none; border:1px solid var(--line); color:var(--dim); font-size:11px; letter-spacing:1px; padding:6px 10px; border-radius:6px; cursor:pointer; }
+  .vm button:hover { border-color:var(--faint); color:var(--ink); }
+  .vm.on .dot { background:var(--ok); box-shadow:0 0 8px var(--ok); }
+  .vm.on button { border-color:rgba(122,216,168,.55); color:var(--ok); }
   #thread { display:flex; flex-direction:column; gap:10px; margin-bottom:20px; }
   .turn { max-width:88%; padding:10px 14px; border-radius:10px; font-size:14.5px; line-height:1.55; }
   .turn.human { align-self:flex-end; background:#16233b; border:1px solid var(--line); }
@@ -122,6 +128,7 @@ PAGE = """<!doctype html>
     </div>
     <div class="hdr-right">
       <span id="status">Inactivo</span>
+      <span id="vmode" class="vm" data-on="0" title="Modo voz: off = solo texto. Da una palmada o activa el toggle para hablar"><span class="dot"></span><button id="voice-toggle" type="button">VOZ</button></span>
       <button class="sys-btn" id="sys-toggle" type="button">Sistema</button>
     </div>
   </header>
@@ -289,6 +296,7 @@ async function refresh() {
   setStatus(p.status);
   composerVisible(["idle", "completed", "cancelled", "error"].includes(ctx));
   activityBox(p, s.mission);
+  setVoiceModeUI(!!s.voice_mode);
   $("rawjson").textContent = JSON.stringify(s, null, 2);
 }
 setInterval(refresh, 1500);
@@ -332,6 +340,35 @@ $("form").addEventListener("submit", async (e) => {
 $("sys-toggle").addEventListener("click", () => {
   $("sys").open = !$("sys").open;
 });
+
+function setVoiceModeUI(on) {
+  const el = $("vmode");
+  el.dataset.on = on ? "1" : "0";
+  el.classList.toggle("on", !!on);
+  el.title = on
+    ? "Modo voz: on = escucho y respondo hablando (lo activa una palmada o el toggle)"
+    : "Modo voz: off = respondo solo en texto (da una palmada para activarlo)";
+}
+async function loadVoiceMode() {
+  try {
+    const r = await (await fetch("/voice-mode")).json();
+    setVoiceModeUI(!!r.enabled);
+  } catch {}
+}
+$("voice-toggle").addEventListener("click", async () => {
+  const target = $("vmode").dataset.on !== "1";
+  try {
+    const r = await fetch("/voice-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: target }),
+    });
+    const d = await r.json();
+    setVoiceModeUI(!!d.enabled);
+    say(d.enabled ? "Modo voz activado. Escucho y respondo por voz." : "Modo voz desactivado. Respondo solo en texto. Da una palmada para volver a hablar.");
+  } catch {}
+});
+loadVoiceMode();
 
 const companion = document.getElementById("companion");
 const SPEED = { idle:.9, thinking:.9, researching:1.25, executing:1.7, waiting_approval:.55, completed:1.1, cancelled:.7, error:.7 };

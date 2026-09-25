@@ -106,6 +106,28 @@ class TestTtsSpeak:
         result = tts_speak("", provider=self._FakeProvider())
         assert result["ok"] is False
 
+    @pytest.mark.asyncio
+    async def test_speak_works_inside_running_event_loop(self):
+        # Regresión: dentro del loop de ALEXIS, `asyncio.run` crasheaba con
+        # "cannot be called from a running event loop" y la misión fallaba.
+        result = tts_speak("hola", provider=self._FakeProvider())
+        assert result["ok"] is True
+        assert result["path"] == "/caché/fake.wav"
+
+
+class TestDesktopRoutePrecision:
+    def test_plain_dime_is_not_tts_speak(self):
+        # Regresión: "revisa los archivos del workspace y dime cuántos hay"
+        # terminaba en tts.speak (crash) en vez de la ruta de filesystem.
+        assert desktop_intent("revisa los archivos del workspace y dime cuántos hay") is None
+        assert desktop_intent("dime cuál es la capital de Francia") is None
+        assert desktop_intent("dime cómo calculas los precios") is None
+
+    def test_explicit_speech_markers_still_trigger_tts(self):
+        assert desktop_intent("dime hola en voz alta") == ("tts.speak", {"text": "hola"})
+        assert desktop_intent("pronuncia el número cinco por voz") == ("tts.speak", {"text": "el número cinco"})
+        assert desktop_intent("repite diez en voz alta") == ("tts.speak", {"text": "diez"})
+
 
 class TestHandlersAsync:
     async def test_handlers_are_callable_and_honest(self):
@@ -298,6 +320,20 @@ class TestExecutorRespondWithModel:
         result = await executor.execute(mission, step)
         assert result.output["message"] == desktop_reply("claude.open")
 
+    async def test_respond_keeps_text_but_skips_tts_when_voice_mode_off(self, tmp_path):
+        executor = SandboxExecutor(
+            tools=ToolRegistry(),
+            sandbox=SandboxRunner(workspace=tmp_path),
+            model_router=_FakeLLMRouter("Claro, abrí la página."),
+            voice_mode_provider=lambda: False,
+        )
+        mission = await _desktop_mission("abre claude code")
+        step = PlanStep("respond", "confirma", "respond", RiskLevel.LOW)
+        result = await executor.execute(mission, step)
+        assert result.output["message"] == "Claro, abrí la página."
+        assert result.output["tts"]["ok"] is False
+        assert result.output["tts"]["provider"] == "voice-mode-off"
+
     async def test_activation_greeting_stays_canonical(self, tmp_path):
         from alexis.perception.activation import ACTIVATION_MARKER
 
@@ -318,3 +354,68 @@ class TestExecutorRespondWithModel:
         step = PlanStep("respond", "saluda", "respond", RiskLevel.LOW)
         result = await executor.execute(mission, step)
         assert "¿En qué te ayudo" in result.output["message"]
+
+
+class _StubProvider:
+    def __init__(self, available=True, delay=0.0, text=None):
+        self.available = available
+        self.delay = delay
+        self.text = text
+
+    async def complete(self, request):
+        from alexis.models import ModelResponse
+
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.text is None:
+            return ModelResponse(text="   ")
+        return ModelResponse(text=self.text)
+
+
+class TestRaceProviders:
+    async def _executor(self, tmp_path):
+        return SandboxExecutor(tools=ToolRegistry(), sandbox=SandboxRunner(workspace=tmp_path))
+
+    async def _request(self):
+        from alexis.models import ModelRequest, ModelTask
+
+        return ModelRequest(
+            task=ModelTask.SYNTHESIZE,
+            system="sistema",
+            messages=[{"role": "user", "content": "pregunta"}],
+            max_tokens=50,
+            temperature=0.7,
+            deadline_ms=3000,
+        )
+
+    async def test_first_valid_wins_even_if_not_first_to_finish(self, tmp_path):
+        executor = await self._executor(tmp_path)
+        text = await executor._race_providers(
+            [_StubProvider(delay=0.01, text=None), _StubProvider(delay=0.05, text="ganó"), _StubProvider(delay=0.09, text="nunca")],
+            await self._request(),
+        )
+        assert text == "ganó"
+
+    async def test_ignores_empty_responses_and_keeps_waiting(self, tmp_path):
+        executor = await self._executor(tmp_path)
+        text = await executor._race_providers(
+            [_StubProvider(delay=0.01, text=None), _StubProvider(delay=0.06, text="respuesta fiable")],
+            await self._request(),
+        )
+        assert text == "respuesta fiable"
+
+    async def test_unavailable_providers_are_skipped(self, tmp_path):
+        executor = await self._executor(tmp_path)
+        text = await executor._race_providers(
+            [_StubProvider(available=False, text="no"), _StubProvider(delay=0.02, text="local ok")],
+            await self._request(),
+        )
+        assert text == "local ok"
+
+    async def test_all_empty_yields_blank(self, tmp_path):
+        executor = await self._executor(tmp_path)
+        text = await executor._race_providers(
+            [_StubProvider(delay=0.01, text=None), _StubProvider(delay=0.02, text=None)],
+            await self._request(),
+        )
+        assert text == ""

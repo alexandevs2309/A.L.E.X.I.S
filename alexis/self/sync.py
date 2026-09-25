@@ -45,11 +45,56 @@ class SelfModelSync:
                 self.model.note_self_observation(f"política evaluó paso '{payload.get('step')}' → regla {rule}")
         elif topic == "mission.replanning":
             self.model.set_transient(listening=False, speaking=False, reflecting=False, flag="replanning")
+        elif topic == "cognition.step":
+            self._apply_cognition(payload if isinstance(payload, dict) else {})
         elif topic == "mission.approval_required":
             self.model.set_transient(listening=False, speaking=False, reflecting=False, flag=None)
         elif topic.startswith("mission.") or topic == "presence.idle":
             self.model.set_transient(listening=False, speaking=False, reflecting=False, flag=None)
         self.model.update(self.resolve_mission(), current_action=self._current_action, **self.aux())
+
+    def _apply_cognition(self, payload: dict):
+        """El Self Model también refleja lo que hizo el bucle cognitivo.
+
+        No inventa actividad: solo refleja decisiones, fallos, diagnósticos y
+        procedencia real que ya vienen en el evento `cognition.step`.
+        """
+        action = payload.get("action")
+        decision = payload.get("decision") or {}
+        step = decision.get("step_id")
+        flag = None
+
+        if step:
+            self._current_action = step
+        if action == "replan":
+            flag = "replanning"
+            self.model.note_self_observation(
+                f"cambié de estrategia tras: {payload.get('diagnosis') or payload.get('error') or 'un fallo'}"
+            )
+        elif action in ("ask_user", "abort", "finish", "verify"):
+            if action == "ask_user":
+                self.model.note_self_observation(f"pregunté al usuario: {payload.get('question')}")
+            elif action == "abort":
+                self.model.note_self_observation(f"abandoné sin afirmar éxito: {decision.get('rationale')}")
+            elif action == "finish":
+                self.model.note_self_observation("terminé con verificación pasada")
+        elif payload.get("success") is False:
+            flag = "recovering"
+            self.model.note_self_observation(
+                f"el paso '{step or 'cognitivo'}' falló: {payload.get('error')}"
+            )
+        elif payload.get("success") is True and step:
+            self.model.note_self_observation(f"el paso '{step}' terminó bien")
+
+        outcome = decision.get("cognition_outcome")
+        if outcome and outcome not in ("real", "none"):
+            self.model.note_self_observation(
+                f"decidí sin razonamiento real del modelo (procedencia: {outcome})"
+            )
+
+        self.model.set_transient(
+            listening=False, speaking=False, reflecting=False, flag=flag
+        )
 
     def attach(self, bus, loop):
         self._sub = bus.subscribe_async()

@@ -168,7 +168,7 @@ async def test_worker_runs_fifo_serially():
 # ----------------------------------------------------------------------
 
 
-def _build_with_gate(gate):
+def _build_with_gate(gate, db):
     from alexis.autonomy.task_runner import TaskRunner
     from alexis.core.runtime import AlexisRuntime
     from alexis.events.bus import EventBus
@@ -177,7 +177,6 @@ def _build_with_gate(gate):
     from alexis.memory.store import InMemoryMemory
     from alexis.security.policy import PolicyEngine
     from alexis.security.sandbox import SandboxRunner
-    from alexis.storage.db import Database
     from alexis.storage.repositories import (
         AuditRepository,
         CheckpointRepository,
@@ -192,7 +191,6 @@ def _build_with_gate(gate):
     from alexis.verification import FilesystemVerifier
 
     ws = pathlib.Path(tempfile.mkdtemp())
-    db = Database()
     tools = ToolRegistry()
     tools.register_all(build_filesystem_tools(ws))
     sandbox = SandboxRunner(ws)
@@ -218,12 +216,12 @@ def _build_with_gate(gate):
         event_bus=runtime.events,
     )
     runtime.task_runner = runner
-    return db, runtime, runner, ws
+    return runtime, runner, ws
 
 
 @NEED_DB
-async def test_autonomous_destructive_runs_within_envelope_alone():
-    db, runtime, runner, ws = _build_with_gate(AutonomyGate())
+async def test_autonomous_destructive_runs_within_envelope_alone(db):
+    runtime, runner, ws = _build_with_gate(AutonomyGate(), db)
     await db.open()
     await db.migrate()
 
@@ -246,8 +244,8 @@ async def test_autonomous_destructive_runs_within_envelope_alone():
 
 
 @NEED_DB
-async def test_autonomous_asks_human_when_destructive_in_approval_required():
-    db, runtime, runner, ws = _build_with_gate(AutonomyGate())
+async def test_autonomous_asks_human_when_destructive_in_approval_required(db):
+    runtime, runner, ws = _build_with_gate(AutonomyGate(), db)
     await db.open()
     await db.migrate()
 
@@ -280,8 +278,8 @@ async def test_autonomous_asks_human_when_destructive_in_approval_required():
 
 
 @NEED_DB
-async def test_plan_persisted_so_it_is_not_replanned_on_restart():
-    db, runtime, runner, ws = _build_with_gate(None)
+async def test_plan_persisted_so_it_is_not_replanned_on_restart(db):
+    runtime, runner, ws = _build_with_gate(None, db)
     await db.open()
     await db.migrate()
     (ws / "reporte.txt").write_text("informe\n", encoding="utf-8")

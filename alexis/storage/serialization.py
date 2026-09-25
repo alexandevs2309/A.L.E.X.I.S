@@ -64,6 +64,9 @@ def mission_from_row(row: dict) -> Mission:
         approval_required=envelope_data["approval_required"],
         max_runtime_minutes=envelope_data["max_runtime_minutes"],
         max_cost_usd=envelope_data["max_cost_usd"],
+        capabilities=envelope_data.get("capabilities") or [],
+        perimeters=envelope_data.get("perimeters") or [],
+        auto_approve=envelope_data.get("auto_approve") or [],
     )
     goal = Goal(
         objective=goal_data["objective"],
