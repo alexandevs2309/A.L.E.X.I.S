@@ -240,8 +240,18 @@ async def test_unblockable_failure_aborts_instead_of_claiming_success():
 
     actions, knowledge, outcome = await _drain(cognitive, mission, plan, limit=20)
 
-    assert knowledge.replans == 2
+    # P0 §12: "a" y "b" comparten capability y args, así que el replan que ofrece "b" es
+    # exactamente la acción que ya falló sin evidencia nueva: el filtro la descarta. Antes
+    # se gastaba un segundo replan en repetirla.
+    #
+    # Lo que este test protege NO cambia: abortar y NO afirmar éxito. Lo que se añade es que
+    # no se repite la acción que falló.
+    assert knowledge.replans >= 1
     assert actions[-1] == "abort"
+    assert knowledge.action_attempts, "los intentos con procedencia deben quedar registrados"
+    fallidas = [a for a in knowledge.action_attempts if not a["success"]]
+    firmas_fallidas = {a["signature"] for a in fallidas}
+    assert firmas_fallidas, "debe constar al menos una acción fallida"
     assert outcome.mission_state is MissionState.FAILED
     assert knowledge.verification_passed is False
     assert knowledge.facts() or all(

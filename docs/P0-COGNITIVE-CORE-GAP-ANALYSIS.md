@@ -47,7 +47,7 @@ uno parcial, porque produce falsos positivos (el sistema *parece* cumplirlo).
 | 9 | Observation | **COMPLETE** | Cada invocación produce `ExecutionResult` estructurado, evento en el log, hecho en WorldModel y `Evaluation` que vuelve al loop. |
 | 10 | Evaluation | **COMPLETE** | Taxonomía de 5 verdicts implementada y en uso: `Verdict` (`SUCCESS`, `PARTIAL_SUCCESS`, `FAILURE`, `INSUFFICIENT_EVIDENCE`, `BLOCKED`) con contrato documentado; los 9 caminos de retorno de `step()` emiten veredicto explícito y `_settle` lo asienta en el `KnowledgeState` (`tests/test_verdict_taxonomy.py`, 29 tests). |
 | 11 | Success Criteria | **COMPLETE** | **Corregido en §5.1.** `MissionEngine.create()` ya no descarta los criterios: acepta `success_criteria` y los persiste en el `Goal` (`alexis/autonomy/mission.py`), y el path con modelo del clasificador los entrega en `apps/demo/server.py:_create_mission_from_intent`. Cubierto por `tests/test_success_criteria_persistence.py` (8 tests, incluido round-trip de persistencia). **Medido desde §5.3 y cerrado en §5.5:** `GoalVerifier` los evalúa con evidencia por criterio, y desde §5.5 la condición de éxito de la misión es `GoalVerification.verified is True`. Es imposible escribir `COMPLETED` sin ella: la invariante está en `Mission.__setattr__` y `settle()` es la única autoridad. |
-| 12 | Replanning | PARTIAL | El replan funciona (diagnóstico → ASK_USER, máx. 2) y está cubierto por tests. **Viola el anti-patrón del plan**: en el MVP repitió la misma lectura con otro id de paso (`read-probe`, `read-probe-2`). No genera una estrategia alternativa; cambia el paso, no la estrategia. |
+| 12 | Replanning | **COMPLETE** | **Cerrado en §13.** Firma determinista de la acción, filtro de repetición en producción (`options()`), procedencia por generación y `context_version`, evidencia material con *evidence scope*, y `replan.action_rejected` auditado en `audit_log` + `EventBus` y recuperable tras reinicio. La integración por `run_mission` destapó que el autoparte del sistema (claims `executor` / `observation:tool.*`) invalidaba la guarda: los 24 tests unitarios pasaban y el sistema repetía la lectura. Ver §13.3. Original: el replan funcionaba (diagnóstico → ASK_USER, máx. 2) y está cubierto por tests. **Viola el anti-patrón del plan**: en el MVP repitió la misma lectura con otro id de paso (`read-probe`, `read-probe-2`). No genera una estrategia alternativa; cambia el paso, no la estrategia. |
 | 13 | Ask User | PARTIAL | Cubre las causas 1–6 del plan (falta de info, aprobación, fuera de envelope, ambigüedad, capability ausente, incertidumbre). **No hay reanudación**: la respuesta del usuario se descarta y no existe un canal para volver a la misión. |
 | 14 | Evidence / Claim Guard | **COMPLETE** | `EvidenceStore` + `ClaimGuard` con 5 tipos; un claim del modelo **nunca** es FACT sin verificación independiente (`alexis/cognition/evidence.py`), con tests de regresión. |
 | 15 | Independent Verification | **COMPLETE** | `GoalVerifier` (`alexis/cognition/goal_verification.py`) evalúa el objetivo criterio por criterio contra evidencia de observación real, con estado `satisfied`/`not_satisfied`/`insufficient_evidence`, evidencia asociada y motivo auditable. Exige al menos un criterio y evidencia fiable por criterio: sin criterios no hay verificación. Un claim del modelo nunca basta. `FilesystemVerifier` (nivel de plan) se mantiene como estaba. |
@@ -545,3 +545,89 @@ exige `file_missing:para-borrar.txt`. La evidencia es de tools reales sobre arch
 ### Estado
 P0 = **61.4% de los 22 requisitos del plan** (8 COMPLETE, 11 PARTIAL, 3 MISSING, 0 BROKEN).
 §5.6–§5.9 sin empezar. P0 no está al 100% y P1 sigue bloqueada.
+
+---
+
+## 13. Registro de cambio: §12 Replanning cerrado (2026-09-26)
+
+El requisito 12 pasa de **PARTIAL** a **COMPLETE**. Los 24 tests previos seguían en verde
+y, aun así, el sistema repetía la lectura en el flujo real. Lo que lo destapó fue el test
+de integración (§13.3), no la lógica de la guarda.
+
+### 13.1 Qué se implementó
+
+- **Firma determinista** de la acción `(action, capability, args normalizados)`, sin id de
+  paso: `read-probe` y `read-probe-2` con los mismos argumentos son la MISMA acción.
+- **Filtro en producción**, dentro de `options()`, que es el punto por el que pasan todas
+  las decisiones: descarta la repetición si la acción es de un replan, su firma ya se
+  intentó, aquel intento falló y no hay evidencia material nueva.
+- **Procedencia** por generación (plan original = 0, replan ≥ 1) y por `context_version`.
+- **Recuperación**: la firma, la procedencia y la huella sobreviven a la serialización, así
+  que tras un reinicio la decisión es la misma.
+
+### 13.2 Corrección de §12.5: qué es "evidencia material"
+
+La regla original era demasiado laxa y el propio enunciado lo señalaba. La evidencia
+material es la que **habla del objeto sobre el que actuó la acción** y existe como hecho
+observado:
+
+| Cuenta | No cuenta | Motivo |
+|---|---|---|
+| `WorldModel` sobre el target | `known` | mezcla datos con libro de cuentas («x» completado) |
+| claims de origen externo | `completed_steps` | es el resultado, no la causa |
+| | `unknown` | es ignorancia declarada |
+| | `replans`, contadores | contadores del ciclo |
+
+Se implementó el **evidence scope**: el objetivo se deriva del argumento `target`
+(`path`/`file`/`target`/`source`/`dest`/`query`/`url`/`uri`/`name`). Sin scope identificable
+se usa evidencia global, porque no se puede probar la relevancia pero tampoco se debe
+bloquear la acción para siempre.
+
+### 13.3 El fallo que encontró la integración
+
+El autoparte del sistema. Al ejecutar, el Core registra dos claims propios —
+`observation:tool.fs.read` y `executor`— cuyos textos **citan la ruta del objetivo**. Como
+la huella los incluía, cambiaba en cada intento, el filtro leía «hay evidencia nueva» y
+autorizaba la repetición siempre. Con el `WorldModel` vacío.
+
+Los 24 tests unitarios pasaban porque ninguno reproducía la observación real del executor.
+El ciclo completo por `run_mission` (`tests/test_p0_12_gaps.py::test_g2_06`) lo reproduce y
+lo cazó: se ejecutaban `leer_1` **y** `leer_2`.
+
+Corrección en dos puntos:
+1. `_is_self_record()` excluye los claims que el sistema se hace a sí mismo al ejecutar la
+   capability que se reintenta. El autoparte de **otra** capability (`fs.stat` observando
+   que el archivo existe) sí cuenta, que es el caso bueno.
+2. Se hashea el **contenido** del claim, no su `id`. Los ids son únicos por registro, así
+   que un mismo hecho anotado dos veces parecía evidencia nueva.
+
+### 13.4 Auditoría del rechazo
+
+`replan.action_rejected` se emite por la infraestructura que ya existía —`EventBus` +
+`AuditRepository`→`audit_log`—, sin logger paralelo. El reparto es el del epílogo de §5.6:
+el Core decide y acumula (`drain_rejections()`), el runtime publica y persiste
+(`_flush_rejections()`), porque `options()` es sync y los repos son async.
+
+Se guarda además en `mission.context["replan_rejections"]`, que la Storage persiste, para
+poder responder «¿por qué ALEXIS descartó esta acción?» tras un reinicio incluso sin BD.
+
+**Invariante que se respeta:** el fallo de auditoría no tumba el bucle cognitivo. Se
+registra como warning y el ciclo sigue. `audit_log.mission_id` tiene FK a `missions`, así
+que auditar exige que la misión esté persistida; `run_mission` ya lo hace en su primer
+`_commit`.
+
+### 13.5 Verificación
+
+- `tests/test_p0_12_gaps.py`: 23 passed (14 de evidencia, 5 de auditoría, 1 de integración,
+  3 de regresión del autoparte).
+- `tests/test_p0_12_replanning.py`: 24 passed.
+- Suite completa: **741 passed**, 0 regresiones. `compileall` y `tsc --noEmit` limpios.
+- `test_g2_05` fija que el filtro no toca `Policy`, envelope ni registry, y no crea
+  `approved_step_ids`.
+- Un test existente cambió de expectativa, con motivo documentado: `test_d3` simulaba
+  «evidencia nueva» con `add_known(...)`, que es justo lo que la regla corregida excluye.
+  Ahora usa un hecho observado, que es el ejemplo del propio enunciado.
+
+### 13.6 Estado
+
+Cognitive Core ≈ **86%**. COMPLETE 15 · PARTIAL 7 · MISSING 0 · BROKEN 0.

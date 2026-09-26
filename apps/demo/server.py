@@ -328,6 +328,9 @@ def _create_mission_from_intent(intent):
     STATE["mission_id"] = mission.id
     # La propuesta del modelo se guarda como PROPUESTA auditable, nunca como permiso.
     mission.context["intent"] = intent.to_dict()
+    # P0 requisito 2: la conversación es una de las diez fuentes del contexto.
+    # Vive en `mission.context`, que la Storage ya persiste.
+    mission.context["conversation"] = [intent.utterance or intent.objective or ""]
     if intent.requested_capabilities:
         mission.context["capability_proposal"] = {
             "capabilities": list(intent.requested_capabilities),

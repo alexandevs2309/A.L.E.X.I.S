@@ -485,11 +485,11 @@ class TestFaseDPartials:
         assert _action_signature(uno) != _action_signature(otro), "args distintos sí son otra acción"
 
     def test_d3_la_repeticion_se_registra_y_se_expone(self):
-        """#12: las firmas se guardan y la repetición es consultable.
+        """La procedencia decide: el plan original nunca se bloquea; un replan sí.
 
-        NO se filtran pasos: un plan puede tener legítimamente varios pasos con la misma
-        capability y args. La procedencia de cada paso (plan original vs replan) es lo que
-        falta para poder aplicar el filtro; queda documentado como GAP.
+        Antes este test afirmaba que la repetición "se expone" sin consequence. Con §12 el
+        filtro existe, así que lo que se comprueba es la REGLA: misma firma + fallo +
+        sin evidencia nueva + origen replan ⇒ bloqueada.
         """
         cognitive = _cognitive()
         mission = _mission("lee el informe")
@@ -498,11 +498,39 @@ class TestFaseDPartials:
             PlanStep("p2", "lee otra vez", "execute", RiskLevel.LOW, "e", capability="fs.read"),
         ])
         knowledge = cognitive.knowledge_for(mission)
-        cognitive.record_signature(knowledge, plan.steps[0])
-        assert cognitive._already_tried(knowledge, plan.steps[0]) is False, "un reintento es legítimo"
-        cognitive.record_signature(knowledge, plan.steps[0])
-        assert cognitive._already_tried(knowledge, plan.steps[0]) is True
-        assert cognitive.repeated_actions(knowledge, [plan.steps[1]]) == [plan.steps[1]]
+
+        # (1) plan original: dos pasos iguales, ambos permitidos.
+        assert cognitive.repeated_actions(knowledge, plan.steps, generation=0) == []
+
+        # Un intento fallido, en el plan original.
+        cognitive.record_attempt(knowledge, plan.steps[0], success=False, error="no existe")
+
+        # (2) mismo paso reofrecido por un replan, sin cambios: se bloquea.
+        bloqueados = cognitive.repeated_actions(knowledge, plan.steps, generation=1)
+        assert [s.id for s in bloqueados] == ["p1", "p2"]
+        assert "falló" in cognitive.blocked_reason(knowledge, plan.steps[0], 1)
+
+        # (3) con evidencia MATERIAL sobre el objetivo, la repetición vuelve a ser válida.
+        #
+        # Cambio de expectativa justificado: antes esto se simulaba con
+        # `add_known("el archivo ya existe")`. La regla corregida de §12.5 excluye `known`
+        # del Fingerprint de evidencia a propósito — `known` mezcla datos con libro de
+        # cuentas ("«x» completado"), que era lo que hacía la regla demasiado laxa. La
+        # evidencia material es un hecho observado: el World Model o un claim. El
+        # enunciado lo dice así: "tool observa que ahora existe".
+        knowledge.world = ["file:informe.txt (exists=True, size=30)"]
+        assert cognitive.repeated_actions(knowledge, plan.steps, generation=2) == []
+
+    def test_d3b_la_accion_alternativa_no_se_bloquea(self):
+        """Un replan que propone OTRA capability no se toca: eso es la alternativa."""
+        cognitive = _cognitive()
+        mission = _mission("lee el informe")
+        fallida = PlanStep("p1", "lee", "execute", RiskLevel.LOW, "e", capability="fs.read")
+        alternativa = PlanStep("p2", "lista", "execute", RiskLevel.LOW, "e", capability="fs.stat")
+        knowledge = cognitive.knowledge_for(mission)
+        cognitive.record_attempt(knowledge, fallida, success=False, error="no existe")
+        assert cognitive.repeated_actions(knowledge, [fallida], generation=1)
+        assert cognitive.repeated_actions(knowledge, [alternativa], generation=1) == []
 
     def test_d4_las_firmas_sobreviven_a_la_persistencia(self):
         from alexis.cognition.state import KnowledgeState

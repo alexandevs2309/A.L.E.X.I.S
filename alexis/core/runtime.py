@@ -1,4 +1,5 @@
 import logging
+import time
 
 from alexis.autonomy.goal_state import settle
 from alexis.contracts import Mission, MissionState, RiskLevel, Verification
@@ -131,9 +132,49 @@ class AlexisRuntime:
                                                       "iteration": knowledge.iterations})
         return await self._run_cognitive(mission, mission.plan or await self._ensure_plan(mission), 0)
 
+    async def _flush_rejections(self, mission: Mission) -> int:
+        """Publica y audita los rechazos del filtro de replan (P0 §12.8).
+
+        Sin logger paralelo: evento en el `EventBus` y fila en `audit_log` vía el
+        `AuditRepository` que el runtime ya tiene. Se guarda además en
+        `mission.context["replan_rejections"]`, que la Storage persiste, para que
+        "¿por qué descartó ALEXIS esta acción?" se pueda responder tras un reinicio.
+        """
+        pendientes = self.cognitive.drain_rejections() if self.cognitive is not None else []
+        if not pendientes:
+            return 0
+        for row in pendientes:
+            payload = {**row, "timestamp": time.time()}
+            if self.audit_repo is not None:
+                # `mission_id` va posicional en `record()`: si también fuera parte de
+                # `details` el **kwargs chocaría con él. Se quita de los detalles.
+                detalles = {k: v for k, v in payload.items() if k != "mission_id"}
+                try:
+                    await self.audit_repo.record(
+                        "replan.action_rejected", "cognitive", mission.id, **detalles
+                    )
+                except Exception as exc:  # noqa: BLE001 — auditar no puede tumbar el bucle
+                    log.warning("no se pudo auditar el rechazo de replan: %s", exc)
+            await self.events.publish("replan.action_rejected", {"mission_id": mission.id, **payload})
+        context = getattr(mission, "context", None)
+        if context is not None:
+            previo = context.get("replan_rejections") or []
+            context["replan_rejections"] = (list(previo) + list(pendientes))[-20:]
+        return len(pendientes)
+
     async def _close(self, mission: Mission, state: MissionState):
+        # AUDIT es SECUNDARIO: el estado de la misión es lo PRINCIPAL. `audit_log.mission_id`
+        # tiene FK a `missions`, así que si la fila padre no está —una misión que se cerró
+        # sin persistir, o una que se borró— el INSERT revienta con ForeignKeyViolation y,
+        # sin esta guarda, tumbaba el cierre entero y perdía el epílogo de §5.6. El mismo
+        # degradado que ya usa `_flush_rejections` y el registro de experiencia.
         if self.audit_repo is not None:
-            await self.audit_repo.record(f"mission.{state.value}", "runtime", mission.id, mission=mission.id)
+            try:
+                await self.audit_repo.record(
+                    f"mission.{state.value}", "runtime", mission.id, mission=mission.id
+                )
+            except Exception as exc:  # noqa: BLE001 — auditar no puede tumbar el cierre
+                log.warning("no se pudo auditar el cierre de la misión %s: %s", mission.id, exc)
         await self._close_cycle(mission)
 
     # ------------------------------------------------------------------ #
@@ -622,6 +663,10 @@ class AlexisRuntime:
             outcome = await cognitive.step(mission, knowledge, pending_steps=pending, plan=plan)
             knowledge = outcome.knowledge
             cognitive.store_knowledge(mission, knowledge)
+            # P0 §12.8: el filtro pudo descartar repeticiones en este paso. Se publican y
+            # se auditan AQUÍ, con la infraestructura que ya existe (EventBus + audit_log),
+            # y además quedan en `mission.context` para sobrevivir a un reinicio.
+            await self._flush_rejections(mission)
             await self._commit(mission, "cognition.step", {"mission_id": mission.id, **outcome.to_dict()})
             await self.events.publish(
                 "cognition.step",

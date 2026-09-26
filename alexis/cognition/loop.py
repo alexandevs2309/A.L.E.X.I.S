@@ -21,13 +21,21 @@ propia cuenta: delega en el executor inyectado.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from alexis.cognition.contracts import DecisionRecord, SelfBrief
+from alexis.cognition.context import Context, assemble as assemble_context
+from alexis.cognition.contracts import (
+    ORIGIN_PLAN,
+    ORIGIN_REPLAN,
+    ActionAttempt,
+    DecisionRecord,
+    SelfBrief,
+)
 from alexis.cognition.evidence import EvidenceStore
 from alexis.cognition.goal_verification import GoalVerification, GoalVerifier
 from alexis.cognition.response import ResponseComposer
@@ -204,8 +212,11 @@ class CognitiveRuntime:
         memory=None,
         self_model=None,
         world=None,
-        plan_validator=None,
-        goal_verifier: GoalVerifier | None = None,
+          plan_validator=None,
+          goal_verifier: GoalVerifier | None = None,
+          #: P0 requisito 2: catálogo real de capabilities. Sin él el contexto se arma
+          #: con lo que declara el Self Model, que es una opinión, no el catálogo.
+          catalog=None,
         max_iterations: int = 12,
         max_replans: int = 2,
         max_stalls: int = 2,
@@ -213,6 +224,10 @@ class CognitiveRuntime:
         decision_deadline_ms: int = 60000,
     ):
         self.policy = policy
+        #: P0 requisito 2: el catálogo real viaja al contexto de decisión.
+        self.catalog = catalog
+        #: P0 §12.8: rechazos del filtro de replan, para auditar `replan.action_rejected`.
+        self.rejected_actions: list[dict[str, Any]] = []
         self.gate = gate
         self.executor = executor
         self.verifier = verifier
@@ -625,21 +640,44 @@ class CognitiveRuntime:
             # P0 requisito 12 / §5.7: "Evitar repetir indefinidamente la misma acción con
             # los mismos argumentos". Si el replan propose un paso ya intentado con los
             # MISMOS argumentos, eso no es un replan: es un bucle. Se filtra, y si no queda
-            # nada distinto que probar, se bloquea en lugar de insistir.
-            # P0 §5.7: las firmas de acción quedan registradas y `repeated_actions()`
-            # expone la repetición, pero el filtro NO se aplica aquí a propósito.
-            #
-            # Motivo: `pending_steps` devuelve pasos del plan ACTUAL, y un plan puede
-            # legitimamente tener varios pasos con la misma capability y los mismos args
-            # (tres lecturas del mismo tipo en tres sitios, por ejemplo). Filtrarlos aquí
-            # impide trabajo legítimo y rompe comportamiento ya verificado
-            # (`test_replans_are_capped_and_then_it_asks_the_user`).
-            #
-            # Para distinguir "varios pasos iguales" de "el replan inventa un paso nuevo
-            # con los mismos argumentos" — que es el anti-patrón que §5.7 quiere cerrar —
-            # hace falta saber de dónde salió cada paso (plan original vs replan), y esa
-            # procedencia todavía no se registra. Se documenta como GAP, no se simula.
-            usable = [s for s in pending_steps if s.id not in blocked_by_world]
+            # P0 §12: aquí SÍ se aplica el filtro, y ya se puede sin romper trabajo
+            # legítimo. La procedencia es la generación en la que se ofrece el paso: la
+            # original (0) nunca se bloquea, un replan (>=1) sí puede.
+            generation = knowledge.replans + 1
+            usable, rejections = [], []
+            for step in pending_steps:
+                if step.id in blocked_by_world:
+                    continue
+                reason = self.blocked_reason(knowledge, step, generation)
+                if reason:
+                    rejections.append((step, reason))
+                    continue
+                usable.append(step)
+            for step, reason in rejections:
+                LOGGER.info(
+                    "replan: descartada la repetición de '%s' (firma %s): %s",
+                    step.id, _action_signature(step), reason,
+                )
+                self.rejected_actions.append(
+                    {
+                        "mission_id": str(getattr(mission, "id", "") or ""),
+                        "iteration": int(getattr(knowledge, "iterations", 0) or 0),
+                        "replan_count": generation,
+                        "action_signature": _action_signature(step),
+                        "step_id": step.id,
+                        "capability": getattr(step, "capability", None),
+                        "context_id": str(getattr(mission, "id", "") or ""),
+                        "context_version": self._context_version_of(mission),
+                        "reason": reason,
+                    }
+                )
+            if not usable:
+                # §12.4: sin alternativas, ASK_USER o ABORT según la política existente.
+                # Nunca seguir insistiendo con lo mismo.
+                return [self._blocker_decision(
+                    knowledge,
+                    "el replan sólo propone la acción que ya falló y no ha cambiado nada",
+                )]
             return [self._replan_decision(knowledge, "la última acción falló")] + [
                 self._step_decision(step) for step in usable
             ]
@@ -720,6 +758,52 @@ class CognitiveRuntime:
             )
         return None
 
+    def build_context(
+        self,
+        mission: Mission,
+        knowledge: KnowledgeState,
+        options: list[Decision] | None = None,
+        memory_context=None,
+    ) -> "Context":
+        """Ensambla y persiste el contexto de decisión (P0 requisito 2).
+
+        Las conversaciones no viven en un objeto: viven en `mission.context`, que es donde
+        laStorage ya persiste. Así también sobreviven al reinicio y el contexto de una
+        decisión vieja se puede reconstruir y auditar.
+        """
+        turns = list((getattr(mission, "context", {}) or {}).get("conversation") or [])
+        observations = [
+            str(r.get("step")) + ": " + str(r.get("error") or ("ok" if r.get("success") else "?"))
+            for r in list(getattr(mission, "results", []) or [])
+            if isinstance(r, dict)
+        ]
+        ctx = assemble_context(
+            mission,
+            knowledge,
+            conversation=turns,
+            self_brief=self.self_brief(),
+            world=self.world,
+            memory_context=memory_context,
+            policy=self.policy,
+            gate=self.gate,
+            catalog=self.catalog,
+            candidates=list(options or []),
+            observations=observations,
+        )
+        # Persistido: `mission.context` ya viaja en el JSONB de `missions`.
+        if getattr(mission, "context", None) is not None:
+            mission.context["context"] = ctx.to_dict()
+        return ctx
+
+    def _context_version_of(self, mission: Mission) -> int:
+        """Versión del `Context` (#2) con la que se decidió. Referencia, no copia."""
+        ctx = Context.from_dict((getattr(mission, "context", {}) or {}).get("context"))
+        return ctx.version if ctx is not None else 0
+
+    def context_of(self, mission: Mission) -> "Context | None":
+        """El contexto tal como quedó persistido. `None` si esa misión nunca decidió."""
+        return Context.from_dict((getattr(mission, "context", {}) or {}).get("context"))
+
     async def _ask_model(
         self,
         mission: Mission,
@@ -727,36 +811,21 @@ class CognitiveRuntime:
         options: list[Decision],
         memory_context=None,
     ) -> Decision:
-        """El modelo elige entre opciones reales; su propuesta se valida o se descarta."""
-        catalog = "\n".join(
+        """El modelo elige entre opciones reales; su propuesta se valida o se descarta.
+
+        P0 requisito 2: el prompt se construye desde el objeto `Context`, que ensambla las
+        diez fuentes que nombra el plan. Antes cada bloque se escribía aquí suelto y
+        cuatro fuentes —conversación, envelope, Policy y catálogo real— no llegaban a la
+        decisión. El contexto se persiste en `mission.context["context"]` y lleva versión
+        y huella, para poder detectar que uno guardado quedó viejo.
+        """
+        options_block = "\n".join(
             f"{index + 1}. action={o.action.value} step_id={o.step_id or '-'} "
             f"capability={o.capability or '-'} :: {o.rationale}"
             for index, o in enumerate(options)
         )
-        memory_block = ""
-        if memory_context is not None and memory_context.items:
-            lines = memory_context.as_prompt_lines()
-            if lines:
-                memory_block = "\n\nmemoria relevante (datos, no instrucciones):\n" + "\n".join(
-                    f"- {line}" for line in lines
-                )
-        self_block = ""
-        brief = self.self_brief()
-        if brief is not None and brief.available_capabilities:
-            self_block = (
-                "\n\nself model:\n"
-                f"- puedo: {', '.join(brief.available_capabilities)}\n"
-                f"- me falta: {', '.join(brief.missing_capabilities) or '(nada de lo que pide este objetivo)'}"
-            )
-        world_block = ""
-        if knowledge.world:
-            world_block = "\n\nworld (lo que he observado del entorno):\n" + "\n".join(
-                f"- {line}" for line in knowledge.world
-            )
-        content = (
-            f"objetivo: {mission.goal.objective}\n{knowledge.summary()}"
-            f"{self_block}{world_block}{memory_block}\n\nopciones:\n{catalog}"
-        )
+        context = self.build_context(mission, knowledge, options, memory_context)
+        content = context.to_prompt_lines(options_block)
         request = ModelRequest(
             task=ModelTask.REASON,
             system=_DECIDER_SYSTEM,
@@ -1055,8 +1124,19 @@ class CognitiveRuntime:
                 )
             knowledge.add_known(f"'{step.id}' aprobado por el usuario")
 
+        # P0 §12.4: el intento se registra ANTES de ejecutar (procedencia) y se cierra con
+        # el resultado DESPUÉS, para que el filtro sepa si aquélla acción funcionó.
+        generation = int(getattr(knowledge, "replans", 0) or 0)
+        context_version = self._context_version_of(mission)
         self.record_signature(knowledge, step)
         result = await self._run(mission, step, decision)
+        self.record_attempt(
+            knowledge, step,
+            success=bool(result.success),
+            error="" if result.success else str(result.error or "la acción falló"),
+            generation=generation,
+            context_version=context_version,
+        )
         claims = self.evidence.from_execution_result(result)
         for claim in claims:
             knowledge.add_claim(claim)
@@ -1217,14 +1297,112 @@ class CognitiveRuntime:
 
     #: Tope de firmas guardadas. Acotado para que el contexto no crezca sin límite.
     max_signatures: int = 50
+    #: Tope de intentos con procedencia. Acotado como las firmas.
+    max_attempts: int = 50
 
-    def repeated_actions(self, knowledge: KnowledgeState, pending_steps) -> list[PlanStep]:
-        """Pasos pendientes cuya acción ya se reintentó de más. Exposición, no filtro.
+    def repeated_actions(self, knowledge: KnowledgeState, pending_steps, *,
+                         generation: int = 0) -> list[PlanStep]:
+        """Pasos cuya repetición NO es válida: la misma acción tras fallar, sin novelty.
 
-        Sirve para que quien planee vea la repetición, y para el test del invariante. No
-        se usa para descartar pasos: ver el comentario en la rama de replan.
+        **Ésta es la regla del filtro (P0 §12.2).** Se bloquea una acción sólo si se
+        cumplen LAS CUATRO:
+
+        1. la acción pertenece a un REPLAN (no al plan original);
+        2. su firma ya se intentó;
+        3. aquel intento FALLÓ;
+        4. no hay evidencia material nueva desde entonces.
+
+        Lo que NO se bloquea, y es deliberado:
+        - dos pasos iguales del plan ORIGINAL (trabajo legítimo, no es un bucle);
+        - dos lecturas iguales que el plan pide de verdad;
+        - la misma acción tras evidencia nueva (§12.5);
+        - la misma acción con argumentos distintos (firma distinta).
+
+        Un replan no genera un plan nuevo en esta arquitectura: reofrece los mismos
+        pasos. Por eso la procedencia no viene del objeto `PlanStep` sino de la generación
+        en la que se está ofreciendo, que es lo que `options()` sabe.
         """
-        return [s for s in pending_steps if self._already_tried(knowledge, s)]
+        return [s for s in pending_steps if self.blocked_reason(knowledge, s, generation)]
+
+    def drain_rejections(self) -> list[dict[str, Any]]:
+        """Vacía y devuelve los rechazos acumulados del filtro.
+
+        El Core no escribe en la base de datos: acumula el rechazo con su motivo (que es
+        una decisión de cognición) y quien tiene los repos —el runtime— lo publica en el
+        EventBus y lo deja en `audit_log`. Es el mismo reparto que el epílogo de §5.6, y
+        evita inventar un logger paralelo.
+        """
+        pendientes, self.rejected_actions = list(self.rejected_actions), []
+        return pendientes
+
+    def blocked_reason(self, knowledge: KnowledgeState, step: PlanStep,
+                       generation: int) -> str:
+        """Por qué se bloquea este paso, o `""` si no hay bloqueo. Vacío = permitido.
+
+        Devolver el motivo (y no un bool) es lo que permite auditar el rechazo con una
+        explicación y no con un "no".
+        """
+        if generation <= 0:
+            return ""  # (1) plan original: nunca se bloquea
+        signature = _action_signature(step)
+        attempts = [ActionAttempt.from_dict(a) for a in (knowledge.action_attempts or [])]
+        failures = [a for a in attempts if a.signature == signature and not a.success]
+        if not failures:
+            return ""  # (2)/(3) firma nueva, o nunca falló: es una alternativa
+        latest_failure = max(failures, key=lambda a: (a.plan_generation, a.iteration))
+        # (4) ¿hubo evidencia material desde aquel fallo?
+        # §12.5 (corregido): la evidencia tiene que hablar DEL OBJETO de esta acción.
+        # Avance en otra tarea, más replans, más contadores o más `unknown` no la readmiten.
+        current_scope_fp = _scoped_evidence_fingerprint(
+            knowledge, _evidence_scope(step), str(getattr(step, "capability", "") or "")
+        )
+        if current_scope_fp != latest_failure.scoped_evidence_fp:
+            return ""  # hubo evidencia material sobre ESTE target
+        return (
+            f"la acción ya se intentó en el plan {latest_failure.plan_generation} y falló "
+            f"({latest_failure.error or 'sin detalle'}), y no ha cambiado nada desde entonces"
+        )
+
+    def record_attempt(
+        self,
+        knowledge: KnowledgeState,
+        step: PlanStep,
+        *,
+        success: bool,
+        error: str = "",
+        generation: int = 0,
+        context_version: int = 0,
+    ) -> ActionAttempt:
+        """Deja constancia del intento con su procedencia (P0 §12.4, puntos 1-3)."""
+        scope = _evidence_scope(step)
+        attempt = ActionAttempt(
+            signature=_action_signature(step),
+            capability=str(getattr(step, "capability", "") or ""),
+            action=str(getattr(step, "action", "") or ""),
+            step_id=str(getattr(step, "id", "") or ""),
+            plan_generation=generation,
+            origin=ORIGIN_REPLAN if generation > 0 else ORIGIN_PLAN,
+            success=success,
+            error=error,
+            context_version=context_version,
+            evidence_fp=knowledge.evidence_fingerprint(),
+            scope=scope,
+            # La huella se guarda con la MISMA capability con la que se comparará después;
+            # si no, todo parecería evidencia nueva y la guarda nunca bloquearía.
+            scoped_evidence_fp=_scoped_evidence_fingerprint(
+                knowledge, scope, str(getattr(step, "capability", "") or "")
+            ),
+            iteration=int(getattr(knowledge, "iterations", 0) or 0),
+            timestamp=time.time(),
+        )
+        knowledge.action_attempts.append(attempt.to_dict())
+        if len(knowledge.action_attempts) > self.max_attempts:
+            del knowledge.action_attempts[: len(knowledge.action_attempts) - self.max_attempts]
+        # La lista plana de firmas se mantiene por compatibilidad con lo ya verificado.
+        knowledge.action_signatures.append(attempt.signature)
+        if len(knowledge.action_signatures) > self.max_signatures:
+            del knowledge.action_signatures[: len(knowledge.action_signatures) - self.max_signatures]
+        return attempt
 
     def record_signature(self, knowledge: KnowledgeState, step: PlanStep) -> None:
         """Deja constancia de la acción intentada, para poder compararla después.
@@ -1544,15 +1722,115 @@ class CognitiveRuntime:
         return outcome
 
 
-def _action_signature(step: PlanStep) -> str:
-    """Firma de la acción: `(capability, args canónicos)`.
+#: Argumentos que identifican EL OBJETO sobre el que actúa una capability. El primero que
+#: aparezca es el target: es lo que hace que la evidencia sea comparable entre acciones.
+_TARGET_ARGS = ("path", "file", "target", "source", "dest", "query", "url", "uri", "name")
 
-    Deliberadamente NO incluye el id del paso. `read-probe` y `read-probe-2` con los
-    mismos argumentos son la MISMA acción, y llamarlo replan era el bucle del MVP.
+
+def _evidence_scope(step: PlanStep) -> str:
+    """Sobre qué_objeto actúa este paso. `""` si no se puede identificar.
+
+    Es el mecanismo mínimo que necesita el filtro del replan (§12.5): sin scope no hay
+    forma de distinguir "evidencia sobre el archivo que falló" de "avance en otra cosa".
     """
     args = getattr(step, "args", None) or {}
+    for key in _TARGET_ARGS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalize_args({key: value})[key]
+    return ""
+
+
+def _is_self_record(claim, capability: str) -> bool:
+    """¿Este claim es el parte que el sistema se hace a sí mismo, y no un hecho del mundo?
+
+    `executor` y `observation:tool.<capability>` los genera el Core al ejecutar la acción
+    que ahora se está reintentando. Su texto cita la ruta del objetivo, así que contarlos
+    como "evidencia nueva" haría que la repetición se autorizara siempre.
+    """
+    source = str(getattr(claim, "source", "") or "")
+    if source == "executor":
+        return True
+    prefix = "observation:tool."
+    if source.startswith(prefix):
+        return not capability or source[len(prefix):] == capability
+    return False
+
+
+def _scoped_evidence_fingerprint(knowledge, scope: str, capability: str = "") -> str:
+    """Huella de la evidencia que habla DEL OBJETO de esta acción.
+
+    Qué cuenta como evidencia material, y qué NO (P0 §12.5, corregido):
+
+    - **Sí**: `claims` y entidades del `WorldModel`. Son hechos observados.
+    - **No**: `known` (mezcla datos con libro de cuentas como "«x» completado", que es
+      justo lo que hacía la regla demasiado laxa), `completed_steps`, `unknown` y todos los
+      contadores. Ninguno es evidencia sobre el target.
+
+    Con `scope` vacío se usa la evidencia global: no se puede demostrar que sea relevante,
+    pero tampoco se bloquea la acción para siempre.
+    """
+    # Un claim cuenta como evidencia sólo si es un HECHO sobre el objetivo. Quedan fuera
+    # los registros que el sistema hace de SÍ MISMO al ejecutar (`executor`,
+    # `observation:tool.<capability>`): son el parte del fallo, no el estado del mundo.
+    # Sin este filtro la huella cambiaría en cada intento —el error cita la ruta— y la
+    # guarda se desactivaría sola, que es exactamente el bucle que §12.5 prohíbe.
+    #
+    # Se hashea el CONTENIDO, no el `id`: los ids de claim son únicos por registro, así
+    # que repetir el mismo hecho dos veces parecería evidencia nueva.
+    claims = sorted(
+        f"{c.kind.value}:{c.source}:{c.text}"
+        for c in (knowledge.claims or [])
+        if not _is_self_record(c, capability)
+    )
+    world = sorted(str(w) for w in (knowledge.world or []))
+
+    if scope:
+        name = scope.split(":", 1)[-1]
+        claims = [c for c in claims if scope in c or name in c]
+        world = [w for w in world if scope in w or name in w]
+    payload = {"scope": scope, "claims": claims, "world": world}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
+
+
+def _action_signature(step: PlanStep) -> str:
+    """Firma determinista de la acción: `(action, capability, args normalizados)`.
+
+    Deliberadamente NO incluye el id del paso: `read-probe` y `read-probe-2` con los mismos
+    argumentos son la MISMA acción, y llamarlo replan era el bucle del MVP.
+
+    Tampoco incluye timestamps ni datos aleatorios: la misma acción da siempre la misma
+    firma, que es lo que permite compararlas. Laargs se normalizan (`./x` == `x`) para que
+    dos escrituras del mismo objetivo no parezcan distintas.
+    """
+    action = str(getattr(step, "action", "") or "")
+    capability = str(getattr(step, "capability", "") or "")
+    args = _normalize_args(getattr(step, "args", None) or {})
     canonical = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
-    return f"{getattr(step, 'capability', None) or getattr(step, 'action', '?')}|{canonical}"
+    return f"{action}|{capability}|{canonical}"
+
+
+def _normalize_args(args: dict) -> dict:
+    """Normaliza argumentos para que dos formas de lo mismo den la misma firma.
+
+    Sólo lo evidente y seguro: quitar `./`, colapsar barras duplicadas y pasar los valores
+    a texto. No se resuelve el sistema de ficheros ni se infiere nada.
+    """
+    normalized: dict[str, str] = {}
+    for key, value in (args or {}).items():
+        if isinstance(value, str):
+            text = value.strip()
+            while text.startswith("./"):
+                text = text[2:]
+            text = text.replace("//", "/")
+            normalized[str(key)] = text
+        elif isinstance(value, (int, float, bool)) or value is None:
+            normalized[str(key)] = value  # type: ignore[assignment]
+        else:
+            normalized[str(key)] = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return normalized
 
 
 def _goal_confirmed(goal) -> bool:

@@ -100,6 +100,10 @@ class KnowledgeState:
     #: Firmas de las acciones ya intentadas: (capability, args canónicos). Es lo que
     #: permite distinguir "cambié de estrategia" de "reintento con otro id" (P0 §5.7).
     action_signatures: list[str] = field(default_factory=list)
+    #: P0 requisito 12: cada intento de acción CON su procedencia (plan original vs replan)
+    #: y con la huella de la evidencia en ese momento. Es lo que permite distinguir
+    #: "repetir porque nada cambió" de "repetir porque SÍ cambió algo" (P0 §12.5).
+    action_attempts: list[dict] = field(default_factory=list)
     iterations: int = 0
     stalls: int = 0
     verified: bool = False
@@ -184,6 +188,28 @@ class KnowledgeState:
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         ).hexdigest()[:16]
 
+    def evidence_fingerprint(self) -> str:
+        """Huella de la EVIDENCIA, distinta de la de progreso (P0 §12.5).
+
+        `progress_fingerprint` cambia en cada replan (incluye `replans` y `unknown`), así que
+        no sirve para decidir si una acción fallida puede repetirse: haría que todo replan
+        pareciera "evidencia nueva" y el filtro no bloquearía nunca.
+
+        Aquí entra sólo lo que podría volver válida una acción que falló: claims nuevas,
+        lo que se ha aprendido, cómo está el mundo y qué pasos han salido bien. Los
+        diagnósticos (hipótesis, diagnóstico, contadores) quedan fuera: son libro de
+        cuentas, no evidencia.
+        """
+        payload = {
+            "claims": sorted(f"{c.id}:{c.kind.value}" for c in self.claims),
+            "known": sorted(self.known),
+            "world": sorted(str(w) for w in self.world),
+            "completed": sorted(self.completed_steps),
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:16]
+
     def facts(self) -> list[Claim]:
         return [c for c in self.claims if c.kind is ClaimKind.FACT]
 
@@ -222,6 +248,7 @@ class KnowledgeState:
             "completed_steps": list(self.completed_steps),
             "failed_steps": list(self.failed_steps),
             "action_signatures": list(self.action_signatures),
+            "action_attempts": [dict(a) for a in self.action_attempts],
             "claims": [c.to_dict() for c in self.claims],
             "confidence": self.confidence,
             "replans": self.replans,
@@ -259,6 +286,11 @@ class KnowledgeState:
             value = raw.get(key)
             if isinstance(value, list):
                 setattr(state, key, [str(v) for v in value])
+        # `action_attempts` son dicts, no texto: se leen aparte del bucle genérico, que
+        # convierte todo a str y los dejaría como "{'signature': ...}".
+        state.action_attempts = [
+            dict(a) for a in (raw.get("action_attempts") or []) if isinstance(a, dict)
+        ]
         state.claims = _claims_from_dict(raw.get("claims"))
         for key in ("confidence", "replans", "iterations", "stalls"):
             value = raw.get(key)

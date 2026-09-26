@@ -382,3 +382,87 @@ def _brief_metadata(text: Any) -> str:
     if not text:
         return ""
     return str(text)[:JUSTIFICATION_LIMIT]
+
+
+# --------------------------------------------------------------------------- #
+# P0 requisito 12 — Procedencia y firma de las acciones
+# --------------------------------------------------------------------------- #
+
+#: De dónde salió la acción. Es la distinción que hace falta para el filtro: dos pasos
+#: iguales del plan ORIGINAL son trabajo legítimo; la misma acción reofrecida por un REPLAN
+#: tras fallar es, casi siempre, el bucle del MVP.
+ORIGIN_PLAN = "plan_original"
+ORIGIN_REPLAN = "replan"
+
+
+@dataclass
+class ActionAttempt:
+    """Un intento de acción con su procedencia. Es lo que el filtro de replan consulta.
+
+    No guarda razonamiento: sólo la operación, quién la propuso, con qué contexto y si
+    funcionó. `evidence_fp` es la huella de la evidencia en el momento del intento, y es
+    lo que permite distinguir "repetir porque no cambió nada" de "repetir porque SÍ cambió
+    algo": una acción fallida puede volver a ser válida si la evidencia es nueva.
+    """
+
+    signature: str
+    capability: str = ""
+    action: str = ""
+    step_id: str = ""
+    #: 0 = plan original; 1..n = cada replan posterior.
+    plan_generation: int = 0
+    origin: str = ORIGIN_PLAN
+    success: bool = False
+    error: str = ""
+    #: Versión del `Context` (#2) con la que se decidió. Referencia, no copia.
+    context_version: int = 0
+    #: Huella de la evidencia en el momento del intento.
+    evidence_fp: str = ""
+    #: P0 §12.5 (corregido): sobre qué objeto actuó la acción. Es lo que permite decidir si
+    #: la evidencia nueva es RELEVANTE para esta acción oadvance de otra tarea.
+    scope: str = ""
+    #: Evidencia filtrada por `scope`. Es la que se compara al reevaluar.
+    scoped_evidence_fp: str = ""
+    iteration: int = 0
+    timestamp: float = 0.0
+
+    @property
+    def is_replan(self) -> bool:
+        return self.origin == ORIGIN_REPLAN
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "signature": self.signature,
+            "capability": self.capability,
+            "action": self.action,
+            "step_id": self.step_id,
+            "plan_generation": self.plan_generation,
+            "origin": self.origin,
+            "success": self.success,
+            "error": self.error,
+            "context_version": self.context_version,
+            "evidence_fp": self.evidence_fp,
+            "scope": self.scope,
+            "scoped_evidence_fp": self.scoped_evidence_fp,
+            "iteration": self.iteration,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, row: dict[str, Any]) -> "ActionAttempt":
+        return cls(
+            signature=str(row.get("signature") or ""),
+            capability=str(row.get("capability") or ""),
+            action=str(row.get("action") or ""),
+            step_id=str(row.get("step_id") or ""),
+            plan_generation=int(row.get("plan_generation") or 0),
+            origin=str(row.get("origin") or ORIGIN_PLAN),
+            success=bool(row.get("success")),
+            error=str(row.get("error") or ""),
+            context_version=int(row.get("context_version") or 0),
+            evidence_fp=str(row.get("evidence_fp") or ""),
+            scope=str(row.get("scope") or ""),
+            scoped_evidence_fp=str(row.get("scoped_evidence_fp") or ""),
+            iteration=int(row.get("iteration") or 0),
+            timestamp=float(row.get("timestamp") or 0.0),
+        )

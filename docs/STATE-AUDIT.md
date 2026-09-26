@@ -44,7 +44,7 @@ El error más común al medir así es contar *envoltorios vacíos* como avance. 
 | Memory | ~55-60% | 216 líneas, 12 ficheros de test. `recall()` antes de `decide()` |
 | World Model | ~50-60% | 207 líneas, 9 ficheros de test. **Sólo en memoria**: dominios FILE y TOOL, se pierde al reiniciar |
 | Model Router | ~65% | 811 líneas, 10 ficheros de test. REAL/DEGRADED/UNAVAILABLE verificado en E2E |
-| Replanning | ~60% | Replan funciona, pero **no hay guarda de reintento idéntico** (§5.7 pendiente) |
+| Replanning | **~100%** | Cerrado: guarda de reintento idéntico con firma determinista, evidencia material con *evidence scope* y auditoría persistente del rechazo. Ver §13 del gap analysis |
 | Verification | **~70%** | `goal_verification.py` (596 líneas), 17 ficheros de test, 3 suites nuevas en `0ed81fa` |
 | Voice / TTS | ~45% | 427 líneas, 3 backends (`edge`, `elevenlabs`, `local`), 4 ficheros de test |
 | Speech input | ~35-40% | **Sólo en `apps/face`** (`SpeechRecognizer.ts`). No existe en el core Python |
