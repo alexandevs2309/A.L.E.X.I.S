@@ -80,13 +80,38 @@ C3 es el punto más delicado: la salida del LLM es **dato, no instrucción**. Na
 
 Solo tras B y C completos: v0.5 percepción/voz (STT/TTS/visión/pantallas), v0.6 browser/investigación/grafo, v0.7 IoT (MQTT/Home Assistant), v0.8 aprendizaje (skill factory, experimentos, benchmark, fine-tuning), v1.0 Experience Engine integral.
 
+## 3 bis. Ramas y pull requests
+
+`main` está protegida en GitHub: los cambios entran por pull request y no se puede hacer
+force-push ni borrar la rama. Verifícalo con:
+
+```bash
+gh api repos/alexandevs2309/A.L.E.X.I.S/branches/main/protection
+```
+
+La protección **no** se aplica a los administradores, así que un push con token de admin
+sigue pasando. Eso es intencionado: el repositorio es de una sola persona y GitHub no
+permite aprobar el propio pull request, así que exigir una revisión dejaría el repo
+sin forma de hacer merge. Si algún día hay más gente, cierra la salida con
+`enforce_admins: true` en esa misma configuración.
+
+Regla práctica: el trabajo se hace en una rama y se abre un PR, aunque lo revise la misma
+persona que lo escribió. El PR es lo que hace visible el diff; un push directo a `main` es
+lo que permite que dos máquinas escriban la misma línea sin que nadie lo note.
+
+### Nota sobre el historial
+El commit `0cb0e27` aparece en `git log` como si fuera solo del detector de secretos, pero
+también contiene la reconciliación de la documentación de P0: un `--amend` se llevó el
+commit anterior por error. El árbol de trabajo es correcto; solo el mensaje quedó
+desalineado, y no se reescribe historia ya publicada.
+
 ## 4. Flujo de trabajo por capacidad
 
 1. Escribir/actualizar el contrato en `alexis/contracts.py`.
 2. Definir la interfaz (ABC o Protocol) sin implementación.
 3. Implementación mínima que cumple la regla de las 3 preguntas.
 4. Test que demuestre la operación (no el mock).
-5. Registrar elegibilidad: la misión termina en COMPLETED y cada paso deja evidencia.
+5. Registrar elegibilidad: cada paso deja evidencia y la misión llega a COMPLETED sólo con el objetivo verificado.
 6. Auditoría: `mission_id, task_id, actor, tool, args hash, autorización, resultado, verificación, rollback`.
 
 ## 5. Convenciones del repositorio
