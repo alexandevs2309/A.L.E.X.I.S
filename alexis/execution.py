@@ -30,6 +30,9 @@ _CAPABILITY_TOOL = {
     "fs.stat": "fs.stat",
     "fs.write": "fs.write",
     "fs.remove": "fs.remove",
+    # P0 §5.4: sin esta entrada, un paso `action=test` con `capability=execute.test`
+    # llegaba al executor sin tool y moría con "acción 'test' no mapeada a ninguna tool".
+    "execute.test": "execute.test",
 }
 
 #: Capabilities cuyo `path` vive dentro del sandbox del proyecto.

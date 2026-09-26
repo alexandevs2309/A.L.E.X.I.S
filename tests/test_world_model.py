@@ -311,7 +311,7 @@ async def test_world_is_empty_does_not_change_behavior():
 
     assert executor.calls == ["investigar"]
     assert "ask_user" not in actions
-    assert outcome.mission_state is MissionState.COMPLETED
+    assert outcome.mission_state is MissionState.NEEDS_VERIFICATION
 
 
 @pytest.mark.asyncio

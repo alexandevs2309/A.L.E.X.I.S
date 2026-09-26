@@ -121,7 +121,7 @@ async def test_valid_in_memory_plan_is_revalidated_and_runs(tmp_path):
 
     result = await runtime.run_mission(mission)
 
-    assert result.state is MissionState.COMPLETED
+    assert result.state is MissionState.NEEDS_VERIFICATION
     assert executor.calls == ["investigar", "verificar"]
 
 
@@ -177,7 +177,7 @@ async def test_persisted_invalid_plan_falls_back_to_the_rule_based_planner(tmp_p
 
     result = await runtime.run_mission(mission)
 
-    assert result.state is MissionState.COMPLETED
+    assert result.state is MissionState.NEEDS_VERIFICATION
     assert "magia" not in executor.calls
     fallback_plan = await Planner().create_plan(_mission())
     assert [s.id for s in result.plan.steps] == [s.id for s in fallback_plan.steps]
@@ -370,7 +370,7 @@ async def test_legacy_runtime_without_validator_behaves_exactly_as_before(tmp_pa
 
     result = await runtime.run_mission(mission)
 
-    assert result.state is MissionState.COMPLETED
+    assert result.state is MissionState.NEEDS_VERIFICATION
     assert executor.calls == ["investigar", "verificar"]
     assert "plan_provenance" not in result.context
     assert "plan_rejected" not in result.context
@@ -399,5 +399,5 @@ async def test_rule_based_plan_passes_the_validator_with_a_complete_envelope(tmp
 
     result = await runtime.run_mission(mission)
 
-    assert result.state is MissionState.COMPLETED
+    assert result.state is MissionState.NEEDS_VERIFICATION
     assert result.context["plan_provenance"]["accepted"] is True

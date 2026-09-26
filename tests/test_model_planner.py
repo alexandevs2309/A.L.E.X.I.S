@@ -192,7 +192,7 @@ async def test_accepted_model_plan_is_used_by_the_runtime_and_policy_still_autho
     assert [s.id for s in result.plan.steps] == ["observar", "leer"]
     assert result.context["plan_provenance"]["accepted"] is True
     assert result.context["plan_provenance"]["proposed_by"] == "model"
-    assert result.state is MissionState.COMPLETED
+    assert result.state is MissionState.NEEDS_VERIFICATION
     assert executor.calls == ["observar", "leer"]
 
 

@@ -197,7 +197,7 @@ def test_read_only_high_risk_pauses_instead_of_being_auto_allowed():
 
 
 @pytest.mark.asyncio
-async def test_normal_read_write_mission_still_completes():
+async def test_normal_read_write_mission_still_runs_to_the_end():
     executor = _Executor()
     runtime = _runtime(executor)
     from alexis.capabilities import build_catalog
@@ -210,7 +210,10 @@ async def test_normal_read_write_mission_still_completes():
 
     result = await runtime.run_mission(mission)
 
-    assert result.state is MissionState.COMPLETED
+    # P0 §5.5: la misión recorre todos sus pasos y NO queda bloqueada, pero el objetivo
+    # no está verificado (el executor de test no deja evidencia observable), así que el
+    # estado final honesto es needs_verification, no completed.
+    assert result.state is MissionState.NEEDS_VERIFICATION
     assert executor.calls == [s.id for s in mission.plan.steps]
 
 

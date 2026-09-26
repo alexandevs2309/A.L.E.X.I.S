@@ -21,6 +21,8 @@ class MissionState(str, Enum):
     PLANNING = "planning"
     RUNNING = "running"
     VERIFYING = "verifying"
+    #: El objetivo no está demostrado todavía. No es un fallo: es "todavía no".
+    NEEDS_VERIFICATION = "needs_verification"
     WAITING_APPROVAL = "waiting_approval"
     WAITING_CLARIFICATION = "waiting_clarification"
     BLOCKED = "blocked"
@@ -53,6 +55,14 @@ class MissionEnvelope:
     auto_approve: list[str] = field(default_factory=list)
 
 
+class UnverifiedGoalError(RuntimeError):
+    """Se intentó declarar COMPLETED sin que el GoalVerifier lo autorice (P0 §5.5).
+
+    No es un aviso: es la invariante. `ACTION SUCCESS -> COMPLETED` es exactamente el
+    salto que el plan veta, y este error hace que no se pueda escribir el estado.
+    """
+
+
 @dataclass
 class Mission:
     id: str
@@ -62,6 +72,28 @@ class Mission:
     context: dict[str, Any] = field(default_factory=dict)
     results: list[dict[str, Any]] = field(default_factory=list)
     plan: "Plan | None" = None
+    #: Verificación del OBJETIVO. La fija el GoalVerifier (§5.3); nadie más.
+    goal_verification: "Any | None" = None
+
+    def __setattr__(self, name, value):
+        """Única puerta a `COMPLETED`, y solo con objetivo verificado (§5.5).
+
+        No es una condición superficial en el sitio donde se marca el estado: es el propio
+        estado el que se niega. Cualquier camino —cognitivo, legacy, API, script, tests—
+        que intente `mission.state = MissionState.COMPLETED` sin un `GoalVerification`
+        confirmado recibe `UnverifiedGoalError`. Los caminos que sí pueden completarse usan
+        `MissionEngine.settle()`, que es la política; esta es la redacción.
+        """
+        if name == "state" and value == MissionState.COMPLETED:
+            from alexis.autonomy.goal_state import goal_is_confirmed
+
+            if not goal_is_confirmed(self.goal_verification):
+                raise UnverifiedGoalError(
+                    f"la misión {getattr(self, 'id', '?')} no puede pasar a COMPLETED: "
+                    "su GoalVerification no dice verified=True con todos los criterios "
+                    "satisfechos y evidencia fiable. ACTION SUCCESS no es OBJECTIVE SUCCESS."
+                )
+        object.__setattr__(self, name, value)
 
 
 @dataclass

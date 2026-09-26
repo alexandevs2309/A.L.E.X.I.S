@@ -105,7 +105,10 @@ class TestVerifierChat:
     async def test_chat_mission_passes_with_respond(self, tmp_path):
         verifier = FilesystemVerifier(workspace=tmp_path)
         mission = await _mission("¿qué puedes hacer por mí?")
-        mission.state = MissionState.COMPLETED
+        # P0 §5.5: `COMPLETED` ya no se puede escribir sin verificación del objetivo.
+        # Al verificador del plan le da igual el estado; lo que se prueba aquí es su
+        # veredicto sobre los resultados, no el estado final de la misión.
+        mission.state = MissionState.NEEDS_VERIFICATION
         mission.results.append(
             {
                 "step": "respond",
@@ -121,7 +124,7 @@ class TestVerifierChat:
     async def test_chat_mission_fails_without_respond(self, tmp_path):
         verifier = FilesystemVerifier(workspace=tmp_path)
         mission = await _mission("¿qué puedes hacer por mí?")
-        mission.state = MissionState.COMPLETED
+        mission.state = MissionState.NEEDS_VERIFICATION
         verification = await verifier.verify(mission, await Planner().create_plan(mission))
         assert verification.passed is False
 

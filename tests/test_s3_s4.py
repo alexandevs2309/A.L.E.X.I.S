@@ -43,7 +43,9 @@ from alexis.storage.repositories import (
 )
 from alexis.tools.filesystem import build_filesystem_tools
 from alexis.tools.registry import ToolRegistry
+from alexis.cognition.goal_verification import GoalVerifier
 from alexis.verification import FilesystemVerifier
+from alexis.world.model import WorldModel
 
 
 def _build(db):
@@ -52,11 +54,14 @@ def _build(db):
     tools = ToolRegistry()
     tools.register_all(build_filesystem_tools(ws))
     sandbox = SandboxRunner(ws)
+    world = WorldModel()
     runtime = AlexisRuntime(
         planner=Planner(),
         policy=PolicyEngine(),
         executor=SandboxExecutor(tools, sandbox),
         verifier=FilesystemVerifier(ws),
+        world=world,
+        goal_verifier=GoalVerifier(world=world),
         memory=InMemoryMemory(),
         learning=ExperienceLearner(),
         event_bus=EventBus(),
@@ -89,6 +94,8 @@ async def test_read_mission_real_tasks_and_completion(db):
             autonomy=AutonomyLevel.SUPERVISED,
             allowed_actions=["read", "research", "execute", "verify"],
         ),
+        # P0 §5.5: el objetivo se demuestra con el hecho observado, no con los pasos ok.
+        success_criteria=["El archivo file_exists:reporte.txt está escrito"],
     )
     await runtime.run_mission(mission)
     assert mission.state is MissionState.COMPLETED
@@ -123,6 +130,8 @@ async def test_write_intent_runs_auto_and_creates(db):
             autonomy=AutonomyLevel.SUPERVISED,
             allowed_actions=["read", "research", "execute", "verify"],
         ),
+        # P0 §5.5: el objetivo se demuestra con el hecho observado, no con los pasos ok.
+        success_criteria=["El archivo file_exists:nuevo.txt está escrito"],
     )
     # Crear/editar NO es delicado: corre automáticamente, sin aprobación.
     await runtime.run_mission(mission)
@@ -158,6 +167,8 @@ async def test_destructive_intent_requires_approval_then_removes(db):
             autonomy=AutonomyLevel.SUPERVISED,
             allowed_actions=["read", "research", "execute", "verify"],
         ),
+        # El objetivo de un borrado se demuestra viendo que el archivo ya no está.
+        success_criteria=["El archivo file_missing:para-borrar.txt ya no está"],
     )
     # Borrar es DELICADO → pide aprobación humana.
     await runtime.run_mission(mission)
@@ -223,6 +234,8 @@ async def test_read_intent_runs_without_approval(db):
             autonomy=AutonomyLevel.SUPERVISED,
             allowed_actions=["read", "research", "execute", "verify"],
         ),
+        # P0 §5.5: el objetivo se demuestra con el hecho observado, no con los pasos ok.
+        success_criteria=["El archivo file_exists:reporte.txt está escrito"],
     )
     await runtime.run_mission(mission)
     # Solo lectura → corre automáticamente, sin pausa de aprobación.
@@ -245,6 +258,8 @@ async def test_checkpoint_resumes_not_restarts(db):
             autonomy=AutonomyLevel.SUPERVISED,
             allowed_actions=["read", "research", "execute", "verify"],
         ),
+        # P0 §5.5: el objetivo se demuestra con el hecho observado, no con los pasos ok.
+        success_criteria=["El archivo file_exists:reporte.txt está escrito"],
     )
     # simular un checkpoint previo en el paso 2 (solo understand+research hechos)
     mission.results = [{"step": "understand", "success": True, "task": "understand"}, {"step": "research", "success": True, "task": "research"}]

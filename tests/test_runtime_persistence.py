@@ -43,7 +43,7 @@ def _runtime(db):
 
 
 @pytest.mark.asyncio
-async def test_runtime_completes_and_persists_across_restart(db, test_dsn):
+async def test_runtime_ends_unverified_and_persists_that_across_restart(db, test_dsn):
     runtime = _runtime(db)[1]
 
     mission = MissionEngine().create(
@@ -55,7 +55,9 @@ async def test_runtime_completes_and_persists_across_restart(db, test_dsn):
         ),
     )
     await runtime.run_mission(mission)
-    assert mission.state is MissionState.COMPLETED
+    # P0 §5.5: el verificador del plan pasó, el objetivo no está demostrado. La misión no
+    # se completa y, por tanto, tampoco se persiste como completada.
+    assert mission.state is MissionState.NEEDS_VERIFICATION
     assert runtime.latest_verification["confidence"] == pytest.approx(0.7)
 
     await db.close()
@@ -64,7 +66,7 @@ async def test_runtime_completes_and_persists_across_restart(db, test_dsn):
     await db2.open()
     recovered = await MissionRepository(db2).get(mission.id)
     assert recovered is not None
-    assert recovered.state is MissionState.COMPLETED
+    assert recovered.state is MissionState.NEEDS_VERIFICATION
     assert any(r.get("step") == "verify" and r.get("success") for r in recovered.results)
 
     verifications = await VerificationRepository(db2).list(mission.id)
@@ -74,8 +76,9 @@ async def test_runtime_completes_and_persists_across_restart(db, test_dsn):
 
     assert verifications and verifications[0]["passed"] is True
     assert verifications[0]["confidence"] == pytest.approx(0.7)
-    assert any(e["topic"] == "mission.completed" for e in events)
-    assert any(a["event"] == "mission.completed" for a in audit)
+    # Ningún evento de "completada" puede existir si la misión no se completó.
+    assert not any(e["topic"] == "mission.completed" for e in events)
+    assert not any(a["event"] == "mission.completed" for a in audit)
 
 
 @pytest.mark.asyncio

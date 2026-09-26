@@ -1,6 +1,7 @@
 import asyncio
 import sys
 
+from alexis.autonomy.goal_state import settle
 from alexis.contracts import (
     AutonomyLevel,
     Checkpoint,
@@ -92,7 +93,10 @@ async def verify():
     await verifications.insert(mission.id, passed=True, confidence=0.9, verifier="fs_verifier", evidence=["path ok"])
     await checkpoints.save(Checkpoint(mission_id=mission.id, step_index=1, payload={"phase": "execute"}))
 
-    mission.state = MissionState.COMPLETED
+    # P0 §5.5: ni siquiera un script de comprobación puede escribir COMPLETED sin que el
+    # GoalVerifier lo autorice. Se construye con `settle()` sobre una observación real.
+    mission.goal.success_criteria = ["El archivo file_exists:README.md está escrito"]
+    settle(mission, _goal_verified(mission))
     mission.results.append({"task": task.id, "success": True})
     await missions.upsert(mission)
     await audit.record("mission.completed", "verify_cli", mission.id, mission=mission.id)
@@ -112,6 +116,7 @@ async def verify():
     checkpoint = await CheckpointRepository(recovered_db).latest(mission.id)
 
     assert recovered is not None, "la misión no se recuperó"
+    assert recovered.goal_verification is not None, "la verificación debe viajar con la misión"
     assert recovered.id == mission.id
     assert recovered.state is MissionState.COMPLETED
     assert recovered.results == mission.results
@@ -131,6 +136,22 @@ async def verify():
     print(f"OK: task {task_recovered.id} completa con result persistido; sin tareas reclamables.")
     print(f"OK: 1 execution, {len(obs_rows)} observación(es), {len(ver_rows)} verificación(es), checkpoint en paso {checkpoint['step_index']}.")
     print(f"OK: {len(stored_events)} evento(s) y {len(stored_audit)} registro(s) de auditoría persistidos.")
+
+
+def _goal_verified(mission):
+    """Verificación de objetivo para el smoke test: la observación que el script insertó."""
+    from alexis.cognition.goal_verification import GoalVerifier
+    from alexis.contracts import ExecutionResult, PlanStep
+    from alexis.world.model import WorldModel
+
+    world = WorldModel()
+    step = PlanStep("leer", "leer", "research", None, "executor", capability="fs.read")
+    world.observe_execution(
+        step,
+        ExecutionResult(success=True, output={"path": "README.md", "exists": True, "size": 10}),
+        mission,
+    )
+    return GoalVerifier(world=world).verify(mission)
 
 
 async def main():

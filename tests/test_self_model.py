@@ -27,7 +27,17 @@ def _mission(state=MissionState.PENDING, autonomy=AutonomyLevel.SUPERVISED, **ov
         max_runtime_minutes=10,
         max_cost_usd=5.0,
     )
-    mission = Mission(id="m1", goal=Goal(env.objective), envelope=env, state=state)
+    mission = Mission(id="m1", goal=Goal(env.objective), envelope=env)
+    if state is MissionState.COMPLETED:
+        # P0 §5.5: ni siquiera el constructor puede crear una misión completada. Estos
+        # tests observan cómo mapea la presencia cada estado, así que la misión se completa
+        # por la vía real: criterio comprobado contra una observación de tool.
+        from goal_completion import complete_mission, world_with_file
+
+        mission.goal.success_criteria = ["El archivo file_exists:informe.md está escrito"]
+        complete_mission(mission, world_with_file("informe.md"))
+    else:
+        mission.state = state
     mission.plan = Plan(
         mission.id,
         [
@@ -247,9 +257,13 @@ async def test_sync_evolves_on_real_bus_events():
     assert len(model.snapshot()["reflections"]) == 1
     assert model.snapshot()["reflections"][0]["text"] == "debería haber verificado antes"
 
-    await bus.publish("mission.completed", "m1")
-    await asyncio.sleep(0)
-    holder["mission"].state = MissionState.COMPLETED
+    # P0 §5.5: publicar `mission.completed` solo tiene sentido si la misión se completó de
+    # verdad, así que se completa por la vía real antes de publicar el evento.
+    from goal_completion import complete_mission, world_with_file
+
+    holder["mission"].goal.success_criteria = ["El archivo file_exists:informe.md está escrito"]
+    complete_mission(holder["mission"], world_with_file("informe.md"))
+    assert holder["mission"].state is MissionState.COMPLETED
     await bus.publish("mission.completed", "m1")
     await asyncio.sleep(0)
     assert model.current_state == "success"

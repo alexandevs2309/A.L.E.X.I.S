@@ -71,16 +71,40 @@ def mission_from_row(row: dict) -> Mission:
     goal = Goal(
         objective=goal_data["objective"],
         constraints=goal_data["constraints"],
-        success_criteria=goal_data["success_criteria"],
+        success_criteria=goal_data.get("success_criteria") or [],
     )
-    return Mission(
+    context = _decoded(row["context"])
+    stored_state = MissionState(row["state"])
+    # P0 §5.5: `completed` no se puede construir sin la verificación del objetivo. La
+    # fila no tiene columna para ella, así que viaja en el context (que ya se persiste) y
+    # se restaura aquí ANTES de fijar el estado. Una fila `completed` sin verificación
+    # utilizable no se carga como completada: se degrada a needs_verification con el motivo
+    # escrito, porque una fila anterior a §5.5 no puede convertirse en un Logro.
+    mission = Mission(
         id=row["id"],
         goal=goal,
         envelope=envelope,
-        state=MissionState(row["state"]),
-        context=_decoded(row["context"]),
+        state=MissionState.NEEDS_VERIFICATION if stored_state is MissionState.COMPLETED else stored_state,
+        context=context,
         results=_decoded(row["results"]),
     )
+    if stored_state is not MissionState.COMPLETED:
+        return mission
+
+    from alexis.autonomy.goal_state import goal_is_confirmed
+    from alexis.cognition.goal_verification import GoalVerification
+
+    verification = GoalVerification.from_dict(context.get("goal_verification"))
+    if goal_is_confirmed(verification):
+        mission.goal_verification = verification
+        mission.state = MissionState.COMPLETED
+        return mission
+
+    mission.context["goal_verification_reason"] = (
+        "la fila decía 'completed' pero su verificación de objetivo no es válida: no se "
+        "confía y la misión queda pendiente de verificar (P0 §5.5)"
+    )
+    return mission
 
 
 def task_to_row(task: Task) -> dict:

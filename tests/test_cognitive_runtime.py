@@ -12,6 +12,7 @@ from alexis.cognition.contracts import Claim, ClaimKind  # noqa: E402
 from alexis.cognition.evidence import ClaimGuard, EvidenceStore  # noqa: E402
 from alexis.cognition.loop import CognitiveRuntime, diagnose_failure  # noqa: E402
 from alexis.cognition.planner import Planner  # noqa: E402
+from alexis.cognition.goal_verification import GoalVerifier  # noqa: E402
 from alexis.cognition.state import Decision, KnowledgeState, NextAction  # noqa: E402
 from alexis.contracts import (  # noqa: E402
     AutonomyLevel,
@@ -32,6 +33,7 @@ from alexis.memory.store import InMemoryMemory  # noqa: E402
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelResponse  # noqa: E402
 from alexis.security.policy import PolicyEngine  # noqa: E402
 from alexis.verification import FilesystemVerifier  # noqa: E402
+from alexis.world.model import WorldModel  # noqa: E402
 
 ACTIONS = ["understand", "analyze", "research", "execute", "verify", "modify", "respond"]
 
@@ -47,8 +49,10 @@ def _envelope(objective, **over):
     return MissionEnvelope(**data)
 
 
-def _mission(objective, **over):
-    return MissionEngine().create(objective, _envelope(objective, **over))
+def _mission(objective, success_criteria=None, **over):
+    return MissionEngine().create(
+        objective, _envelope(objective, **over), success_criteria=success_criteria
+    )
 
 
 def _plan(*steps):
@@ -183,7 +187,9 @@ async def test_failure_is_observed_diagnosed_replanned_then_verified_and_finishe
     assert knowledge.last_failure_kind == "not_found"
     assert knowledge.verified is True
     assert knowledge.verification_passed is True
-    assert outcome.mission_state is MissionState.COMPLETED
+    # P0 §5.5: el plan verificó bien, el objetivo no está demostrado. La misión no se
+    # completa: queda en NEEDS_VERIFICATION, que es "todavía no", no "falló".
+    assert outcome.mission_state is MissionState.NEEDS_VERIFICATION
     assert "investigar" in " ".join(knowledge.unknown)
 
 
@@ -588,13 +594,38 @@ async def test_already_approved_step_is_executed_without_asking_again():
     actions, knowledge, outcome = await _drain(cognitive, mission, plan)
 
     assert [c["step"] for c in executor.calls] == ["borrar"]
-    assert outcome.mission_state is MissionState.COMPLETED
+    # El paso se ejecutó con aprobación, pero el objetivo sigue sin verificar (§5.5).
+    assert outcome.mission_state is MissionState.NEEDS_VERIFICATION
     assert any("aprobado por el usuario" in k for k in knowledge.known)
 
 
 # ----------------------------------------------------------------------
 # Integración: el runtime completo con el bucle cognitivo
 # ----------------------------------------------------------------------
+
+
+async def _observe_real_file(tmp_path, world, name):
+    """Observa un archivo real con la tool real, para que el objetivo tenga evidencia real."""
+    from alexis.execution import SandboxExecutor
+    from alexis.security.sandbox import SandboxRunner
+    from alexis.tools.filesystem import build_filesystem_tools
+    from alexis.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_all(build_filesystem_tools(tmp_path))
+    executor = SandboxExecutor(tools=registry, sandbox=SandboxRunner(tmp_path))
+    step = PlanStep(
+        "comprobar",
+        f"comprobar {name}",
+        "research",
+        RiskLevel.LOW,
+        "executor",
+        capability="fs.stat",
+        args={"path": name},
+    )
+    result = await executor.execute(_mission("comprobar"), step, tool_name="fs.stat")
+    world.observe_execution(step, result)
+    return result
 
 
 def _full_runtime(cognitive):
@@ -616,7 +647,13 @@ async def test_full_runtime_completes_through_the_cognitive_loop(tmp_path):
     (tmp_path / "notas.txt").write_text("contenido", encoding="utf-8")
     from alexis.capabilities import build_catalog
 
-    mission = _mission("lee notas.txt", capabilities=[s.id for s in build_catalog().enabled()])
+    world = WorldModel()
+    await _observe_real_file(tmp_path, world, "notas.txt")
+    mission = _mission(
+        "lee notas.txt",
+        capabilities=[s.id for s in build_catalog().enabled()],
+        success_criteria=["El archivo file_exists:notas.txt está escrito"],
+    )
     mission.plan = await Planner().create_plan(mission)
     cognitive = CognitiveRuntime(
         policy=PolicyEngine(),
@@ -624,11 +661,16 @@ async def test_full_runtime_completes_through_the_cognitive_loop(tmp_path):
         executor=None,
         verifier=FilesystemVerifier(workspace=tmp_path),
         execute=_ScriptedExecutor({}),
+        world=world,
+        goal_verifier=GoalVerifier(world=world),
     )
     runtime = _full_runtime(cognitive)
 
     result = await runtime.run_mission(mission)
 
+    # §5.5: se completa porque el GoalVerifier lo autorizó, no porque los pasos ok.
+    assert result.goal_verification is not None
+    assert result.goal_verification.verified is True
     assert result.state is MissionState.COMPLETED
     assert result.context["knowledge"]["verified"] is True
     assert result.context["knowledge"]["claims"]
@@ -640,7 +682,13 @@ async def test_legacy_runtime_is_untouched_when_no_cognitive_runtime(tmp_path):
     (tmp_path / "notas.txt").write_text("contenido", encoding="utf-8")
     from alexis.capabilities import build_catalog
 
-    mission = _mission("lee notas.txt", capabilities=[s.id for s in build_catalog().enabled()])
+    world = WorldModel()
+    await _observe_real_file(tmp_path, world, "notas.txt")
+    mission = _mission(
+        "lee notas.txt",
+        capabilities=[s.id for s in build_catalog().enabled()],
+        success_criteria=["El archivo file_exists:notas.txt está escrito"],
+    )
     mission.plan = await Planner().create_plan(mission)
     runtime = AlexisRuntime(
         planner=Planner(),
@@ -651,11 +699,14 @@ async def test_legacy_runtime_is_untouched_when_no_cognitive_runtime(tmp_path):
         learning=ExperienceLearner(),
         event_bus=EventBus(),
         gate=AutonomyGate(),
+        goal_verifier=GoalVerifier(world=world),
     )
     runtime.executor = _ScriptedExecutor({})
 
     result = await runtime.run_mission(mission)
 
+    # El camino legacy respeta la MISMA autoridad que el cognitivo (§5.5, caso 12).
+    assert result.goal_verification is not None
     assert result.state is MissionState.COMPLETED
     assert "knowledge" not in result.context
     assert "claims" not in result.context

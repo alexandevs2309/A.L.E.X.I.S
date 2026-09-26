@@ -45,6 +45,38 @@ class NextAction(str, Enum):
         return self in (NextAction.FINISH, NextAction.ABORT, NextAction.ASK_USER, NextAction.WAIT)
 
 
+class Verdict(str, Enum):
+    """Veredicto de evaluar UNA ACCIÓN. Nunca del objetivo (P0 §5.2).
+
+    Contrato, valor por valor:
+
+    - ``SUCCESS``: la acción se ejecutó y hay una observación concreta de que hizo lo que
+      se le pedía. No dice nada sobre el objetivo: eso lo verifica `GoalVerifier` (§5.3).
+    - ``PARTIAL_SUCCESS``: la acción corrió sin error pero sin observación que permita
+      afirmar que hizo lo esperado. Se ejecutó; no consta que sirviera.
+    - ``FAILURE``: la acción se intentó y no consiguió lo suyo, o no hubo avance real.
+    - ``INSUFFICIENT_EVIDENCE``: no se puede afirmar ni sí ni no. Es el veredicto por
+      defecto cuando nada se ha evaluado, y también el de FINISH mientras no exista
+      verificación a nivel de objetivo (§5.5 pendiente).
+    - ``BLOCKED``: la autoridad (policy, gate, aprobación, validez del plan o
+      disponibilidad de la capability) impidió la acción.
+
+    Prohibido, por contrato: usar ``SUCCESS`` para afirmar que el objetivo se consiguió.
+    ``ACTION SUCCESS -> OBJECTIVE SUCCESS`` es exactamente el salto que el plan veta.
+    """
+
+    SUCCESS = "success"
+    PARTIAL_SUCCESS = "partial_success"
+    FAILURE = "failure"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    BLOCKED = "blocked"
+
+    @property
+    def is_conclusive(self) -> bool:
+        """Si el veredicto dice algo sobre lo que se evaluó."""
+        return self in (Verdict.SUCCESS, Verdict.PARTIAL_SUCCESS, Verdict.FAILURE)
+
+
 @dataclass
 class KnowledgeState:
     """Lo que la mente sabe del objetivo mientras avanza la misión.
@@ -73,6 +105,8 @@ class KnowledgeState:
     diagnosis: str = ""
     last_error: str = ""
     last_failure_kind: str = ""
+    last_verdict: str = ""
+    verdict_reason: str = ""
     needs_replan: bool = False
     clarification: str = ""
     memory: list[str] = field(default_factory=list)
@@ -195,6 +229,8 @@ class KnowledgeState:
             "diagnosis": self.diagnosis,
             "last_error": self.last_error,
             "last_failure_kind": self.last_failure_kind,
+            "last_verdict": self.last_verdict,
+            "verdict_reason": self.verdict_reason,
             "needs_replan": self.needs_replan,
             "clarification": self.clarification,
             "memory": list(self.memory),
@@ -229,6 +265,8 @@ class KnowledgeState:
         state.diagnosis = str(raw.get("diagnosis") or "")
         state.last_error = str(raw.get("last_error") or "")
         state.last_failure_kind = str(raw.get("last_failure_kind") or "")
+        state.last_verdict = str(raw.get("last_verdict") or "")
+        state.verdict_reason = str(raw.get("verdict_reason") or "")
         state.needs_replan = bool(raw.get("needs_replan"))
         state.clarification = str(raw.get("clarification") or "")
         if isinstance(raw.get("memory"), list):
@@ -304,4 +342,4 @@ class Decision:
         }
 
 
-__all__ = ["NextAction", "KnowledgeState", "Decision", "Claim", "ClaimKind"]
+__all__ = ["NextAction", "KnowledgeState", "Decision", "Claim", "ClaimKind", "Verdict"]

@@ -33,6 +33,7 @@ SYSTEM = "system"
 TASK = "task"
 RESOURCE = "resource"
 DEPENDENCY = "dependency"
+TEST = "test"
 
 #: Capabilities que fallan de forma previsible si el mundo ya observó que la ruta no
 #: existe. `fs.write` NO está: crear lo que falta es exactamente su trabajo.
@@ -167,6 +168,9 @@ class WorldModel:
             return observed
         success = bool(getattr(result, "success", False))
 
+        if output.get("test_run"):
+            observed.append(self._observe_test_run(step, output, mission))
+
         path = output.get("path")
         if isinstance(path, str) and path:
             attributes: dict[str, Any] = {}
@@ -194,6 +198,32 @@ class WorldModel:
                 )
             )
         return observed
+
+    def _observe_test_run(self, step, output: dict, mission=None) -> WorldEntity:
+        """El resultado de una suite ejecutada es un hecho del mundo, no una opinión.
+
+        Se registra aunque la suite falle: un fallo observado es exactamente el tipo de
+        evidencia que el GoalVerifier necesita para marcar un criterio como no cumplido.
+        """
+        target = str(output.get("path") or ".")
+        return self.upsert(
+            WorldEntity(
+                id=f"{TEST}:{target}",
+                kind=TEST,
+                name=target,
+                attributes={
+                    "tests_passed": int(output.get("tests_passed") or 0),
+                    "tests_failed": int(output.get("tests_failed") or 0),
+                    "tests_skipped": int(output.get("tests_skipped") or 0),
+                    "exit_code": output.get("exit_code"),
+                    "timed_out": bool(output.get("timed_out")),
+                    "counts_parsed": bool(output.get("counts_parsed")),
+                },
+                source=f"tool:{getattr(step, 'capability', None) or 'executor'}",
+                confidence=0.9,
+                mission_id=getattr(mission, "id", None),
+            )
+        )
 
     def declare_tool(self, name: str, attributes: dict | None = None) -> WorldEntity:
         return self.upsert(
@@ -223,4 +253,5 @@ __all__ = [
     "TASK",
     "RESOURCE",
     "DEPENDENCY",
+    "TEST",
 ]

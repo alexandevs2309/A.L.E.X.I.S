@@ -38,8 +38,10 @@ def _envelope(objective, autonomy=AutonomyLevel.SUPERVISED, **over):
     return MissionEnvelope(**data)
 
 
-def _mission(objective, autonomy=AutonomyLevel.SUPERVISED, **over):
-    return MissionEngine().create(objective, _envelope(objective, autonomy, **over))
+def _mission(objective, autonomy=AutonomyLevel.SUPERVISED, success_criteria=None, **over):
+    return MissionEngine().create(
+        objective, _envelope(objective, autonomy, **over), success_criteria=success_criteria
+    )
 
 
 class _FakeRepo:
@@ -188,17 +190,22 @@ def _build_with_gate(gate, db):
     )
     from alexis.tools.filesystem import build_filesystem_tools
     from alexis.tools.registry import ToolRegistry
+    from alexis.cognition.goal_verification import GoalVerifier
     from alexis.verification import FilesystemVerifier
+    from alexis.world.model import WorldModel
 
     ws = pathlib.Path(tempfile.mkdtemp())
     tools = ToolRegistry()
     tools.register_all(build_filesystem_tools(ws))
     sandbox = SandboxRunner(ws)
+    world = WorldModel()
     runtime = AlexisRuntime(
         planner=Planner(),
         policy=PolicyEngine(),
         executor=SandboxExecutor(tools, sandbox),
         verifier=FilesystemVerifier(ws),
+        world=world,
+        goal_verifier=GoalVerifier(world=world),
         memory=InMemoryMemory(),
         learning=ExperienceLearner(),
         event_bus=EventBus(),
@@ -232,6 +239,7 @@ async def test_autonomous_destructive_runs_within_envelope_alone(db):
         "borra el archivo secret.txt",
         autonomy=AutonomyLevel.AUTONOMOUS,
         approval_required=[],
+        success_criteria=["El archivo file_missing:secret.txt ya no está"],
     )
     await runtime.run_mission(mission)
 
@@ -256,6 +264,7 @@ async def test_autonomous_asks_human_when_destructive_in_approval_required(db):
         "borra el archivo secret.txt",
         autonomy=AutonomyLevel.AUTONOMOUS,
         approval_required=["destructive", "production", "external_communication"],
+        success_criteria=["El archivo file_missing:secret.txt ya no está"],
     )
     await runtime.run_mission(mission)
 
@@ -284,7 +293,10 @@ async def test_plan_persisted_so_it_is_not_replanned_on_restart(db):
     await db.migrate()
     (ws / "reporte.txt").write_text("informe\n", encoding="utf-8")
 
-    mission = _mission("leeme el archivo reporte.txt")
+    mission = _mission(
+        "leeme el archivo reporte.txt",
+        success_criteria=["El archivo file_exists:reporte.txt está escrito"],
+    )
     await runtime.run_mission(mission)
     assert mission.state is MissionState.COMPLETED
     assert mission.context.get("plan_steps")

@@ -1,3 +1,4 @@
+from alexis.autonomy.goal_state import settle
 from alexis.contracts import Mission, MissionState, RiskLevel, Verification
 from alexis.cognition.planner import plan_from_dict, plan_to_dict
 from alexis.cognition.planner_model import PlanValidator
@@ -34,6 +35,8 @@ class AlexisRuntime:
         gate=None,
         recovery=None,
         cognitive=None,
+        goal_verifier=None,
+        world=None,
         plan_model=None,
         plan_validator=None,
     ):
@@ -53,6 +56,8 @@ class AlexisRuntime:
         self.gate = gate
         self.recovery = recovery
         self.cognitive = cognitive
+        self.goal_verifier = goal_verifier
+        self.world = world
         self.plan_model = plan_model
         self.plan_validator = plan_validator
         self.latest_verification = None
@@ -385,6 +390,14 @@ class AlexisRuntime:
                     })
                 return mission
 
+            # P0 §5.5: el camino legacy también alimenta al WorldModel. Sin esto no
+            # habría evidencia que el GoalVerifier pudiera usar y ninguna misión legacy
+            # podría completarse legítimamente (caso 12).
+            if self.world is not None:
+                try:
+                    self.world.observe_execution(step, result, mission)
+                except Exception:  # noqa: BLE001 — el world model no puede tumbar la misión
+                    pass
             await self._persist_observations(mission, result)
             self._evaluate(mission, step.id)
 
@@ -393,15 +406,35 @@ class AlexisRuntime:
 
         mission.state = MissionState.VERIFYING
         verification = await self.verifier.verify(mission, plan)
-        mission.state = MissionState.COMPLETED if verification.passed else MissionState.BLOCKED
-        return await self._finalize(mission, verification)
+        # P0 §5.5: la verificación del PLAN no completa la misión. El estado final lo
+        # decide `settle()` a partir del GoalVerifier, igual que en el camino cognitivo.
+        if not verification.passed:
+            mission.state = MissionState.BLOCKED
+        else:
+            settle(mission, self._verify_goal(mission))
+        return await self._finalize(mission, verification, goal_verified=mission.state is MissionState.COMPLETED)
 
-    async def _finalize(self, mission: Mission, verification):
+    def _verify_goal(self, mission: Mission):
+        """Verificación del OBJETIVO (§5.5). Sin GoalVerifier no se completa nada.
+
+        Delega en el cognitive si lo hay (comparte WorldModel y evidencia) y, si no, en el
+        `goal_verifier` inyectado. Devolver `None` es una respuesta legítima: significa "no
+        hay quién verifique", y entonces la misión no puede pasar a COMPLETED.
+        """
+        if self.cognitive is not None and getattr(self.cognitive, "goal_verifier", None) is not None:
+            return self.cognitive.verify_goal(mission)
+        if self.goal_verifier is not None:
+            return self.goal_verifier.verify(mission)
+        return None
+
+    async def _finalize(self, mission: Mission, verification, goal_verified: bool = False):
         """Epílogo común a los dos caminos: learning, persistencia, auditoría, eventos.
 
-        El estado de la misión ya lo decidió quien verificó (COMPLETED o BLOCKED).
+        `goal_verified` lo calcula `settle()` (§5.5). El learning solo registra experiencia
+        cuando el objetivo está demostrado de verdad: aprender de un plan que pasó no es
+        aprender que el usuario consiguió lo que pidió.
         """
-        if verification.passed and self.learning is not None:
+        if verification.passed and goal_verified and self.learning is not None:
             await self.learning.record_experience(mission, verification)
 
         if self.verification_repo is not None:
@@ -519,22 +552,39 @@ class AlexisRuntime:
                     },
                 )
                 if outcome.verification.passed:
-                    mission.state = MissionState.COMPLETED
-                    return await self._finalize(mission, outcome.verification)
-                mission.state = MissionState.VERIFYING
+                    # El plan verificó bien; el objetivo todavía no. `settle()` decide.
+                    settle(mission, self._verify_goal(mission))
+                    if mission.state is MissionState.COMPLETED:
+                        return await self._finalize(
+                            mission, outcome.verification, goal_verified=True
+                        )
+                mission.state = (
+                    mission.state
+                    if outcome.verification.passed
+                    else MissionState.VERIFYING
+                )
                 await self._commit(mission)
 
             if outcome.action is NextAction.FINISH and outcome.done:
-                mission.state = MissionState.COMPLETED
-                return await self._finalize(
-                    mission,
-                    Verification(
-                        passed=True,
-                        evidence=list(knowledge.known),
-                        confidence=knowledge.confidence,
-                        notes=knowledge.verification_notes or "verificación registrada en el conocimiento",
-                    ),
-                )
+                # P0 §5.5: ya no se fabrica un `Verification(passed=True)` para poder
+                # cerrar la misión. El estado viene de `settle()`; si el objetivo no está
+                # verificado, la misión sigue viva en NEEDS_VERIFICATION o BLOCKED.
+                settle(mission, self._verify_goal(mission))
+                if mission.state is MissionState.COMPLETED:
+                    return await self._finalize(
+                        mission,
+                        Verification(
+                            passed=True,
+                            evidence=list(knowledge.known),
+                            confidence=knowledge.confidence,
+                            notes=(
+                                (mission.goal_verification.reason if mission.goal_verification else "")
+                                or "objetivo verificado"
+                            ),
+                        ),
+                        goal_verified=True,
+                    )
+                await self._commit(mission)
 
             if outcome.done:
                 mission.state = outcome.mission_state or MissionState.RUNNING

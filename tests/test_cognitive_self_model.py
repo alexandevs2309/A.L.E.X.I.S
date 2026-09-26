@@ -185,7 +185,7 @@ async def test_available_capabilities_still_execute_normally():
 
     assert executor.calls == ["investigar"]
     assert "ask_user" not in actions
-    assert outcome.mission_state is MissionState.COMPLETED
+    assert outcome.mission_state is MissionState.NEEDS_VERIFICATION
 
 
 @pytest.mark.asyncio
@@ -253,7 +253,7 @@ async def test_empty_self_brief_does_not_block_the_mission():
     actions, _, outcome = await _drain(cognitive, mission, plan)
 
     assert executor.calls == ["investigar"]
-    assert outcome.mission_state is MissionState.COMPLETED
+    assert outcome.mission_state is MissionState.NEEDS_VERIFICATION
     assert "ask_user" not in actions
 
 
@@ -268,7 +268,7 @@ async def test_without_self_model_behavior_is_unchanged():
 
     assert executor.calls == ["leer_git"]
     assert "ask_user" not in actions
-    assert outcome.mission_state is MissionState.COMPLETED
+    assert outcome.mission_state is MissionState.NEEDS_VERIFICATION
 
 
 @pytest.mark.asyncio

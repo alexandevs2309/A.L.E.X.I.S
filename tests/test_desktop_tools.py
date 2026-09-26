@@ -254,7 +254,8 @@ class TestVerifierDesktop:
     async def test_desktop_mission_verifies_on_dispatch(self, tmp_path):
         verifier = FilesystemVerifier(workspace=tmp_path)
         mission = await _desktop_mission("abre claude code")
-        mission.state = MissionState.COMPLETED
+        # P0 §5.5: sin verificación del objetivo no se escribe COMPLETED.
+        mission.state = MissionState.NEEDS_VERIFICATION
         executor = SandboxExecutor(tools=ToolRegistry(), sandbox=SandboxRunner(workspace=tmp_path), desktop_delegate="host")
         step = PlanStep("execute", "run", "execute", RiskLevel.MEDIUM)
         result = await executor.execute(mission, step)
@@ -266,7 +267,8 @@ class TestVerifierDesktop:
     async def test_desktop_mission_fails_verify_without_dispatch(self, tmp_path):
         verifier = FilesystemVerifier(workspace=tmp_path)
         mission = await _desktop_mission("abre claude code")
-        mission.state = MissionState.COMPLETED
+        # P0 §5.5: sin verificación del objetivo no se escribe COMPLETED.
+        mission.state = MissionState.NEEDS_VERIFICATION
         verification = await verifier.verify(mission, await Planner().create_plan(mission))
         assert verification.passed is False
         assert "no fue despachada" in verification.notes

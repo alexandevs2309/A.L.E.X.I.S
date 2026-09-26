@@ -28,7 +28,8 @@ from typing import Any, Callable
 
 from alexis.cognition.contracts import SelfBrief
 from alexis.cognition.evidence import EvidenceStore
-from alexis.cognition.state import Decision, KnowledgeState, NextAction
+from alexis.cognition.goal_verification import GoalVerification, GoalVerifier
+from alexis.cognition.state import Decision, KnowledgeState, NextAction, Verdict
 from alexis.contracts import ExecutionResult, Mission, MissionState, Plan, PlanStep, RiskLevel
 from alexis.memory.contracts import MemoryQuery
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
@@ -68,10 +69,16 @@ class StepOutcome:
     claims: list = field(default_factory=list)
     diagnosis: str = ""
     no_progress: bool = False
+    #: Veredicto de la acción evaluada (P0 §5.2). Por defecto INSUFFICIENT_EVIDENCE:
+    #: un camino de retorno que se olvide de asignarlo no puede pasar por SUCCESS.
+    verdict: Verdict = Verdict.INSUFFICIENT_EVIDENCE
+    verdict_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "action": self.action.value,
+            "verdict": self.verdict.value,
+            "verdict_reason": self.verdict_reason,
             "done": self.done,
             "mission_state": self.mission_state.value if self.mission_state else None,
             "decision": self.decision.to_dict(),
@@ -89,6 +96,53 @@ class StepOutcome:
             "unknown": len(self.knowledge.unknown),
             "claims": len(self.knowledge.claims),
         }
+
+
+def verdict_for_execution(result: ExecutionResult | None) -> Verdict:
+    """Veredicto de una ejecución, según lo que realmente se observó (P0 §5.2).
+
+    - sin resultado: no hay nada evaluado.
+    - error: la acción se intentó y falló.
+    - sin salida observable: corrió sin error pero no consta que hiciera nada
+      (PARTIAL_SUCCESS, no SUCCESS: ejecutar no es conseguir).
+    - con salida observable: la acción hizo lo suyo.
+
+    Nunca devuelve SUCCESS por el mero hecho de que la tool no protestara, y nunca dice
+    nada del objetivo: eso es trabajo de `GoalVerifier` (§5.3).
+    """
+    if result is None:
+        return Verdict.INSUFFICIENT_EVIDENCE
+    if not result.success:
+        return Verdict.FAILURE
+    if not _has_observation(result.output):
+        return Verdict.PARTIAL_SUCCESS
+    return Verdict.SUCCESS
+
+
+def _execution_verdict_reason(result: ExecutionResult | None) -> str:
+    """Por qué se emitió ese veredicto. Sin motivo, un veredicto no es auditable."""
+    if result is None:
+        return "no se ejecutó ninguna acción: no hay nada que evaluar"
+    if not result.success:
+        return f"la acción falló: {result.error or 'sin detalle'}"
+    if not _has_observation(result.output):
+        return "la acción terminó sin error pero no devolvió ninguna observación"
+    return f"la acción devolvió observación: {_brief(result.output, limit=120)}"
+
+
+def _has_observation(output: Any) -> bool:
+    """Si la salida de la tool aporta algo que se pueda mirar.
+
+    `None`, cadena vacía y colecciones vacías no son evidencia de nada: una tool que
+    termina bien en silencio no ha demostrado que cumpliera su parte.
+    """
+    if output is None:
+        return False
+    if isinstance(output, str):
+        return bool(output.strip())
+    if isinstance(output, (list, tuple, set, dict)):
+        return bool(output)
+    return True
 
 
 def diagnose_failure(result: ExecutionResult) -> tuple[str, str, list[str]]:
@@ -138,6 +192,7 @@ class CognitiveRuntime:
         self_model=None,
         world=None,
         plan_validator=None,
+        goal_verifier: GoalVerifier | None = None,
         max_iterations: int = 12,
         max_replans: int = 2,
         max_stalls: int = 2,
@@ -153,6 +208,7 @@ class CognitiveRuntime:
         self.self_model = self_model
         self.world = world
         self.plan_validator = plan_validator
+        self.goal_verifier = goal_verifier
         self.max_iterations = max_iterations
         self.max_replans = max_replans
         self.max_stalls = max_stalls
@@ -712,18 +768,37 @@ class CognitiveRuntime:
                     done=True,
                     mission_state=MissionState.WAITING_CLARIFICATION,
                     question=decision.question or "¿Puedes concretarme qué esperas exactamente?",
+                    verdict=Verdict.INSUFFICIENT_EVIDENCE,
+                    verdict_reason=(
+                        "ALEXIS se detuvo por falta de información crítica; sin datos no "
+                        "hay nada que evaluar"
+                    ),
                 ),
                 before,
             )
 
         if decision.action is NextAction.FINISH:
+            # P0 §5.5: decidir finalizar no completa nada. Se verifica el objetivo y el
+            # estado lo decide `settle()`, que es la única autoridad. Sin verificador
+            # inyectado la misión queda en NEEDS_VERIFICATION, nunca en COMPLETED.
+            goal = self.verify_goal(mission, knowledge)
             return self._settle(
                 StepOutcome(
                     action=decision.action,
                     knowledge=knowledge,
                     decision=decision,
                     done=True,
-                    mission_state=MissionState.COMPLETED,
+                    mission_state=self._settled_state(mission, goal),
+                    verdict=Verdict.SUCCESS if _goal_confirmed(goal) else Verdict.INSUFFICIENT_EVIDENCE,
+                    verdict_reason=(
+                        f"objetivo verificado: {goal.reason}"
+                        if _goal_confirmed(goal)
+                        else (
+                            goal.reason
+                            if goal is not None
+                            else "sin GoalVerifier no se puede declarar el objetivo verificado (P0 §5.5)"
+                        )
+                    ),
                 ),
                 before,
             )
@@ -737,6 +812,8 @@ class CognitiveRuntime:
                     done=True,
                     mission_state=MissionState.FAILED,
                     error=decision.rationale,
+                    verdict=Verdict.FAILURE,
+                    verdict_reason=decision.rationale or "aborto: la acción no consiguió avanzar",
                 ),
                 before,
             )
@@ -749,6 +826,16 @@ class CognitiveRuntime:
                     knowledge=knowledge,
                     decision=decision,
                     diagnosis=decision.diagnosis or knowledge.diagnosis,
+                    verdict=(
+                        Verdict.FAILURE
+                        if knowledge.last_failure_kind
+                        else Verdict.INSUFFICIENT_EVIDENCE
+                    ),
+                    verdict_reason=(
+                        f"se replanifica tras un fallo ({knowledge.last_failure_kind})"
+                        if knowledge.last_failure_kind
+                        else "se replanifica sin un fallo previo: no hay nada evaluado aún"
+                    ),
                 ),
                 before,
             )
@@ -773,6 +860,12 @@ class CognitiveRuntime:
                     verification=verification,
                     claims=claims,
                     error=None if verification.passed else verification.notes,
+                    verdict=Verdict.SUCCESS if verification.passed else Verdict.FAILURE,
+                    verdict_reason=(
+                        f"la verificación del plan pasó: {verification.notes}"
+                        if verification.passed
+                        else f"la verificación del plan falló: {verification.notes}"
+                    ),
                 ),
                 before,
             )
@@ -791,6 +884,8 @@ class CognitiveRuntime:
                     done=True,
                     mission_state=MissionState.BLOCKED,
                     error=f"plan inválido en el paso '{step.id}': {'; '.join(step_reasons)}",
+                    verdict=Verdict.BLOCKED,
+                    verdict_reason=f"el plan no es ejecutable: {'; '.join(step_reasons)}",
                 ),
                 before,
             )
@@ -805,6 +900,8 @@ class CognitiveRuntime:
                     done=True,
                     mission_state=MissionState.BLOCKED,
                     error=authorization.reason,
+                    verdict=Verdict.BLOCKED,
+                    verdict_reason=f"la autoridad no lo autorizó: {authorization.reason}",
                 ),
                 before,
             )
@@ -820,6 +917,8 @@ class CognitiveRuntime:
                         mission_state=MissionState.WAITING_APPROVAL,
                         requires_approval=True,
                         error=authorization.reason,
+                        verdict=Verdict.BLOCKED,
+                        verdict_reason=f"esperando aprobación del usuario: {authorization.reason}",
                     ),
                     before,
                 )
@@ -840,6 +939,8 @@ class CognitiveRuntime:
                 claims=claims,
                 diagnosis=knowledge.diagnosis,
                 error=None if result.success else (result.error or "la acción falló"),
+                verdict=verdict_for_execution(result),
+                verdict_reason=_execution_verdict_reason(result),
             ),
             before,
         )
@@ -904,6 +1005,34 @@ class CognitiveRuntime:
             return self.gate.decide(mission, step, self.policy)
         return self.policy.authorize(mission, step)
 
+    def verify_goal(self, mission: Mission, knowledge: KnowledgeState | None = None) -> GoalVerification | None:
+        """Verifica el OBJETIVO contra los criterios persistidos en §5.1 (P0 §5.3).
+
+        Devuelve `None` si no hay verificador inyectado: sin él no cambia nada, igual que
+        con el validador de planes. El resultado se guarda en `mission.context`, que la
+        capa de storage ya persiste, para que la verificación sea auditable después.
+
+        Esto NO decide el estado final de la misión. Que `completed` exija objetivo
+        verificado es §5.5; aquí solo se mide y se registra.
+        """
+        if self.goal_verifier is None:
+            return None
+        verification = self.goal_verifier.verify(mission)
+        mission.context["goal_verification"] = verification.to_dict()
+        if knowledge is not None:
+            knowledge.last_verdict = (
+                Verdict.SUCCESS.value if verification.verified else Verdict.INSUFFICIENT_EVIDENCE.value
+            )
+            knowledge.verdict_reason = verification.reason
+        return verification
+
+    @staticmethod
+    def _settled_state(mission: Mission, goal) -> MissionState:
+        """El estado final lo decide `settle()`; aquí solo se lee lo que resulted."""
+        from alexis.autonomy.goal_state import settle
+
+        return settle(mission, goal)
+
     def _absorb(self, step: PlanStep, result: ExecutionResult, knowledge: KnowledgeState) -> None:
         if result.success:
             knowledge.mark_completed(step.id)
@@ -926,7 +1055,15 @@ class CognitiveRuntime:
         knowledge.add_unknown(f"por qué falló '{step.id}': {explanation}")
 
     def _settle(self, outcome: StepOutcome, fingerprint_before: str) -> StepOutcome:
+        """Único punto de salida de `step()`: aquí se asienta el veredicto.
+
+        Los nueve caminos de retorno pasan por aquí, así que el veredicto queda
+        registrado en el KnowledgeState (y por tanto persistido en `mission.context`)
+        sin depender de que cada rama se acuerde de hacerlo.
+        """
         knowledge = outcome.knowledge
+        knowledge.last_verdict = outcome.verdict.value
+        knowledge.verdict_reason = outcome.verdict_reason
         if knowledge.progress_fingerprint() == fingerprint_before:
             knowledge.stalls += 1
         else:
@@ -941,6 +1078,12 @@ class CognitiveRuntime:
                 ),
             )
         return outcome
+
+
+def _goal_confirmed(goal) -> bool:
+    from alexis.autonomy.goal_state import goal_is_confirmed
+
+    return goal_is_confirmed(goal)
 
 
 def _brief(output: Any, limit: int = 160) -> str:
@@ -1002,4 +1145,4 @@ def _decision_schema() -> dict:
     }
 
 
-__all__ = ["CognitiveRuntime", "StepOutcome", "diagnose_failure"]
+__all__ = ["CognitiveRuntime", "StepOutcome", "Verdict", "diagnose_failure", "verdict_for_execution"]

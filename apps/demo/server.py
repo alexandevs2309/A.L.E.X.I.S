@@ -42,6 +42,7 @@ from alexis.self.sync import SelfModelSync
 from alexis.speech.tts import get_tts_provider, synthesize_with_fallback
 from alexis.tools.desktop import build_desktop_tools
 from alexis.tools.filesystem import build_filesystem_tools
+from alexis.tools.testrunner import build_test_tools
 from alexis.tools.registry import ToolRegistry
 from alexis.verification import FilesystemVerifier
 from alexis.world.model import WorldEntity, WorldModel
@@ -155,6 +156,8 @@ ENABLED_CAPABILITIES = [s.id for s in CAPABILITIES.enabled()]
 FS_TOOLS = build_filesystem_tools(WORKSPACE)
 TOOLS = ToolRegistry()
 TOOLS.register_all(FS_TOOLS)
+# P0 §5.4: execute.test tiene adaptador real; antes solo existía en el catálogo.
+TOOLS.register_all(build_test_tools(WORKSPACE))
 TOOLS.register_all(build_desktop_tools())
 
 # Link tools ↔ capabilities (mapping post-registration, inmutable en demo)
@@ -314,7 +317,11 @@ def _create_mission_from_intent(intent):
         ],
         capabilities=ENABLED_CAPABILITIES,
     )
-    mission = MISSIONS.create(envelope.objective, envelope)
+    mission = MISSIONS.create(
+        envelope.objective,
+        envelope,
+        success_criteria=intent.success_criteria,
+    )
     RUNNING[mission.id] = mission
     STATE["mission_id"] = mission.id
     # La propuesta del modelo se guarda como PROPUESTA auditable, nunca como permiso.
