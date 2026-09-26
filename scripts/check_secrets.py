@@ -68,16 +68,16 @@ PLACEHOLDER_MARKERS = (
     "env:", "localhost", "127.0.0.1", "test-token", "dev-token",
 )
 
+# `secrets/` NO está en SKIP_DIRS a propósito: sus ficheros reales se escanean aunque git
+# los ignore, porque una credencial en claro en disco es un riesgo exista o no el repo.
+# Eso hace que el check falle en la máquina que tiene secretos reales; ver
+# docs/DEVELOPMENT.md §"El check de secretos y los secretos reales".
+
 SKIP_DIRS = {
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", "dist",
     "build", ".cache", ".mypy_cache", ".ruff_cache", "pgdata",
 }
 
-#: `secrets/` está en .gitignore *por diseño*: es donde este mismo script dice que hay que
-#: mover las credenciales reales. Escanearlo hacía que el check fallara siempre en la
-#: máquina del desarrollador — que es exactamente por lo que nadie instalaba el hook. Los
-#: `.example` sí se escanean: son las plantillas y no deben llevar valores.
-SKIP_EXCEPT_EXAMPLES = {"secrets"}
 SKIP_SUFFIXES = {".example", ".pyc", ".pyo", ".png", ".jpg", ".jpeg", ".gif", ".glb", ".bin"}
 
 
@@ -132,11 +132,6 @@ def iter_files(roots: list[Path]) -> list[Path]:
                 continue
             if any(part in SKIP_DIRS for part in path.parts):
                 continue
-            # `secrets/` se salta salvo los `.example`: es el directorio de credenciales
-            # reales, ignorado por git a propósito (ver SKIP_EXCEPT_EXAMPLES).
-            if any(part in SKIP_EXCEPT_EXAMPLES for part in path.parts):
-                if not path.name.endswith(".example"):
-                    continue
             if path.suffix in SKIP_SUFFIXES or path.name.endswith(".example"):
                 continue
             files.append(path)

@@ -5,7 +5,7 @@
 - Alcance: los 22 requisitos obligatorios de P0 de `plan_ejecution.md`
 - Naturaleza: **solo auditoría**. No se modificó código en este documento.
 - Actualización 2026-09-25: implementados **§5.1**–**§5.5**. Ver §7 y §9–§12.
-- Veredicto: **P0 = 61.4% de los 22 requisitos del plan — NO está al 100%. P1 no comienza.**
+- Veredicto: **P0 = 75.0% de los 22 requisitos del plan — NO está al 100%. P1 no comienza.**
 - Los requisitos COMPLETE han pasado de 5 a 8. El porcentaje no se mueve respecto a §5.4
   porque el requisito 23 (ejecución real de tests), que §5.4 añadió, sale del numerador y el
   11 entra; el recuento de requisitos cumplidos sí subió. El 23 no cuenta en los 22 del plan.
@@ -26,7 +26,7 @@ Cada requisito se clasifica contra el código real, no contra la intención docu
 BROKEN pesa menos que PARTIAL a propósito: un requisito roto es más peligroso que
 uno parcial, porque produce falsos positivos (el sistema *parece* cumplirlo).
 
-**Ecuación (sobre los 22 del plan):** `(8×1.00 + 11×0.50 + 0×0.25 + 3×0.00) / 22 = 13.50 / 22 = 61.4%`
+**Ecuación (sobre los 22 del plan):** `(11×1.00 + 11×0.50 + 0×0.25 + 0×0.00) / 22 = 16.50 / 22 = 75.0%`
 
 *(53.4% original → 54.5% §5.1 (req. 11 de BROKEN a PARTIAL) → 57.3% §5.2 (req. 10 COMPLETE) → 59.1% §5.3 (req. 15 COMPLETE) → 61.4% §5.4 (req. 12 COMPLETE).)*
 
@@ -36,12 +36,12 @@ uno parcial, porque produce falsos positivos (el sistema *parece* cumplirlo).
 
 | # | Requisito | Veredicto | Evidencia |
 |---|---|---|---|
-| 1 | Intent Engine | PARTIAL | `IntentKind` = greeting, small_talk, self_query, capability_query, meta_query, task, unknown (`alexis/cognition/contracts.py:22`). **Faltan** `question`, `command` y `clarification` como kinds. `MISSION_KINDS={TASK}` correcto: solo las tareas reales crean misión. |
-| 2 | Context Assembly | PARTIAL | El runtime entrega conversación, SelfBrief, WorldModel, MemoryProvider, KnowledgeState y envelope al planner (`alexis/core/runtime.py:_ensure_plan`), y Policy se consulta aparte en Gate y Validator. **No existe** un objeto `Context` ensamblado, persistido ni versionado. |
+| 1 | Intent Engine | PARTIAL | `IntentKind` = greeting, small_talk, self_query, capability_query, meta_query, task, **question**, **clarification**, unknown (`alexis/cognition/contracts.py`). Los dos kinds que faltaban se añadieron, y un turno con `pending_clarification` se trata como respuesta a la pregunta abierta, no como tarea nueva. **Sigue faltando** el kind `command`. `MISSION_KINDS={TASK}` correcto: solo las tareas reales crean misión. |
+| 2 | Context Assembly | PARTIAL | Existe `alexis/cognition/context.py`: un objeto `Context` ensamblado y con `context_version`, que el loop construye antes de decidir. **Lo que sigue sin cerrar**: la persistencia de ese contexto como tal (lo que viaja es el `KnowledgeState` y el `goal_verification` del context de la misión). |
 | 3 | Self Model | PARTIAL | Cubre identidad, estado, objetivo, misión, capabilities (con `available`/`required` ya honestos), permisos, envelope, incertidumbres, confianza, fallos, lecciones, decisiones, `answer("next")`. **No tiene** zona de supuestos (vive en KnowledgeState) ni participa en la decisión de autorización: solo consulta capacidades. |
 | 4 | World Model | PARTIAL | `alexis/world/model.py` registra lo observado realmente (205 líneas nuevas), `consecutive_failures`, caché de hechos, queries. **Solo en memoria**: dominios FILE y TOOL, sin persistencia, se pierde al reiniciar, no modela tiempo ni resuelve ambigüedades. |
 | 5 | Memory | **COMPLETE** | `alexis/memory/provider.py` + `CognitiveRuntime.recall()` antes de `decide()`, y el contenido no confiable se marca como dato, nunca instrucción (`as_prompt_lines()`). Cubierto por `tests/test_memory_provider.py`. |
-| 6 | Capability Selection | **MISSING** | No existe capa de selección. El camino determinista usa plantillas fijas; el dinámico existe (`ModelPlanner`) pero está **opt-in y desactivado** porque `llama3.2:1b` no produce planes válidos. El plan exige selección dinámica dependiente del objetivo, explícitamente **no** una secuencia fija. |
+| 6 | Capability Selection | PARTIAL | La **elección de capability** ya es dinámica: `CapabilitySelector` (`alexis/cognition/selection.py`) la decide contra el catálogo real, el envelope y la policy; el `dict` por intención queda solo como respaldo. **Pero la secuencia de pasos sigue siendo la fija** que el plan prohíbe textualmente — `understand → research → execute → verify` (`alexis/cognition/planner.py`). El plan debe depender del objetivo y hoy depende de la plantilla. |
 | 7 | Dynamic Planning | PARTIAL | `PlanStep` tiene capability, action, args, depends_on, expected, risk y requires_approval. **Faltan dos campos obligatorios**: `objective` por paso (solo existe `description`) y `success_criteria` por paso (`verification` existe pero no se usa). |
 | 8 | Execution | **COMPLETE** | `Decision → Policy → Gate → Execution` verificado: `AutonomyGate` sin bypass read-only (H1) y `policy.requires_approval` vinculante en todos los niveles (H3), con `tests/test_approval_authority.py` (14 casos). El modelo no puede concederse permisos. |
 | 9 | Observation | **COMPLETE** | Cada invocación produce `ExecutionResult` estructurado, evento en el log, hecho en WorldModel y `Evaluation` que vuelve al loop. |
@@ -51,12 +51,12 @@ uno parcial, porque produce falsos positivos (el sistema *parece* cumplirlo).
 | 13 | Ask User | PARTIAL | Cubre las causas 1–6 del plan (falta de info, aprobación, fuera de envelope, ambigüedad, capability ausente, incertidumbre). **No hay reanudación**: la respuesta del usuario se descarta y no existe un canal para volver a la misión. |
 | 14 | Evidence / Claim Guard | **COMPLETE** | `EvidenceStore` + `ClaimGuard` con 5 tipos; un claim del modelo **nunca** es FACT sin verificación independiente (`alexis/cognition/evidence.py`), con tests de regresión. |
 | 15 | Independent Verification | **COMPLETE** | `GoalVerifier` (`alexis/cognition/goal_verification.py`) evalúa el objetivo criterio por criterio contra evidencia de observación real, con estado `satisfied`/`not_satisfied`/`insufficient_evidence`, evidencia asociada y motivo auditable. Exige al menos un criterio y evidencia fiable por criterio: sin criterios no hay verificación. Un claim del modelo nunca basta. `FilesystemVerifier` (nivel de plan) se mantiene como estaba. |
-| 16 | Response Composer | **MISSING** | No existe la clase ni el concepto. La respuesta final es una llamada genérica al modelo en `execution.py`; no se compone obligatoriamente de acciones, observaciones, evidencia, verificación, incertidumbre y estado final. |
-| 17 | Reflection | **MISSING** | `alexis/learning/system.py` tiene 20 líneas: `ExperienceLearner` solo hace append. **No existe** `outcome → reflection → lesson → experience`. |
+| 16 | Response Composer | **COMPLETE** | `alexis/cognition/response.py`: la respuesta compuesta es la fuente semántica de `_spoken_reply` (`execution.py`), el modelo solo reformula y su salida se vuelve a pasar por el guard, y `_forbid_false_completion` retira las afirmaciones de logro cuando `goal_verified` es False. Cubierto por `tests/test_p0_5_6_epilogue.py`. |
+| 17 | Reflection | **COMPLETE** | `alexis/learning/reflection.py` (`Reflection`, `propose_lesson`) y `alexis/learning/experience.py` (`Experience` con `lesson`) implementan `outcome → reflection → lesson → experience`, cableados en `learning/system.py` y en el loop. La lección se propone en función de `goal_verified` y de la calidad de la evidencia. |
 | 18 | Persistence | PARTIAL | Persistidos: mission, state, context, plan, current step, observations, claims, approvals, verification, replans, **success_criteria (§5.1, con round-trip probado)**. **Falta `decisions`**: `_record_decision()` solo se invoca desde el camino legacy (`alexis/core/runtime.py:301`), nunca desde el cognitivo. **Falta `reflection`** (no existe aún). |
 | 19 | Recovery | PARTIAL | El reinicio recupera la misión y el legacy tiene resume. **No hay test que demuestre** que el loop cognitivo reanuda una misión a mitad de camino conservando WorldModel, memoria y KnowledgeState. |
 | 20 | Model Router | **COMPLETE** | Separación estricta Cognitive Core (qué hacer) vs Model Router (qué modelo). Estados REAL / DEGRADED / UNAVAILABLE implementados, incluido el caso de respuesta vacía del proveedor. |
-| 21 | Behavioral Tests | PARTIAL | 398 métodos de test, 430 verdes. Cubiertos: greeting sin mission, capability query sin mission, task creando mission, ejecución real, fallo, replanning, approval, missing capability, uncertainty, recovery. **Falta** el test de *false success* a nivel de objetivo: no puede existir porque la capacidad no existe. |
+| 21 | Behavioral Tests | PARTIAL | 747 verdes (suite completa, 4 fallas ambientales), repartidos en ~30 ficheros de test. Cubiertos: greeting sin mission, capability query sin mission, task creando mission, ejecución real, fallo, replanning, approval, missing capability, uncertainty, recovery. **Falta** el test de *false success* a nivel de objetivo: no puede existir porque la capacidad no existe. |
 | 23 | **(fuera de los 22 del plan)** Ejecución real de tests | **COMPLETE** | `execute.test` (§5.4): pytest real dentro del sandbox, argv fijo, sin shell, con timeout, exit code, stdout, stderr y conteos verificados por tests con proyectos temporales reales. Registra en el catálogo, pasa por Policy y Gate, y produce Observation estructurada. |
 | 22 | End-to-End | PARTIAL | Ciclo ejecutado con tools reales sobre un repo con bug real. Trayectorias distintas según contexto (5 decisiones sin replan vs 8 con 2 replans). **No demuestra cerrar un objetivo real**: el test del fixture sigue fallando y la misión se reporta completada. |
 
@@ -64,10 +64,10 @@ uno parcial, porque produce falsos positivos (el sistema *parece* cumplirlo).
 
 | Veredicto | Cantidad | Requisitos |
 |---|---|---|
-| COMPLETE | 8 | 5, 8, 9, 10, 11, 14, 15, 20 |
-| PARTIAL | 11 | 1, 2, 3, 4, 7, 12, 13, 18, 19, 21, 22 |
-| BROKEN | 1 | 11 |
-| MISSING | 3 | 6, 16, 17 |
+| COMPLETE | 11 | 5, 8, 9, 10, 11, 12, 14, 15, 16, 17, 20 |
+| PARTIAL | 11 | 1, 2, 3, 4, 6, 7, 13, 18, 19, 21, 22 |
+| BROKEN | 0 | — |
+| MISSING | 0 | — |
 
 ---
 
@@ -631,3 +631,51 @@ que auditar exige que la misión esté persistida; `run_mission` ya lo hace en s
 ### 13.6 Estado
 
 Cognitive Core ≈ **86%**. COMPLETE 15 · PARTIAL 7 · MISSING 0 · BROKEN 0.
+
+---
+
+## 14. Revisión de las cifras (2026-09-26)
+
+Este documento se había quedado con tres defectos, y el más grave no era mío:
+
+1. **La tabla resumen decía `BROKEN | 1 | 11`** mientras el requisito 11 estaba también en
+   COMPLETE y la ecuación usaba `0×0.25`. Error mío desde §5.5: moví el 11 a COMPLETE y
+   olvidé borrar la fila de BROKEN.
+2. **El requisito 12 se marcó COMPLETE sin actualizar el resumen ni la ecuación.**
+3. **Las filas 1, 2, 6, 16 y 17 seguían describiendo el estado anterior** a los commits
+   `42038a2` y `0f64521`. Decían, por ejemplo, «no existe la clase ni el concepto» para el
+   ResponseComposer, que lleva 400 líneas y cableado en `execution.py`.
+
+### Reclasificación, con la evidencia que la sostiene
+
+| Req | Antes | Ahora | Evidencia verificada |
+|---|---|---|---|
+| 1 | PARTIAL | PARTIAL | `question` y `clarification` existen en `IntentKind`; sigue faltando `command` |
+| 2 | PARTIAL | PARTIAL | `cognition/context.py` existe y tiene `context_version`; su persistencia propia no |
+| 6 | MISSING | **PARTIAL** | `CapabilitySelector` decide la capability contra catálogo real, envelope y policy (`planner.py`). **La secuencia de pasos sigue siendo la fija** `understand → research → execute → verify`, que es justo lo que el requisito prohíbe |
+| 16 | MISSING | **COMPLETE** | `cognition/response.py`; `_spoken_reply` la usa como fuente semántica; `_forbid_false_completion` retira afirmaciones de logro sin `goal_verified` |
+| 17 | MISSING | **COMPLETE** | `learning/reflection.py` + `learning/experience.py`, cableados en `learning/system.py` y en el loop; la lección depende de `goal_verified` |
+| 21 | 430 verdes | 747 verdes | suite completa tras §5.5 y los dos commits posteriores |
+
+Los requisitos 6, 16 y 17 los reclasifica **una revisión, no quien escribió el código**: son
+criterio de aceptación, así que quien los sube de categoría tiene que dejar la evidencia
+escrita. Aquí está. Si alguien discrepa, la fila dice exactamente dónde mirar.
+
+### Lo que NO se cambió a la ligera
+El 6 sube solo a PARTIAL. La selección de capability es dinámica, sí, pero el requisito
+pide dos cosas y una de ellas —que el plan dependa del objetivo y no de una secuencia fija—
+sigue sin cumplirse. Marcarlo COMPLETE habría sido falsear el medidor. La evidencia es lo que decide.
+
+### Nueva cifra
+`(11×1.00 + 11×0.50 + 0×0.25 + 0×0.00) / 22 = 16.50 / 22 = 75.0%`
+
+11 COMPLETE (5, 8, 9, 10, 11, 12, 14, 15, 16, 17, 20) · 11 PARTIAL (1, 2, 3, 4, 6, 7, 13, 18,
+19, 21, 22) · 0 BROKEN · 0 MISSING. Verificado que los 22 ids están y que no se repiten.
+
+P0 sigue sin estar al 100% y P1 sigue bloqueada. Lo que queda abierto está en la tabla: once
+requisitos a medias, entre ellos el 6 (secuencia fija) y el 7 (faltan campos por paso).
+
+### Nota de numeración
+Conviven dos esquemas: estos incrementos (§5.1–§5.5) y el §13 que añadieron los commits
+posteriores para lo que aquí es §5.7. Un «§13» no significa nada para quien lea
+`plan_ejecution.md`. Pendiente de unificar en una sola tabla de incrementos.

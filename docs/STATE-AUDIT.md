@@ -39,12 +39,12 @@ El error más común al medir así es contar *envoltorios vacíos* como avance. 
 | Arquitectura Core | **~70%** | 94 módulos organizados en capas, pero **3 ciclos de dependencia activos** (§4) y 8 paquetes placeholder (§3) |
 | Autonomía / Mission Runtime | ~75% | 459 líneas, importado en 25 ficheros de test. Recovery verificado sólo por el camino legacy (`tests/test_s3_s4.py:249`) |
 | Policy / Security | ~80% | 373 líneas, 19 ficheros de test. Gate sin bypass read-only y `requires_approval` vinculante |
-| Cognitive Core (P0) | **~35-40%** | Ver `docs/P0-COGNITIVE-CORE-GAP-ANALYSIS.md`. De 22 requisitos: 8 COMPLETE, 11 PARTIAL, 3 MISSING, 0 BROKEN |
+| Cognitive Core (P0) | **75.0%** | Ver `docs/P0-COGNITIVE-CORE-GAP-ANALYSIS.md` §14. De 22 requisitos: 11 COMPLETE, 11 PARTIAL, 0 BROKEN, 0 MISSING. Fuente única de verdad: ese documento |
 | Self Model | ~75% | 553 líneas (`alexis/self/`), 19 ficheros de test. Sin zona de supuestos |
 | Memory | ~55-60% | 216 líneas, 12 ficheros de test. `recall()` antes de `decide()` |
 | World Model | ~50-60% | 207 líneas, 9 ficheros de test. **Sólo en memoria**: dominios FILE y TOOL, se pierde al reiniciar |
 | Model Router | ~65% | 811 líneas, 10 ficheros de test. REAL/DEGRADED/UNAVAILABLE verificado en E2E |
-| Replanning | **~100%** | Cerrado: guarda de reintento idéntico con firma determinista, evidencia material con *evidence scope* y auditoría persistente del rechazo. Ver §13 del gap analysis |
+| Replanning | ~95% | Cerrado en lo esencial: firma determinista, *evidence scope* y auditoría persistente del rechazo (gap analysis §13). No 100%: la estrategia alternativa sigue siendo limitada, el guard filtra repeticiones pero no propone plan B |
 | Verification | **~70%** | `goal_verification.py` (596 líneas), 17 ficheros de test, 3 suites nuevas en `0ed81fa` |
 | Voice / TTS | ~45% | 427 líneas, 3 backends (`edge`, `elevenlabs`, `local`), 4 ficheros de test |
 | Speech input | ~35-40% | **Sólo en `apps/face`** (`SpeechRecognizer.ts`). No existe en el core Python |
