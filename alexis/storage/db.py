@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 
 from psycopg.rows import dict_row
 
@@ -39,6 +40,24 @@ class Database:
             async with conn.cursor(row_factory=dict_row) as cur:
                 await cur.execute(query, params)
                 return await cur.fetchall()
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Un ÚNICO contexto transaccional, tomado del driver.
+
+        `execute()` abre y cierra una conexión del pool por sentencia, así que varias
+        llamadas NO son atómicas. Para lo que debe serlo —guardar las entidades y sus
+        relaciones del World Model como una unidad— hace falta una conexión fija y la
+        transacción que el propio driver ofrece. No es un sistema de transacciones
+        paralelo: es el de psycopg, expuesto una vez.
+
+        Uso:
+            async with db.transaction() as conn:
+                await conn.execute(sql, params)
+        """
+        async with self._pool.connection() as conn:
+            async with conn.transaction():
+                yield conn
 
     async def migrate(self):
         await self.open()

@@ -289,3 +289,254 @@ class CheckpointRepository:
             """,
             {"mission_id": mission_id, "status": status},
         )
+
+class WorldRepository:
+    """Almacén persistente del World Model (P0 §4.3).
+
+    Éste es el store de AUTORIDAD del mundo. `mission.context["world"]` sigue existiendo
+    como proyección de compatibilidad, pero no manda: se puede perder, truncarse a 50 o no
+    existir, y el mundo se recupera igual desde aquí.
+
+    Respeta los dos incrementos anteriores como contrato, no como detalle:
+
+    - **Identidad** `(scope_id, entity_id)`, que es la clave primaria de la tabla. El path
+      relativo no basta: dos proyectos pueden tener `file:notas.txt`.
+    - **Temporalidad** `last_seen` en `DOUBLE PRECISION`, que vuelve exacto. El `0.0` de
+      `LAST_SEEN_UNKNOWN` se persiste como `0.0`, nunca como `now()`: una entidad sin
+      fecha conocida debe seguir sin fecha conocida después de un reinicio.
+
+    No escribe en `observations`. Allí vive la evidencia cruda con su procedencia; aquí el
+    estado ya interpretado. Son dos cosas distintas con dos ciclos de vida distintos.
+    """
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    # ------------------------------------------------------------------ #
+    # Entidades
+    # ------------------------------------------------------------------ #
+
+    async def upsert_entity(self, entity) -> None:
+        """Guarda una entidad en su ámbito. La clave primaria decide la unicidad.
+
+        `last_seen` se escribe tal cual, incluido `0.0`. No se usa `now()` como default:
+        la edad desconocida es información, y rellenarla sería mentir sobre el freshness.
+        """
+        await self.db.execute(
+            """
+            INSERT INTO world_entities
+                (scope_id, entity_id, kind, name, attributes, source, confidence,
+                 mission_id, observations, last_seen)
+            VALUES (%(scope_id)s, %(entity_id)s, %(kind)s, %(name)s, %(attributes)s::jsonb,
+                    %(source)s, %(confidence)s, %(mission_id)s, %(observations)s, %(last_seen)s)
+            ON CONFLICT (scope_id, entity_id) DO UPDATE SET
+                kind = EXCLUDED.kind,
+                name = EXCLUDED.name,
+                attributes = EXCLUDED.attributes,
+                source = EXCLUDED.source,
+                confidence = EXCLUDED.confidence,
+                mission_id = EXCLUDED.mission_id,
+                observations = EXCLUDED.observations,
+                last_seen = EXCLUDED.last_seen
+            """,
+            {
+                "scope_id": entity.scope,
+                "entity_id": entity.id,
+                "kind": entity.kind,
+                "name": entity.name,
+                "attributes": json.dumps(entity.attributes, ensure_ascii=False, default=str),
+                "source": entity.source,
+                "confidence": entity.confidence,
+                "mission_id": entity.mission_id,
+                "observations": entity.observations,
+                "last_seen": float(entity.last_seen),
+            },
+        )
+
+    async def get_entity(self, entity_id: str, *, scope: str) -> object | None:
+        rows = await self.db.fetch(
+            """
+            SELECT * FROM world_entities
+            WHERE scope_id = %(scope_id)s AND entity_id = %(entity_id)s
+            """,
+            {"scope_id": scope, "entity_id": entity_id},
+        )
+        return _entity_from_row(rows[0]) if rows else None
+
+    async def list_entities(self, *, scope: str, kind: str | None = None,
+                            limit: int | None = None) -> list:
+        """Entidades de UN ámbito.
+
+        `limit=None` por defecto, a propósito: el tope de 50 era de la proyección en
+        `mission.context`, no una propiedad del mundo. Un proyecto con 400 archivos tiene
+        400 entidades que conocer, y truncarlas sin avisar sería pérdida de conocimiento
+        disfrazada de detalle de implementación. Aquí no se recorta nada salvo que se pida.
+        """
+        clauses = ["scope_id = %(scope_id)s"]
+        params: dict = {"scope_id": scope}
+        if kind:
+            clauses.append("kind = %(kind)s")
+            params["kind"] = kind
+        sql = f"SELECT * FROM world_entities WHERE {' AND '.join(clauses)}"
+        sql += " ORDER BY last_seen DESC, entity_id ASC"
+        if limit is not None:
+            sql += " LIMIT %(limit)s"
+            params["limit"] = limit
+        return [_entity_from_row(r) for r in await self.db.fetch(sql, params)]
+
+    async def count_entities(self, *, scope: str) -> int:
+        rows = await self.db.fetch(
+            "SELECT count(*) AS n FROM world_entities WHERE scope_id = %(scope_id)s",
+            {"scope_id": scope},
+        )
+        return int(rows[0]["n"]) if rows else 0
+
+    async def delete_entity(self, entity_id: str, *, scope: str) -> bool:
+        """Borra la entidad de su ámbito. `False` si no estaba.
+
+        No se usa en el camino normal: §4.2/[§4.5] decidirán cuándo un hecho deja de ser
+        válido. Existe para que la baja sea explícita y no un `DELETE` repartido por el
+        código.
+        """
+        rows = await self.db.fetch(
+            "DELETE FROM world_entities WHERE scope_id = %(scope_id)s AND entity_id = %(entity_id)s RETURNING entity_id",
+            {"scope_id": scope, "entity_id": entity_id},
+        )
+        return bool(rows)
+
+    # ------------------------------------------------------------------ #
+    # Relaciones
+    # ------------------------------------------------------------------ #
+
+    async def save_edge(self, parent_id: str, child_id: str, relation: str = "depends_on",
+                        *, scope: str) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO world_edges (scope_id, parent_id, child_id, relation)
+            VALUES (%(scope_id)s, %(parent_id)s, %(child_id)s, %(relation)s)
+            ON CONFLICT (scope_id, parent_id, child_id, relation) DO NOTHING
+            """,
+            {"scope_id": scope, "parent_id": parent_id, "child_id": child_id,
+             "relation": relation},
+        )
+
+    async def list_edges(self, *, scope: str) -> list[tuple[str, str, str]]:
+        rows = await self.db.fetch(
+            """
+            SELECT parent_id, child_id, relation FROM world_edges
+            WHERE scope_id = %(scope_id)s
+            ORDER BY parent_id ASC, child_id ASC, relation ASC
+            """,
+            {"scope_id": scope},
+        )
+        return [(r["parent_id"], r["child_id"], r["relation"]) for r in rows]
+
+    async def dependencies(self, entity_id: str, *, scope: str) -> list[str]:
+        rows = await self.db.fetch(
+            """
+            SELECT child_id FROM world_edges
+            WHERE scope_id = %(scope_id)s AND parent_id = %(parent_id)s AND relation = 'depends_on'
+            ORDER BY child_id ASC
+            """,
+            {"scope_id": scope, "parent_id": entity_id},
+        )
+        return [r["child_id"] for r in rows]
+
+    async def neighbors(self, entity_id: str, *, scope: str) -> list[str]:
+        rows = await self.db.fetch(
+            """
+            SELECT DISTINCT other_id FROM (
+                SELECT child_id AS other_id FROM world_edges
+                WHERE scope_id = %(scope_id)s AND parent_id = %(entity_id)s
+                UNION
+                SELECT parent_id AS other_id FROM world_edges
+                WHERE scope_id = %(scope_id)s AND child_id = %(entity_id)s
+            ) t ORDER BY other_id ASC
+            """,
+            {"scope_id": scope, "entity_id": entity_id},
+        )
+        return [r["other_id"] for r in rows]
+
+    # ------------------------------------------------------------------ #
+    # Guardado completo, atómico
+    # ------------------------------------------------------------------ #
+
+    async def save_snapshot(self, entities, edges=(), *, scope: str) -> int:
+        """Guarda entidades Y relaciones en una sola transacción.
+
+        Un `WorldModel` se persiste entero o no se persiste: guardar medio grafo deja
+        relaciones que apuntan a entidades que no existen, y eso no se ve hasta que algo
+        lo consulta. Se usa la transacción del driver, no una secuencia de `execute()`.
+
+        Sólo se escribe lo que viene en `entities`: no se vacía el ámbito. La decisión de
+        qué es válido (§4.5) es de otro incremento, y un borrado masivo desde aquí sería
+        destruir conocimiento por no haber decidido todavía.
+        """
+        async with self.db.transaction() as conn:
+            for entity in entities:
+                await conn.execute(
+                    """
+                    INSERT INTO world_entities
+                        (scope_id, entity_id, kind, name, attributes, source, confidence,
+                         mission_id, observations, last_seen)
+                    VALUES (%(scope_id)s, %(entity_id)s, %(kind)s, %(name)s, %(attributes)s::jsonb,
+                            %(source)s, %(confidence)s, %(mission_id)s, %(observations)s, %(last_seen)s)
+                    ON CONFLICT (scope_id, entity_id) DO UPDATE SET
+                        kind = EXCLUDED.kind,
+                        name = EXCLUDED.name,
+                        attributes = EXCLUDED.attributes,
+                        source = EXCLUDED.source,
+                        confidence = EXCLUDED.confidence,
+                        mission_id = EXCLUDED.mission_id,
+                        observations = EXCLUDED.observations,
+                        last_seen = EXCLUDED.last_seen
+                    """,
+                    {
+                        "scope_id": scope,
+                        "entity_id": entity.id,
+                        "kind": entity.kind,
+                        "name": entity.name,
+                        "attributes": json.dumps(entity.attributes, ensure_ascii=False, default=str),
+                        "source": entity.source,
+                        "confidence": entity.confidence,
+                        "mission_id": entity.mission_id,
+                        "observations": entity.observations,
+                        "last_seen": float(entity.last_seen),
+                    },
+                )
+            for parent_id, child_id, *rest in edges:
+                relation = rest[0] if rest else "depends_on"
+                await conn.execute(
+                    """
+                    INSERT INTO world_edges (scope_id, parent_id, child_id, relation)
+                    VALUES (%(scope_id)s, %(parent_id)s, %(child_id)s, %(relation)s)
+                    ON CONFLICT (scope_id, parent_id, child_id, relation) DO NOTHING
+                    """,
+                    {"scope_id": scope, "parent_id": parent_id, "child_id": child_id,
+                     "relation": relation},
+                )
+        return len(entities)
+
+
+def _entity_from_row(row) -> object:
+    """Fila de `world_entities` → `WorldEntity`.
+
+    Delega en `WorldEntity.from_dict` (§4.2), que es el punto único de rehidratación y
+    donde vive el trato de `last_seen`: un `0.0` de la base sigue siendo "edad
+    desconocida", no "observado ahora". `scope_id` de la columna pasa a `scope` porque ése
+    es el nombre del campo en la entidad.
+    """
+    from alexis.world.model import WorldEntity
+
+    return WorldEntity.from_dict({
+        "id": row["entity_id"],
+        "kind": row["kind"],
+        "name": row["name"],
+        "attributes": row["attributes"] or {},
+        "source": row["source"],
+        "confidence": row["confidence"],
+        "mission_id": row["mission_id"],
+        "observations": row["observations"],
+        "last_seen": row["last_seen"],
+        "scope": row["scope_id"],
+    })

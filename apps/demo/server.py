@@ -45,7 +45,7 @@ from alexis.tools.filesystem import build_filesystem_tools
 from alexis.tools.testrunner import build_test_tools
 from alexis.tools.registry import ToolRegistry
 from alexis.verification import FilesystemVerifier
-from alexis.world.model import WorldEntity, WorldModel
+from alexis.world.model import Scope, WorldEntity, WorldModel
 
 EVENTS = EventBus()
 STORAGE = {}
@@ -227,7 +227,10 @@ SCHEDULER = Scheduler(task_repo=STORAGE.get("task"), event_bus=EVENTS) if STORAG
 MISSIONS = MissionEngine()
 RUNNING = {}
 STATE = {"mission_id": None, "verification": None}
-WORLD = WorldModel()
+# P0 §4.1: el ámbito se declara explícitamente en la composición y se deriva del workspace
+# que el servidor ya tiene resuelto. Sin esto el mundo sería global del proceso y
+# `file:notas.txt` significaría lo mismo en cualquier proyecto.
+WORLD = WorldModel(scope=Scope.from_workspace(WORKSPACE))
 WORLD.upsert(WorldEntity("postgres", "database", "PostgreSQL pgvector", {"host": "127.0.0.1:5433", "db": "alexis"}))
 WORLD.upsert(WorldEntity("workspace", "sandbox", "Workspace autorizado read/write", {"path": str(WORKSPACE), "tools": [t.name for t in TOOLS.list()]}))
 WORLD.upsert(

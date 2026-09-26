@@ -456,16 +456,14 @@ class CognitiveRuntime:
             if not isinstance(row, dict) or not row.get("id"):
                 continue
             try:
-                self.world.entities[str(row["id"])] = WorldEntity(
-                    id=str(row["id"]),
-                    kind=str(row.get("kind") or "unknown"),
-                    name=str(row.get("name") or row["id"]),
-                    attributes=dict(row.get("attributes") or {}),
-                    source=str(row.get("source") or "recovered"),
-                    confidence=float(row.get("confidence") or 0.0),
-                    mission_id=row.get("mission_id"),
-                    observations=int(row.get("observations") or 0),
-                )
+                # P0 §4.1: la clave del World Model es (ámbito, id), así que ya no se
+                # puede escribir en `.entities` directamente. Se usa `put()`, que sustituye
+                # sin fusionar ni sumar observaciones: la restauración debe reponer lo que
+                # había, no re-observarlo.
+                # P0 §4.2: la rehidratación pasa por `WorldEntity.from_dict`, que preserva
+                # `last_seen` y deja en `LAST_SEEN_UNKNOWN` las filas legacy que no lo
+                # tenían, en vez de fecharlas como recién observadas.
+                self.world.put(WorldEntity.from_dict(row))
                 restored += 1
             except Exception as exc:  # noqa: BLE001
                 # No se traga en silencio: una entidad que no se restaura se registra,
