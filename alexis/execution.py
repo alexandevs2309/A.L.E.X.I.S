@@ -1,8 +1,10 @@
 import asyncio
 import time
 import typing
+import webbrowser
 
 from alexis.contracts import ExecutionResult, Observation
+from alexis.cognition.response import ResponseComposer, read_composed, render_for_voice
 from alexis.models import ModelRequest, ModelRouter, ModelTask
 from alexis.models.config import ModelConfig
 from alexis.perception.activation import activation_reply, is_activation_objective
@@ -37,14 +39,6 @@ _CAPABILITY_TOOL = {
 
 #: Capabilities cuyo `path` vive dentro del sandbox del proyecto.
 _SANDBOX_CAPABILITY_PREFIXES = ("fs.", "research.", "verification.")
-
-_DESKTOP_HOSTS = {
-    "chrome.open_url": lambda a: chrome_open(url=a.get("url") or ""),
-    "spotify.play": lambda a: spotify_play(a.get("uri") or ""),
-    "claude.open": lambda a: open_claude(),
-    "binance.open": lambda a: open_binance(),
-    "cursor.open": lambda a: cursor_open(new_window=True),
-}
 
 
 def write_placeholder_content(objective: str) -> str:
@@ -91,12 +85,18 @@ class SandboxExecutor:
         desktop_delegate: str | None = None,
         model_router: ModelRouter | None = None,
         voice_mode_provider: typing.Callable[[], bool] | None = None,
+        #: Costura para el delegado de escritorio: un test NO debe abrir el navegador de
+        #: verdad. ``None`` = producción (navegador real), que es el comportamiento de antes.
+        webbrowser_open: typing.Callable[[str], typing.Any] | None = None,
+        chrome: typing.Any = None,
     ):
         self.tools = tools
         self.sandbox = sandbox
         self.action_map = action_map or dict(ACTION_TOOL)
         self.default_path = default_path
         self.desktop_delegate = desktop_delegate
+        self.webbrowser_open = webbrowser_open or webbrowser.open
+        self.chrome = chrome
         #: Router de modelos (Gemini/Ollama) para generar la respuesta hablada.
         #: ``None`` = se construye desde el entorno; sin provider REAL se cae a frases fijas.
         self.model_router = model_router
@@ -105,38 +105,40 @@ class SandboxExecutor:
         self.voice_mode_provider = voice_mode_provider
 
     async def _spoken_reply(self, mission, desktop) -> str:
-        """Respuesta hablada generada por un modelo REAL (Gemini/Ollama).
+        """Presenta la respuesta COMPUESTA por `ResponseComposer` (P0 §5.6.1, GAP 1).
 
-        En producción (sin ``model_router`` inyectado) se lanzan los providers en
-        paralelo y gana el primero que devuelva texto válido: ALEXIS responde con la
-        latencia del proveedor más rápido en cada momento. Devuelve ``""`` cuando
-        ninguno responde para que el caller caiga a las frases honestas: la
-        contingencia (eco) NUNCA se presenta como si pensara. El saludo de activación
-        (palmada) es fijo a propósito.
+        Antes inventaba su propia respuesta: una llamada al modelo con el objetivo como
+        único contexto, sin mirar el veredicto ni la evidencia. Eso permite decir "listo"
+        con la herramienta rota. Ahora:
+
+        1. La fuente semántica es `ResponseComposer` (`mission.context["response"]`).
+        2. El modelo, si es REAL, sólo **reformula** ese texto, y su salida se vuelve a
+           pasar por el guard de falso éxito: un modelo puede reintroducir un logro.
+        3. Sin modelo REAL se presenta el texto compuesto tal cual. La contingencia nunca
+           se presenta como si el modelo hubiera pensado.
+
+        Devuelve `""` si no hay respuesta compuesta: el caller usa su contingencia honesta.
         """
+        composed = read_composed(mission)
+        if composed is None or not composed.text.strip():
+            return ""
         objective = mission.goal.objective
         if desktop is None and is_activation_objective(objective):
             return ""
-        prompt = f"Pedido del usuario: {objective!r}."
-        if desktop is not None:
-            tool_name, args = desktop
-            prompt += (
-                f"\nSe ejecutó la herramienta de escritorio {tool_name}"
-                + (f" con argumentos {dict(args)}" if args else "")
-                + "."
-            )
+        facts = render_for_voice(composed)
         system = (
-            "Eres ALEXIS, un asistente de voz en español. Responde lo que se te pida "
-            "con la información útil y concreta en UNA o DOS frases breves (máximo 45 "
-            "palabras), natural y conversacional, sin markdown, sin listas, sin emojis, "
-            "terminando con punto, y sin inventar acciones que no se ejecutaron."
+            "Eres ALEXIS, un asistente de voz en español. Tienes prohibido añadir "
+            "información: sólo puedes reformular con naturalidad los HECHOS que se te "
+            "dan. UNA o DOS frases breves (máximo 45 palabras), sin markdown, sin listas, "
+            "sin emojis, terminando en punto. No afirmes que algo se completó si los "
+            "hechos no lo dicen, y no inventes acciones que no se ejecutaron."
         )
         request = ModelRequest(
             task=ModelTask.SYNTHESIZE,
             system=system,
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{"role": "user", "content": f"HECHOS A REFORMULAR:\n{facts}"}],
             max_tokens=70,
-            temperature=0.7,
+            temperature=0.4,
             deadline_ms=20000,
         )
         if self.model_router is not None:
@@ -146,7 +148,22 @@ class SandboxExecutor:
                 response = await self.model_router.complete(request)
             except Exception:  # noqa: BLE001 — la voz nunca debe fallar por el modelo
                 return ""
-            return self._valid_text(response)
+            return self._finish(self._valid_text(response), composed)
+        rewritten = await self._rephrase(request)
+        if not rewritten:
+            return facts
+        return self._finish(rewritten, composed)
+
+    def _finish(self, text: str, composed) -> str:
+        """Guard de falso éxito + provenance, aplicados a texto que venga del modelo."""
+        if not text:
+            return render_for_voice(composed)
+        return self._keep_provenance(
+            ResponseComposer().sanitize(text, composed.goal_verified), composed
+        )
+
+    async def _rephrase(self, request: ModelRequest) -> str:
+        """Pide la reformulación a un modelo REAL. `""` si no lo hay o no es de fiar."""
         best = ""
         for _ in range(2):
             try:
@@ -159,6 +176,24 @@ class SandboxExecutor:
             if self._complete_enough(text):
                 return text
         return self._repair_punctuation(best)
+
+    @staticmethod
+    def _keep_provenance(text: str, composed) -> str:
+        """Reañade el aviso DEGRADED/UNAVAILABLE si la reformulación lo eliminó.
+
+        La procedencia es un hecho de la tubería, no una frase opcional que el modelo
+        pueda omitir: sin esto, un modelo real podría launderingar la advertencia.
+        """
+        if composed.cognition_outcome not in ("degraded", "unavailable"):
+            return text
+        notice = (
+            "Aviso: el razonamiento vino de un proveedor degradado."
+            if composed.cognition_outcome == "degraded"
+            else "Aviso: no había modelo disponible."
+        )
+        if notice in text:
+            return text
+        return f"{text.rstrip()} {notice}"
 
     @staticmethod
     def _valid_text(response) -> str:
@@ -322,6 +357,29 @@ class SandboxExecutor:
             )
         return ExecutionResult(success=True, output=output, observations=[observation])
 
+    def _desktop_host_handlers(self) -> dict:
+        """Delegados de escritorio construidos con las dependencias de ESTA instancia.
+
+        Antes eran lambdas a nivel de módulo que capturaban el `webbrowser.open` real de
+        producción, sin ninguna costura para sustituirlo. Consecuencia observada: la ruta
+        `desktop_delegate="host"` con un registro vacío llamaba a `open_claude()` de
+        verdad, y `tests/test_desktop_tools.py` abría `https://claude.ai/new` en el
+        navegador de quien ejecutara el suite.
+
+        El default sigue siendo el navegador real (producción no cambia), pero ahora un
+        test pasa `webbrowser_open=lambda url: None` y no abre nada.
+        """
+        opener = self.webbrowser_open
+        chrome = self.chrome
+        return {
+            "chrome.open_url": lambda a: chrome_open(url=a.get("url") or "",
+                                                     webbrowser_open=opener, chrome=chrome),
+            "spotify.play": lambda a: spotify_play(a.get("uri") or "", webbrowser_open=opener),
+            "claude.open": lambda a: open_claude(webbrowser_open=opener, chrome=chrome),
+            "binance.open": lambda a: open_binance(webbrowser_open=opener, chrome=chrome),
+            "cursor.open": lambda a: cursor_open(new_window=True),
+        }
+
     async def _host_desktop(self, tool_name: str, args: dict) -> dict:
         if tool_name == "tts.speak":
             text = (args.get("text") or "").strip()
@@ -337,7 +395,7 @@ class SandboxExecutor:
                 "format": tts.format,
                 "error": tts.error,
             }
-        handler = _DESKTOP_HOSTS.get(tool_name)
+        handler = self._desktop_host_handlers().get(tool_name)
         if handler is None:
             return {"ok": False, "error": f"tool de escritorio '{tool_name}' no soportada por el delegado host"}
         try:

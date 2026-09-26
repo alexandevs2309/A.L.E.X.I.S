@@ -98,21 +98,48 @@ micBtn.addEventListener("click", () => {
 });
 document.body.appendChild(micBtn);
 
+interface ChatReply {
+  text?: string;
+  kind?: string;
+  mission_id?: string | null;
+  error?: string;
+}
+
+function missionBadge(id: string): void {
+  const div = document.createElement("div");
+  div.className = "msg mission";
+  div.textContent = `MISIÓN · ${id.slice(0, 8)}`;
+  chatLog.appendChild(div);
+  while (chatLog.children.length > 5) chatLog.firstElementChild?.remove();
+}
+
+/* El avatar usa la MISMA ruta conversacional que /classic: /chat decide si esto es
+   conversación o misión. El frontend no decide nada por su cuenta. */
 function sendObjective(objective: string): void {
   const clean = objective.trim();
   if (!clean) return;
   bubble(`«${clean}»`);
-  void fetch("/missions", {
+  void fetch("/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ objective: clean }),
+    body: JSON.stringify({ text: clean }),
   })
     .then((res) => res.json())
-    .then((data) => {
-      if (data.id) missionId = data.id;
+    .then((data: ChatReply) => {
+      if (data.error) {
+        bubble(`No pude procesar eso: ${data.error}`);
+        return;
+      }
+      if (data.text) bubble(data.text);
+      if (data.mission_id) {
+        missionId = data.mission_id;
+        adapter.setMission(missionId);
+        missionBadge(missionId);
+        terminalLastShown = "";
+      }
       void adapter.poll();
     })
-    .catch(() => bubble("No pude conectar con el runtime."));
+    .catch(() => bubble("No pude conectar con el núcleo."));
 }
 
 let dictText: HTMLDivElement | null = null;
@@ -156,18 +183,39 @@ recognizer.on({
   },
 });
 
-const adapter = new CoreStateAdapter((signal) => {
-  lastSignal = signal;
-  if (voice.speaking) {
-    face.setSpeaking(true);
-    face.applySignal({ ...signal, state: "speaking", speaking: true, attention: "user" });
-  } else {
-    face.applySignal(signal);
-  }
-  hud.innerHTML = `A<b style="color:#19b7f5">.</b>LEXIS · ${signal.state}`;
-  renderWaitingReply(signal.state);
-  void reportTerminal(signal.state);
-});
+const adapter = new CoreStateAdapter(
+  (signal) => {
+    lastSignal = signal;
+    if (voice.speaking) {
+      face.setSpeaking(true);
+      face.applySignal({ ...signal, state: "speaking", speaking: true, attention: "user" });
+    } else {
+      face.applySignal(signal);
+    }
+    hud.innerHTML = `A<b style="color:#19b7f5">.</b>LEXIS · ${signal.state}`;
+    renderWaitingReply(signal.state);
+    void reportTerminal(signal.state);
+  },
+  (id) => {
+    /* Misión que empieza en vivo (palmada u otro cliente): se adopta y se muestra
+       en el hilo para que conversation y panel sigan siendo la misma cosa. */
+    missionId = id;
+    missionBadge(id);
+    terminalLastShown = "";
+  },
+  (response) => {
+    /* P0 §5.6.1: el avatar presenta la respuesta compuesta por el Core. No inventa su
+       propio veredicto, y un `goal_verified: false` nunca se presenta como logro. */
+    if (!response.text) return;
+    bubble(response.text);
+    if (response.pending && response.pending.length) {
+      bubble("Pendiente: " + response.pending.join("; "));
+    }
+    if (response.cognition_outcome === "degraded" || response.cognition_outcome === "unavailable") {
+      bubble("Aviso: el razonamiento no vino de un modelo real.");
+    }
+  },
+);
 adapter.start();
 
 function bubble(text: string): void {
@@ -257,6 +305,9 @@ async function reportTerminal(state: string): Promise<void> {
   const body: any = await fetch("/state").then((res) => res.json()).catch(() => null);
   const m = body?.mission;
   if (!m) return;
+  /* sólo reportamos la misión que NOSOTROS_ABRIMOS con /chat: si /state trae otra,
+     pertenece a otra sesión o a otro cliente y no debe aparecer como respuesta. */
+  if (!missionId || m.id !== missionId) return;
   const key = `${state}:${m.id}`;
   if (terminalLastShown === key) return;
   terminalLastShown = key;

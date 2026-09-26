@@ -50,6 +50,11 @@ PAGE = """<!doctype html>
   .turn.ai .msg { padding-top:4px; }
   .turn.ai .head { color:var(--ink); }
   .turn.ai .sub { font-size:13px; margin-top:4px; }
+  .turn.mission { align-self:flex-start; display:flex; gap:8px; align-items:center; background:transparent;
+                  padding:2px 4px; color:var(--faint); font-size:12.5px; }
+  .turn.mission .tag { border:1px solid var(--line); border-radius:999px; padding:1px 9px;
+                       font-size:10px; letter-spacing:2px; text-transform:uppercase; }
+  .turn.mission .mid { font-family:monospace; }
   #composer { margin:6px 0 18px; }
   .ask { color:var(--dim); font-size:15px; margin:18px 0 10px; }
   form { display:flex; gap:10px; }
@@ -173,7 +178,9 @@ const STEP = {
 const TURNS = {
   "mission.planning": "Estoy analizando tu solicitud y armando un plan.",
   "mission.approval_required": "Necesito tu decisión para continuar.",
-  "mission.completed": "La misión se completó.",
+    // P0 §5.6.1: un evento NO afirma éxito. El veredicto y la evidencia llegan
+    // compuestos en `mission.response`; aquí sólo se anuncia el fin del ciclo.
+    "mission.completed": "Terminó el ciclo de la misión.",
   "mission.failed": "No pude completar la misión.",
   "mission.cancelled": "La misión fue cancelada.",
   "mission.stopped": "La misión fue cancelada.",
@@ -181,6 +188,9 @@ const TURNS = {
 
 let ctx = "idle";
 let missionId = null;
+let lastReply = null;
+  // P0 §13: misión con pregunta pendiente; el siguiente mensaje la responde.
+  let pendingClarification = null;
 
 function say(text, human = false) {
   const div = document.createElement("div");
@@ -195,12 +205,55 @@ function say(text, human = false) {
   $("thread").scrollTop = $("thread").scrollHeight;
 }
 
+function missionTag(id) {
+  const div = document.createElement("div");
+  div.className = "turn mission";
+  div.innerHTML = `<span class="tag">misión</span><span class="mid"></span>`;
+  div.querySelector(".mid").textContent = id.slice(0, 8);
+  $("thread").appendChild(div);
+  $("thread").scrollTop = $("thread").scrollHeight;
+}
+
 function eventTurn(topic, payload) {
+  const mid = typeof payload === "string" ? payload : (payload && payload.mission_id) || null;
+  if (mid && mid !== missionId) return false;
   if (topic === "mission.step_started") {
+    if (!missionId) return false;
     const label = STEP[payload] || "Estoy trabajando en ello.";
     say(label);
     return true;
   }
+    if (topic === "mission.ask_user" || topic === "mission.clarification_required") {
+      // P0 §13: la pregunta se muestra tal cual y se puede responder sin salir del hilo.
+      const q = payload || {};
+      if (q.question) {
+        say(q.question);
+        askline.textContent = "Respóndele a ALEXIS";
+        askline.focus();
+        pendingClarification = q.mission_id || mid;
+      }
+      return true;
+    }
+    if (topic === "mission.clarification_received") {
+      pendingClarification = null;
+      say("Entendido, continúo.");
+      return true;
+    }
+    if (topic === "mission.resumed") {
+      say("Retomo la misión donde la dejé.");
+      return true;
+    }
+    if (topic === "mission.response") {
+      // Fuente semántica común (P0 §5.6.1): el texto llega ya compuesto y con el
+      // guard de falso éxito aplicado. Esta UI sólo lo presenta.
+      const rp = payload || {};
+      if (rp.text) {
+        say(rp.text);
+        if (rp.pending && rp.pending.length) say("Pendiente: " + rp.pending.join("; "));
+        if (rp.needs_user) composerVisible(true);
+      }
+      return true;
+    }
   const text = TURNS[topic];
   if (text) { say(text); return true; }
   return false;
@@ -289,13 +342,20 @@ async function refresh() {
   try { s = await (await fetch("/state")).json(); } catch { return; }
   const p = s.present;
   if (!p) return;
-  ctx = p.context;
-  missionId = s.mission ? s.mission.id : missionId;
+  const mine = s.mission && missionId && s.mission.id === missionId;
+  if (mine) {
+    ctx = p.context;
+    setStatus(p.status);
+    composerVisible(["idle", "completed", "cancelled", "error"].includes(ctx));
+    activityBox(p, s.mission);
+  } else {
+    ctx = lastReply && lastReply.kind === "question" ? "thinking" : "idle";
+    setStatus(lastReply ? (lastReply.kind === "question" ? "Esperando tu aclaración" : "Conversando") : "Inactivo");
+    composerVisible(true);
+    activityBox(null, null);
+  }
   const cp = document.getElementById("companion");
   if (cp) cp.dataset.ctx = ctx;
-  setStatus(p.status);
-  composerVisible(["idle", "completed", "cancelled", "error"].includes(ctx));
-  activityBox(p, s.mission);
   setVoiceModeUI(!!s.voice_mode);
   $("rawjson").textContent = JSON.stringify(s, null, 2);
 }
@@ -306,6 +366,10 @@ const es = new EventSource("/stream");
 es.onmessage = (e) => {
   let d;
   try { d = JSON.parse(e.data); } catch { return; }
+  if (d.topic === "mission.planning" && !missionId && typeof d.payload === "string") {
+    missionId = d.payload;
+    missionTag(missionId);
+  }
   const gotTurn = eventTurn(d.topic, d.payload);
   const li = document.createElement("li");
   const t = new Date().toLocaleTimeString();
@@ -319,22 +383,35 @@ es.onmessage = (e) => {
 
 $("form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const objective = $("objective").value.trim();
-  if (!objective) return;
+  const text = $("objective").value.trim();
+  if (!text) return;
   const btn = $("launch");
   btn.disabled = true;
-  say(`«${objective}»`, true);
+  say(`«${text}»`, true);
   try {
-    const res = await fetch("/missions", {
+    const res = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ objective }),
+      body: JSON.stringify({ text }),
     });
     const data = await res.json();
-    missionId = data.id;
+    if (data.error) {
+      say(`No pude procesar eso: ${data.error}`);
+      return;
+    }
+    say(data.text || "");
+    lastReply = { kind: data.kind || "answer" };
+    if (data.mission_id) {
+      missionId = data.mission_id;
+      missionTag(missionId);
+    }
+  } catch {
+    say("No pude conectar con el núcleo.");
+  } finally {
     $("objective").value = "";
-    setTimeout(refresh, 400);
-  } finally { btn.disabled = false; }
+    btn.disabled = false;
+    setTimeout(refresh, 300);
+  }
 });
 
 $("sys-toggle").addEventListener("click", () => {

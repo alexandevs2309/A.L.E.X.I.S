@@ -256,7 +256,11 @@ class TestVerifierDesktop:
         mission = await _desktop_mission("abre claude code")
         # P0 §5.5: sin verificación del objetivo no se escribe COMPLETED.
         mission.state = MissionState.NEEDS_VERIFICATION
-        executor = SandboxExecutor(tools=ToolRegistry(), sandbox=SandboxRunner(workspace=tmp_path), desktop_delegate="host")
+        # `webbrowser_open` inyectado: el delegado "host" llama a `open_claude()`, y sin
+        # este doble el suite abría https://claude.ai/new en el navegador de quien lo
+        # ejecutara. Un test no puede tener efectos sobre el escritorio.
+        executor = SandboxExecutor(tools=ToolRegistry(), sandbox=SandboxRunner(workspace=tmp_path),
+                                   desktop_delegate="host", webbrowser_open=lambda u: None)
         step = PlanStep("execute", "run", "execute", RiskLevel.MEDIUM)
         result = await executor.execute(mission, step)
         mission.results.append({"step": "execute", "success": True, "output": result.output, "error": None})
@@ -282,6 +286,28 @@ async def _desktop_mission(objective):
     )
     return MissionEngine().create(objective, envelope)
 
+def _with_composed_response(mission, *, verdict="success", goal_verified=True):
+    """Pega en la misión la respuesta que §5.6.9 compuso (P0 GAP 1).
+
+    Los canales ya no inventan su propia respuesta: leen esta. El test sigue ejerciendo
+    el canal (voz, TTS, modelo), pero con la fuente semántica real.
+    """
+    from alexis.cognition.goal_verification import GoalVerification
+    from alexis.cognition.response import ResponseComposer
+    from alexis.cognition.state import KnowledgeState
+
+    knowledge = KnowledgeState(objective=mission.goal.objective)
+    knowledge.last_verdict = verdict
+    knowledge.mark_completed("respond")
+    verification = GoalVerification(
+        objective=mission.goal.objective, evaluations=[], verified=goal_verified, reason=""
+    )
+    mission.context["response"] = ResponseComposer().compose(
+        mission, knowledge, verification, model_outcome="real"
+    ).to_dict()
+    return mission
+
+
 class _FakeLLMRouter:
     def __init__(self, text: str):
         self._text = text
@@ -302,7 +328,7 @@ class TestExecutorRespondWithModel:
             sandbox=SandboxRunner(workspace=tmp_path),
             model_router=_FakeLLMRouter("Claro: el gráfico de bitcoin ya está en tu pantalla."),
         )
-        mission = await _desktop_mission("abre binance")
+        mission = _with_composed_response(await _desktop_mission("abre binance"))
         step = PlanStep("respond", "confirma", "respond", RiskLevel.LOW)
         result = await executor.execute(mission, step)
         assert result.output["message"] == "Claro: el gráfico de bitcoin ya está en tu pantalla."
@@ -329,7 +355,7 @@ class TestExecutorRespondWithModel:
             model_router=_FakeLLMRouter("Claro, abrí la página."),
             voice_mode_provider=lambda: False,
         )
-        mission = await _desktop_mission("abre claude code")
+        mission = _with_composed_response(await _desktop_mission("abre claude code"))
         step = PlanStep("respond", "confirma", "respond", RiskLevel.LOW)
         result = await executor.execute(mission, step)
         assert result.output["message"] == "Claro, abrí la página."

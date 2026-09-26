@@ -79,6 +79,9 @@ class SelfModel:
         self.commitments = []
         self.task_results = []
         self.lessons_learned = []
+        #: Veredicto de COGNICIÓN (no de policy): el de la última acción evaluada.
+        #: P0 §5.6.7. Es distinto de `current_policy['verdict']`, que es allow/deny.
+        self.last_verdict = ""
         self.current_limits = []
         self.available_tools = []
         self.failures = []
@@ -260,6 +263,14 @@ class SelfModel:
             for c in (commitments or [])
         ]
         self.lessons_learned = list(lessons or [])
+        # P0 §5.6.7: el veredicto de cognición vive en el contexto de la misión.
+        ctx = getattr(mission, "context", {}) or {}
+        knowledge = ctx.get("knowledge") or {}
+        self.last_verdict = str(
+            knowledge.get("last_verdict")
+            or (ctx.get("verified_learning") or {}).get("verdict")
+            or ""
+        )
 
         # Contexto activo desde observaciones reales de memoria (últimas 5).
         # R3: una observación no confiable entra como DATO marcado y neutralizado
@@ -319,6 +330,7 @@ class SelfModel:
             "active_commitments": list(self.commitments),
             "failures": list(self.failures),
             "lessons": list(self.lessons_learned),
+            "last_verdict": self.last_verdict,
             "current_dependencies": list(self.current_dependencies),
             "current_limits": list(self.current_limits),
             "available_tools": list(self.available_tools),

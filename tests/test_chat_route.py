@@ -27,6 +27,28 @@ async def _mission(objective):
     return MissionEngine().create(objective, envelope)
 
 
+def _with_composed_response(mission, *, verdict="success", goal_verified=True):
+    """Pega en la misión la respuesta que §5.6.9 compuso (P0 GAP 1).
+
+    Los canales ya no inventan su propia respuesta: leen esta. El test sigue ejerciendo
+    el canal (voz, TTS, modelo), pero con la fuente semántica real.
+    """
+    from alexis.cognition.goal_verification import GoalVerification
+    from alexis.cognition.response import ResponseComposer
+    from alexis.cognition.state import KnowledgeState
+
+    knowledge = KnowledgeState(objective=mission.goal.objective)
+    knowledge.last_verdict = verdict
+    knowledge.mark_completed("respond")
+    verification = GoalVerification(
+        objective=mission.goal.objective, evaluations=[], verified=goal_verified, reason=""
+    )
+    mission.context["response"] = ResponseComposer().compose(
+        mission, knowledge, verification, model_outcome="real"
+    ).to_dict()
+    return mission
+
+
 class _FakeLLMRouter:
     """Router falso con un provider REAL que devuelve un texto dado."""
 
@@ -79,7 +101,7 @@ class TestExecutorChat:
                 "y responder por voz a tus preguntas."
             ),
         )
-        mission = await _mission("¿qué puedes hacer por mí?")
+        mission = _with_composed_response(await _mission("¿qué puedes hacer por mí?"))
         step = PlanStep("respond", "responde", "respond", RiskLevel.LOW)
         result = await executor.execute(mission, step)
         assert "workspace" in result.output["message"]
@@ -132,7 +154,7 @@ class TestVerifierChat:
 @pytest.mark.asyncio
 async def test_chat_route_end_to_end_planner_executor_verifier(tmp_path, fake_tts):
     planner = Planner()
-    mission = await _mission("¿cuál es tu mejor cualidad?")
+    mission = _with_composed_response(await _mission("¿cuál es tu mejor cualidad?"))
     plan = await planner.create_plan(mission)
     executor = SandboxExecutor(
         tools=ToolRegistry(),

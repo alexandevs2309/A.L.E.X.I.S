@@ -97,6 +97,9 @@ class KnowledgeState:
     claims: list[Claim] = field(default_factory=list)
     confidence: float = 0.0
     replans: int = 0
+    #: Firmas de las acciones ya intentadas: (capability, args canónicos). Es lo que
+    #: permite distinguir "cambié de estrategia" de "reintento con otro id" (P0 §5.7).
+    action_signatures: list[str] = field(default_factory=list)
     iterations: int = 0
     stalls: int = 0
     verified: bool = False
@@ -218,6 +221,7 @@ class KnowledgeState:
             "uncertainties": list(self.uncertainties),
             "completed_steps": list(self.completed_steps),
             "failed_steps": list(self.failed_steps),
+            "action_signatures": list(self.action_signatures),
             "claims": [c.to_dict() for c in self.claims],
             "confidence": self.confidence,
             "replans": self.replans,
@@ -250,6 +254,7 @@ class KnowledgeState:
             "uncertainties",
             "completed_steps",
             "failed_steps",
+              "action_signatures",
         ):
             value = raw.get(key)
             if isinstance(value, list):

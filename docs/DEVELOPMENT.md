@@ -157,7 +157,6 @@ También está instalado como hook `pre-commit` (`.pre-commit-config.yaml`). `ma
 ejecuta el gate completo: `secrets-check` + `env-check` + `test`.
 
 ### 7.4 Token de la API (R4)
-
 - `ALEXIS_API_TOKEN` vacío ⇒ en `development` la API arranca **sin auth** y deja un
   **warning explícito** en el log; en `production` el arranque **falla**.
 - Con token, los endpoints de misión y `/stream` lo exigen (comparación en tiempo
@@ -165,3 +164,55 @@ ejecuta el gate completo: `secrets-check` + `env-check` + `test`.
 - Fuera de Docker, `make run` sirve en `127.0.0.1:8000` por defecto. Dentro de Docker,
   el `Dockerfile` usa `0.0.0.0` porque es obligatorio para el mapeo de puertos, y el
   compose publica sólo en `127.0.0.1`.
+
+### 7.5 Modelo real (Cognitive Core)
+
+Sin provider configurado, ALEXIS funciona en **DEGRADED**: las decisiones salen de las
+reglas deterministas y así se declaran (`cognition_outcome=degraded`).
+
+**Opción verificada — Gemini (API compatible con OpenAI):**
+
+```bash
+cp secrets/gemini.env.example secrets/gemini.env   # pon tu key en ALEXIS_MODEL_API_KEY
+set -a; . secrets/gemini.env; set +a
+
+export ALEXIS_MODEL_PROVIDER=openai_compatible
+export ALEXIS_MODEL_BASE_URL=https://generativelanguage.googleapis.com
+export ALEXIS_MODEL_ENDPOINT=/v1beta/openai/chat/completions
+export ALEXIS_MODEL_NAME=gemini-3.5-flash
+export ALEXIS_MODEL_DIALECT=openai
+export ALEXIS_MODEL_MAX_TOKENS=2048     # los modelos Gemini 3.x razonan antes de responder
+export ALEXIS_MODEL_TIMEOUT_S=180
+export ALEXIS_MODEL_DEADLINE_MS=180000
+```
+
+**Opción local (gratis, sin red):** Ollama o llama.cpp sirviendo un modelo pequeño.
+
+```bash
+export ALEXIS_MODEL_PROVIDER=openai_compatible   # o local_http
+export ALEXIS_MODEL_BASE_URL=http://127.0.0.1:11434
+export ALEXIS_MODEL_NAME=qwen2.5:3b
+export ALEXIS_MODEL_DIALECT=openai
+```
+
+| Variable | Para qué |
+|---|---|
+| `ALEXIS_MODEL_PROVIDER` | `openai_compatible`, `local_http`, `omniroute` o `none` |
+| `ALEXIS_MODEL_BASE_URL` / `_ENDPOINT` | Servidor y ruta (Gemini necesita `_ENDPOINT`) |
+| `ALEXIS_MODEL_NAME` | Nombre exacto del modelo en ese servidor |
+| `ALEXIS_MODEL_API_KEY` | Credencial (se guarda en `secrets/`, nunca en el repo) |
+| `ALEXIS_MODEL_MAX_TOKENS` | Tope por respuesta. **Los modelos de razonamiento lo consumen pensando**: con topes bajos llega la respuesta vacía y el router la marca `UNAVAILABLE` con honestidad |
+| `ALEXIS_MODEL_TIMEOUT_S` / `_DEADLINE_MS` | Tiempo máximo de la llamada |
+| `ALEXIS_MODEL_FALLBACK` | `degraded` (por defecto) o `none` |
+| `ALEXIS_MODEL_EXTRA_PROVIDERS` / `_EXTRA_BASE_URL` / `_EXTRA_MODEL` | Provider de respaldo (p. ej. cloud + local) |
+| `ALEXIS_MODEL_BUDGET_USD` | Tope de gasto; el router deja de elegir providers de pago al agotarlo |
+
+**Comprobarlo de punta a punta** (levanta el demo, hace 3 turnos y audita el stream):
+
+```bash
+scripts/e2e_modelo_real.sh 8117
+```
+
+Cada llamada aparece en el stream como `model.routed` con `outcome` explícito
+(`real` / `degraded` / `unavailable`), `provider`, `model` y `latency_ms`. Si el
+provider real falla y se recurre al respaldo, `fallback_error` explica por qué.

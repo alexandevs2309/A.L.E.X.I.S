@@ -1,9 +1,14 @@
+import logging
+
 from alexis.autonomy.goal_state import settle
 from alexis.contracts import Mission, MissionState, RiskLevel, Verification
 from alexis.cognition.planner import plan_from_dict, plan_to_dict
 from alexis.cognition.planner_model import PlanValidator
 from alexis.cognition.state import NextAction
+from alexis.learning.experience import EXPERIENCE_SOURCE
 from alexis.meta.cognition import MetaCognition
+
+log = logging.getLogger(__name__)
 
 
 class AlexisRuntime:
@@ -68,9 +73,134 @@ class AlexisRuntime:
         if self.event_repo is not None and topic is not None:
             await self.event_repo.append(topic, payload if payload is not None else {}, mission.id)
 
+    # ------------------------------------------------------------------ #
+    # P0 §13 — La ÚNICA operación de reanudación
+    # ------------------------------------------------------------------ #
+
+    async def resume_from_clarification(self, mission: Mission, answer: str) -> Mission:
+        """Reanuda una misión en WAITING_CLARIFICATION con la respuesta del usuario.
+
+        Es la única operación de reanudación del sistema: la usan tanto
+        `POST /missions/{id}/clarify` como el canal `/chat`. No hay dos caminos que
+        puedan divergir.
+
+        Valida antes de tocar nada (misión existe, está esperando, la respuesta no está
+        vacía, la misión no está terminada) y después reanuda el bucle cognitivo desde
+        el punto en que se dejó, sin resetear nada.
+        """
+        if self.cognitive is None:
+            raise RuntimeError("CognitiveRuntime no configurado")
+        allowed, why = self.cognitive.can_clarify(mission)
+        if not allowed:
+            raise ValueError(why or "mission cannot be clarified")
+        text = (answer or "").strip()
+        if not text:
+            raise ValueError("empty clarification response")
+
+        before = self.cognitive.knowledge_for(mission)
+        iterations_before = before.iterations
+        replans_before = before.replans
+        claims_before = len(before.claims)
+        completed_before = set(before.completed_steps)
+
+        knowledge = self.cognitive.resume_with_clarification(mission, text)
+
+        # La reanudación NO reinicia: si se perdiera algo aquí, estos tres asserts lo delatan.
+        if knowledge.iterations < iterations_before or knowledge.replans < replans_before:
+            raise AssertionError("la reanudación reseteó los contadores")
+        if len(knowledge.claims) < claims_before:
+            raise AssertionError("la reanudación perdió evidencia previa")
+        if not completed_before <= set(knowledge.completed_steps):
+            raise AssertionError("la reanudación perdió pasos completados")
+
+        await self._commit(
+            mission, "mission.clarification_received",
+            {"mission_id": mission.id, "provenance": "user_input",
+             "iteration": knowledge.iterations, "length": len(text)},
+        )
+        await self.events.publish(
+            "mission.clarification_received",
+            {"mission_id": mission.id, "provenance": "user_input",
+             "iteration": knowledge.iterations},
+        )
+        # A RUNNING y a seguir: el bucle cognitivo decide desde el estado congelado.
+        mission.state = MissionState.RUNNING
+        await self._commit(mission, "mission.resumed", {"mission_id": mission.id,
+                                                        "iteration": knowledge.iterations})
+        await self.events.publish("mission.resumed", {"mission_id": mission.id,
+                                                      "iteration": knowledge.iterations})
+        return await self._run_cognitive(mission, mission.plan or await self._ensure_plan(mission), 0)
+
     async def _close(self, mission: Mission, state: MissionState):
         if self.audit_repo is not None:
             await self.audit_repo.record(f"mission.{state.value}", "runtime", mission.id, mission=mission.id)
+        await self._close_cycle(mission)
+
+    # ------------------------------------------------------------------ #
+    # P0 §5.6.9 — cierre de ciclo: response → reflection → experience → learning
+    # ------------------------------------------------------------------ #
+
+    async def _close_cycle(self, mission: Mission) -> bool:
+        """Compone el epílogo del ciclo y lo deja persistido. `False` si no aplicaba.
+
+        Se ejecuta al cerrar la misión, y **sólo** si el camino cognitivo llegó a correr
+        (hay `knowledge` en el contexto). Así el legacy no cambia de comportamiento y el
+        epílogo nunca se adelanta al resultado: aquí el veredicto ya está asentado.
+
+        El orden no admite atajos (§5.6.9): response → reflection → experience →
+        learning. La frontera de aprendizaje corre dentro de `compose_epilogue`, y una
+        misión sin objetivo verificado no produce aprendizaje.
+        """
+        if self.cognitive is None:
+            return False
+        context = getattr(mission, "context", {}) or {}
+        if not context.get("knowledge"):
+            return False
+
+        knowledge = self.cognitive.knowledge_for(mission)
+        reply, reflection, experience, verified = self.cognitive.compose_epilogue(
+            mission, knowledge, model_outcome=self._model_outcome_of(mission)
+        )
+        self.cognitive.store_knowledge(mission, knowledge)
+        await self._commit(mission, "mission.reflected", {"mission_id": mission.id})
+
+        # §5.6.6: la experiencia se publica como observación para que la recupere la
+        # memoria existente. `trusted=False`: es contexto, nunca autoridad.
+        if self.observation_repo is not None:
+            try:
+                await self.observation_repo.insert(
+                    mission.id, EXPERIENCE_SOURCE, verified.to_dict(), trusted=False
+                )
+            except Exception as exc:  # noqa: BLE001 — la memoria no puede tumbar el cierre
+                log.warning("no se pudo publicar la experiencia: %s", exc)
+
+        await self.events.publish(
+            "mission.response",
+            {
+                "mission_id": mission.id,
+                "text": reply.text,
+                "verdict": reply.verdict,
+                "goal_verified": reply.goal_verified,
+                "blocked": reply.blocked,
+                "needs_user": reply.needs_user,
+                "pending": list(reply.pending),
+                "cognition_outcome": reply.cognition_outcome,
+            },
+        )
+        await self.events.publish(
+            "mission.experience",
+            {"mission_id": mission.id, **verified.to_dict()},
+        )
+        return True
+
+    def _model_outcome_of(self, mission: Mission) -> str:
+        """Procedencia del modelo en la última decisión: real | degraded | unavailable | none."""
+        decisions = (getattr(mission, "context", {}) or {}).get("decisions") or {}
+        for row in decisions.values():
+            outcome = str((row or {}).get("cognition_outcome") or "")
+            if outcome:
+                return outcome
+        return str((getattr(mission, "context", {}) or {}).get("cognition_outcome") or "none")
 
     async def _ensure_plan(self, mission: Mission):
         """Deja en `mission.plan` un plan válido, venga de donde venga.
@@ -295,6 +425,25 @@ class AlexisRuntime:
         await self._commit(mission)
 
         if self.cognitive is not None:
+            # P0 GAP 3: antes de reanudar, se comprueba que el contexto cognitivo se
+            # recuperó entero. Si no, la misión NO sigue a ciegas: queda en
+            # NEEDS_VERIFICATION con el motivo. Nunca se asume éxito tras un recovery.
+            if start:
+                resume = self.cognitive.resume_cognition(mission)
+                if not resume.safe:
+                    mission.state = MissionState.NEEDS_VERIFICATION
+                    mission.context["recovery_blocked"] = resume.to_dict()
+                    await self._commit(mission, "mission.recovery_blocked", resume.to_dict())
+                    await self._close(mission, mission.state)
+                    await self.events.publish("mission.recovery_blocked", resume.to_dict())
+                    return mission
+                restored = self.cognitive.restore_world(mission)
+                await self._commit(
+                    mission, "mission.recovered",
+                    {"mission_id": mission.id, "resumed_at_step": start, **resume.to_dict(),
+                     "world_entities": restored},
+                )
+                await self.events.publish("mission.recovered", resume.to_dict())
             return await self._run_cognitive(mission, plan, start)
 
         for index, step in enumerate(plan.steps):
@@ -513,19 +662,19 @@ class AlexisRuntime:
                 return mission
 
             if outcome.mission_state is MissionState.WAITING_CLARIFICATION:
-                mission.state = MissionState.WAITING_CLARIFICATION
-                mission.context["clarification"] = {
-                    "question": outcome.question,
-                    "reason": outcome.decision.rationale,
-                    "known": list(knowledge.known),
-                    "unknown": list(knowledge.unknown),
-                    "hypotheses": list(knowledge.hypotheses),
-                    "iterations": knowledge.iterations,
-                }
-                await self._commit(
-                    mission, "mission.clarification_required", mission.context["clarification"]
+                # P0 §13: la pregunta y su contexto se congelan enteros y se persisten.
+                clarification = self.cognitive.ask_user(
+                    mission, knowledge, outcome.question or "",
+                    reason=outcome.decision.rationale,
+                    action=outcome.decision.action.value,
+                    capability=outcome.decision.capability,
+                    step_id=outcome.decision.step_id,
                 )
-                await self.events.publish("mission.clarification_required", mission.context["clarification"])
+                await self._commit(mission, "mission.ask_user", clarification.to_dict())
+                await self.events.publish("mission.ask_user", clarification.to_dict())
+                await self.events.publish("mission.clarification_required", clarification.to_dict())
+                # No se cierra la misión: está esperando, no terminada. `_close` audita,
+                # pero el estado sigue siendo WAITING_CLARIFICATION y es reanudable.
                 await self._close(mission, mission.state)
                 return mission
 
@@ -588,6 +737,7 @@ class AlexisRuntime:
 
             if outcome.done:
                 mission.state = outcome.mission_state or MissionState.RUNNING
+                await self._close_cycle(mission)
                 return mission
 
             if self.task_runner is not None:

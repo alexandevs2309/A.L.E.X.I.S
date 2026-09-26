@@ -124,11 +124,25 @@ class RuleBasedIntentClassifier:
 
     source = "deterministic"
 
-    def classify(self, utterance: str, brief: SelfBrief | None = None) -> Intent:
+    def classify(self, utterance: str, brief: SelfBrief | None = None,
+                 *, pending_clarification: bool = False) -> Intent:
+        """`pending_clarification=True` significa que hay una pregunta abierta.
+
+        En ese caso el turno es una RESPUESTA a esa pregunta, no una tarea nueva: sin
+        esto, un "src/main.py" caería en UNKNOWN y se perdería. No se crea una segunda
+        misión (P0 §13.7).
+        """
         from alexis.perception.activation import is_activation_objective
         from alexis.tools.filesystem import classify_objective_intent
 
         text = (utterance or "").strip()
+        if pending_clarification and text:
+            return Intent(
+                kind=IntentKind.CLARIFICATION,
+                utterance=text,
+                confidence=0.8,
+                model_meta={"source": self.source, "classifier": "pending_clarification"},
+            )
         low = _normalize(text)
         meta = {"source": self.source, "classifier": "keywords"}
 
@@ -174,6 +188,17 @@ class RuleBasedIntentClassifier:
                 model_meta=meta,
             )
 
+        # P0 requisito 1: una pregunta interrogariva es `QUESTION`, no `UNKNOWN`.
+        # No abre misión (ya lo garantiza `is_task`), pero sí tiene clase propia: la
+        # conversación puede responderla en lugar de pedir aclaración.
+        if _looks_like_question(text):
+            return Intent(
+                kind=IntentKind.QUESTION,
+                utterance=text,
+                confidence=0.55,
+                model_meta=meta,
+            )
+
         return Intent(
             kind=IntentKind.UNKNOWN,
             utterance=text,
@@ -182,6 +207,27 @@ class RuleBasedIntentClassifier:
             confidence=0.2,
             model_meta=meta,
         )
+
+
+#: Aperturas interrogativas en español e inglés. Suficiente para distinguir una pregunta
+#: de un comando o de una tarea; no pretende ser un analizador sintáctico.
+_QUESTION_OPENERS = (
+    "que", "qué", "quien", "quién", "donde", "dónde", "cuando", "cuándo", "por que",
+    "por qué", "como", "cómo", "cuanto", "cuánto", "cual", "cuál", "cuales", "cuáles",
+    "para que", "para qué", "con que", "con qué", "de que", "de qué",
+    "what", "who", "where", "when", "why", "how", "which", "whose",
+)
+
+
+def _looks_like_question(text: str) -> bool:
+    """¿El turno es una pregunta? Marca de cierre o apertura interrogativa."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if stripped.endswith("?"):
+        return True
+    low = _normalize(stripped)
+    return any(low.startswith(opener) for opener in _QUESTION_OPENERS)
 
 
 class ModelIntentClassifier:
@@ -296,8 +342,13 @@ class IntentClassifier:
         self.model = model or (ModelIntentClassifier(router) if router is not None else None)
         self.last_proposal: CapabilityProposal | None = None
 
-    async def classify(self, utterance: str, brief: SelfBrief | None = None) -> Intent:
+    async def classify(self, utterance: str, brief: SelfBrief | None = None,
+                       *, pending_clarification: bool = False) -> Intent:
         text = (utterance or "").strip()
+        if pending_clarification and text:
+            # Hay una pregunta abierta: este turno la responde. Ni el modelo ni las reglas
+            # deciden eso, y sobre todo NO se crea una segunda misión (P0 §13.7).
+            return self.rule_based.classify(text, brief, pending_clarification=True)
         if self.model is None or self.router is None:
             return self._fallback(text, brief, reason="sin ModelRouter configurado", outcome=None)
 

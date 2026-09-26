@@ -270,7 +270,7 @@ def _self_aux():
             {"id": m.id, "objective": m.goal.objective, "state": m.state.value}
             for m in RUNNING.values()
         ],
-        "lessons": [],
+        "lessons": list(SELF_SYNC.lessons),
         "memory_items": getattr(RUNTIME.memory, "items", []),
         "verification": STATE.get("verification"),
         "available": ENABLED_CAPABILITIES,
@@ -296,6 +296,8 @@ _degraded_provider = MODEL_CONFIG.build_degraded()
 if _degraded_provider is not None:
     MODEL_ROUTER.register(_degraded_provider)
 INTENT_CLASSIFIER = IntentClassifier(MODEL_ROUTER)
+if INTENT_CLASSIFIER.model is not None:
+    INTENT_CLASSIFIER.model.max_tokens = MODEL_CONFIG.max_tokens
 
 _real_providers = [p.id for p in MODEL_ROUTER.providers() if not p.degraded and p.available]
 print(
@@ -335,6 +337,16 @@ def _create_mission_from_intent(intent):
     return mission
 
 
+def _pending_clarification():
+    """Misión en WAITING_CLARIFICATION con pregunta pendiente, o `None` (P0 §13)."""
+    for mission in list(RUNNING.values()):
+        if mission.state is MissionState.WAITING_CLARIFICATION and (
+            mission.context.get("clarification") or {}
+        ).get("question"):
+            return mission
+    return None
+
+
 CONVERSATION = ConversationSession(
     classifier=INTENT_CLASSIFIER,
     self_model=SELF,
@@ -342,6 +354,9 @@ CONVERSATION = ConversationSession(
     create_mission=_create_mission_from_intent,
     enqueue=lambda mission: _enqueue_or_run(mission),
     capability_registry=CAPABILITIES,
+    # P0 §13: si hay una misión esperando respuesta, este canal la reanuda.
+    pending_mission=_pending_clarification,
+    resume=lambda mission, answer: RUNTIME.resume_from_clarification(mission, answer),
 )
 
 # --- F2.1/Fase 1: Cognitive Runtime (ALEXIS_COGNITIVE=1) --------------------
@@ -371,7 +386,12 @@ if os.environ.get("ALEXIS_COGNITIVE", "0") == "1":
 
     RUNTIME.plan_validator = PlanValidator(catalog=CAPABILITIES, policy=RUNTIME.policy)
     if os.environ.get("ALEXIS_MODEL_PLANNER", "0") == "1":
-        RUNTIME.plan_model = ModelPlanner(MODEL_ROUTER, catalog=CAPABILITIES)
+        RUNTIME.plan_model = ModelPlanner(
+            MODEL_ROUTER,
+            catalog=CAPABILITIES,
+            max_tokens=MODEL_CONFIG.max_tokens,
+            deadline_ms=MODEL_CONFIG.deadline_ms,
+        )
         print("[cognitive] ModelPlanner activo (ALEXIS_MODEL_PLANNER=1): el modelo propone, el validador decide")
     else:
         print("[cognitive] plan por reglas (ALEXIS_MODEL_PLANNER != 1); el ModelPlanner está disponible")
@@ -387,6 +407,8 @@ if os.environ.get("ALEXIS_COGNITIVE", "0") == "1":
         self_model=SELF,
         world=WORLD,
         plan_validator=RUNTIME.plan_validator,
+        decision_max_tokens=MODEL_CONFIG.max_tokens,
+        decision_deadline_ms=MODEL_CONFIG.deadline_ms,
     )
     print("[cognitive] CognitiveRuntime activo (ALEXIS_COGNITIVE=1): decide→policy→execute→observe→evaluate")
 else:
@@ -862,6 +884,45 @@ class Handler(BaseHTTPRequestHandler):
             mission.results.clear()
             _enqueue_or_run(mission)
             self._send_json({"id": mission.id, "state": mission.state.value})
+        elif path.startswith("/missions/") and path.endswith("/clarify"):
+            # P0 §13: respuesta a una pregunta pendiente. Delega en la MISMA
+            # operación de reanudación que usa /chat; no hay lógica duplicada.
+            mission_id = path.split("/")[2]
+            mission = pending_mission(mission_id)
+            if mission is None:
+                self._send_json({"error": "mission not found"}, 404)
+                return
+            # Este handler sólo leía el body en /chat; aquí hay que leerlo.
+            length = int(self.headers.get("Content-Length", 0))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            answer = payload.get("response") or payload.get("text") or ""
+            if RUNTIME.cognitive is None:
+                self._send_json({"error": "cognitive runtime not configured"}, 503)
+                return
+            allowed, why = RUNTIME.cognitive.can_clarify(mission)
+            if not allowed:
+                self._send_json({"error": why, "state": mission.state.value}, 409)
+                return
+            if not str(answer).strip():
+                self._send_json({"error": "empty response"}, 400)
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    RUNTIME.resume_from_clarification(mission, str(answer)), LOOP
+                ).result(timeout=180)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 409)
+                return
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": f"resume failed: {exc}"}, 500)
+                return
+            if STORAGE.get("mission"):
+                asyncio.run_coroutine_threadsafe(STORAGE["mission"].upsert(mission), LOOP)
+            self._send_json({
+                "type": "clarification_received",
+                "mission_id": mission.id,
+                "state": mission.state.value,
+            })
         elif path.startswith("/missions/") and path.endswith("/deny"):
             mission_id = path.split("/")[2]
             mission = pending_mission(mission_id)

@@ -64,6 +64,9 @@ class ModelResponse:
     cost_usd: float = 0.0
     latency_ms: int = 0
     error: str | None = None
+    #: Motivo por el que se recurrrió al fallback (P1: la auditoría debe explicar *por
+    #: qué* una respuesta vino de otro provider, no sólo *que* vino de otro).
+    fallback_error: str | None = None
     chain: list[str] = field(default_factory=list)
 
     @property
@@ -103,6 +106,7 @@ class ModelResponse:
             "outcome": self.outcome.value,
             "fallback_used": self.fallback_used,
             "fallback_from": self.fallback_from,
+            "fallback_error": self.fallback_error,
             "chain": list(self.chain),
             "latency_ms": self.latency_ms,
             "cost_usd": self.cost_usd,

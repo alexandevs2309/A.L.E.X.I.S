@@ -44,6 +44,11 @@ class ConversationSession:
         create_mission=None,
         enqueue=None,
         capability_registry=None,
+          # P0 §13: puente con la reanudación. `pending_mission()` dice si hay una
+          # pregunta abierta y de qué misión; `resume()` delega en la MISMA operación
+          # que `POST /missions/{id}/clarify`, para que no haya dos caminos.
+          pending_mission=None,
+          resume=None,
     ):
         self.classifier = classifier
         self.self_model = self_model
@@ -51,6 +56,8 @@ class ConversationSession:
         self.create_mission = create_mission
         self.enqueue = enqueue
         self.capability_registry = capability_registry
+        self.pending_mission = pending_mission or (lambda: None)
+        self.resume = resume
 
     # ------------------------------------------------------------------ #
 
@@ -63,6 +70,16 @@ class ConversationSession:
     async def handle_turn(self, utterance: str, *, source: str = "user") -> UserReply:
         await self._publish(TURN_STARTED, {"source": source})
         brief = self.brief()
+
+        # P0 §13: si hay una pregunta pendiente, este turno puede ser su respuesta. Se
+        # clasifica con esa información para no crear una misión nueva por responder.
+        pending = None
+        try:
+            pending = self.pending_mission()
+        except Exception:  # noqa: BLE001 — si no se puede saber, se sigue el camino normal
+            pending = None
+        if pending is not None and self.resume is not None and (utterance or "").strip():
+            return await self._handle_clarification(utterance, pending, source)
         await self._publish(SELF_CONSULTED, {"zones": len(brief.to_dict())})
 
         intent = await self.classifier.classify(utterance, brief)
@@ -114,6 +131,36 @@ class ConversationSession:
         )
 
     # ------------------------------------------------------------------ #
+
+    async def _handle_clarification(self, utterance: str, pending, source: str) -> UserReply:
+        """El usuario responde a la pregunta pendiente: se reanuda, no se abre otra misión."""
+        mission = pending if not isinstance(pending, dict) else pending.get("mission")
+        mission_id = getattr(mission, "id", None) or (pending or {}).get("mission_id")
+        outcome = ModelOutcome.DEGRADED.value
+        if self.resume is None:
+            return UserReply(
+                text="Hay una pregunta pendiente pero este canal no sabe reanudar.",
+                kind="error", mission_id=mission_id, cognition_outcome=outcome, degraded=True,
+            )
+        result = self.resume(mission, utterance)
+        if inspect.isawaitable(result):
+            result = await result
+        state = str(getattr(result, "state", None) and result.state.value or
+                    (result or {}).get("state") or "running")
+        await self._publish("mission.clarification_received",
+                            {"mission_id": mission_id, "provenance": "user_input",
+                             "source": source})
+        return UserReply(
+            text=(
+                "Recibido. Retomo la misión desde donde se quedó."
+                if state in ("running", "planning", "verifying")
+                else f"Recibido. La misión quedó en {state}."
+            ),
+            kind="answer",
+            mission_id=mission_id,
+            cognition_outcome=outcome,
+            degraded=True,
+        )
 
     def _direct_reply(self, intent: Intent, brief: SelfBrief, outcome: str) -> UserReply:
         """Respuesta sin misión. El texto es la experiencia principal (F2 §14)."""

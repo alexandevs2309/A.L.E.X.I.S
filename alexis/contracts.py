@@ -112,6 +112,11 @@ class PlanStep:
     verification: str | None = None
     proposed_by: str | None = None
     rationale: str | None = None
+    #: P0 requisito 7: cada paso declara su propio objetivo y sus criterios de éxito.
+    #: Faltaban los dos (`description` era sólo un texto; `verification` no se usaba), y sin
+    #: ellos el plan no puede comprobarse paso a paso, sólo al final.
+    objective: str | None = None
+    success_criteria: list[str] = field(default_factory=list)
     # F2.5 — ModelPlanner: argumentos que el plan propone para la capability y qué
     # se espera que ocurra (criterio de éxito del paso). Al final, retrocompatible.
     args: dict[str, Any] = field(default_factory=dict)

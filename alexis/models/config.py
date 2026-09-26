@@ -15,23 +15,26 @@ from alexis.models.provider import ModelProvider
 KNOWN_PROVIDERS = ("local_http", "openai_compatible", "omniroute", "none")
 
 
-def _bool_env(name: str, default: bool) -> bool:
-    raw = (os.environ.get(name) or "").strip().lower()
+def _bool_env(name: str, default: bool, source: dict | None = None) -> bool:
+    get = (source if source is not None else os.environ).get
+    raw = (get(name) or "").strip().lower()
     if not raw:
         return default
     return raw in ("1", "true", "yes", "on")
 
 
-def _float_env(name: str, default: float) -> float:
-    raw = (os.environ.get(name) or "").strip()
+def _float_env(name: str, default: float, source: dict | None = None) -> float:
+    get = (source if source is not None else os.environ).get
+    raw = (get(name) or "").strip()
     try:
         return float(raw) if raw else default
     except ValueError:
         return default
 
 
-def _int_env(name: str, default: int) -> int:
-    raw = (os.environ.get(name) or "").strip()
+def _int_env(name: str, default: int, source: dict | None = None) -> int:
+    get = (source if source is not None else os.environ).get
+    raw = (get(name) or "").strip()
     try:
         return int(raw) if raw else default
     except ValueError:
@@ -47,8 +50,14 @@ class ModelConfig:
     model_name: str = ""
     dialect: str = "ollama"
     fallback: str = "degraded"  # degraded | none
-    deadline_ms: int = 30000
+    deadline_ms: int = 60000
     timeout_s: float = 60.0
+    #: Tope de tokens por respuesta. Los modelos "de razonamiento" (p. ej. Gemini 3.x)
+    #: consumen parte del presupuesto en pensar antes de emitir texto: con topes bajos la
+    #: respuesta llega vacía o truncada (`finish_reason: length`) y el Core la descarta
+    #: como no utilizable, aunque la decisión fuese correcta. Medido: ~360 tokens de
+    #: thinking + ~115 de JSON. 2048 deja margen sin inventar gasto ilimitado.
+    max_tokens: int = 2048
     budget_usd: float = 0.0
     cost_per_1k_tokens: float = 0.0
     priority: int = 50
@@ -77,11 +86,12 @@ class ModelConfig:
             model_name=(get("ALEXIS_MODEL_NAME") or "").strip(),
             dialect=(get("ALEXIS_MODEL_DIALECT") or "ollama").strip().lower(),
             fallback=fallback,
-            deadline_ms=_int_env("ALEXIS_MODEL_DEADLINE_MS", 30000),
-            timeout_s=_float_env("ALEXIS_MODEL_TIMEOUT_S", 60.0),
-            budget_usd=_float_env("ALEXIS_MODEL_BUDGET_USD", 0.0),
-            cost_per_1k_tokens=_float_env("ALEXIS_MODEL_COST_PER_1K", 0.0),
-            priority=_int_env("ALEXIS_MODEL_PRIORITY", 50),
+            deadline_ms=_int_env("ALEXIS_MODEL_DEADLINE_MS", 60000, source),
+            timeout_s=_float_env("ALEXIS_MODEL_TIMEOUT_S", 60.0, source),
+            max_tokens=_int_env("ALEXIS_MODEL_MAX_TOKENS", 2048, source),
+            budget_usd=_float_env("ALEXIS_MODEL_BUDGET_USD", 0.0, source),
+            cost_per_1k_tokens=_float_env("ALEXIS_MODEL_COST_PER_1K", 0.0, source),
+            priority=_int_env("ALEXIS_MODEL_PRIORITY", 50, source),
             extra_providers=[
                 p.strip() for p in (get("ALEXIS_MODEL_EXTRA_PROVIDERS") or "").split(",") if p.strip()
             ],

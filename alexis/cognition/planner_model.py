@@ -337,7 +337,7 @@ class ModelPlanner:
         *,
         catalog=None,
         max_steps: int = 6,
-        max_tokens: int = 400,
+        max_tokens: int = 2048,
         deadline_ms: int = 90000,
         temperature: float = 0.1,
     ):

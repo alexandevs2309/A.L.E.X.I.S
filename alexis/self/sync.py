@@ -12,6 +12,10 @@ from alexis.self.model import SelfModel
 
 
 class SelfModelSync:
+    #: Cuántas lecciones verificadas recuerda el Self Model. Acotado a propósito: el
+    #: aprendizaje es un borde del Self Model, no su memoria (P0 §5.6.7).
+    LESSON_HISTORY = 5
+
     def __init__(self, model, resolve_mission, aux=None):
         self.model = model
         self.resolve_mission = resolve_mission  # () -> Mission | None
@@ -19,6 +23,10 @@ class SelfModelSync:
         self._sub = None
         self._task = None
         self._current_action = None
+        #: Lecciones que autorizó la frontera de aprendizaje (P0 §5.6.5). Acumuladas por
+        #: evento `mission.experience`; aquí no se decide nada, sólo se recuerda lo ya
+        #: verificado. `self.aux()` es quien las inyecta en `update()`.
+        self.lessons: list[str] = []
 
     def apply_event(self, topic, payload):
         if topic == "presence.listening":
@@ -29,6 +37,8 @@ class SelfModelSync:
             self.model.set_transient(listening=False, speaking=False, reflecting=True)
             text = payload.get("text") if isinstance(payload, dict) else str(payload or "")
             self.model.add_reflection(text)
+        elif topic == "mission.experience":
+            self._apply_experience(payload if isinstance(payload, dict) else {})
         elif topic == "mission.step_started":
             self._current_action = payload if isinstance(payload, str) else (payload or {}).get("step")
             self.model.set_transient(listening=False, speaking=False, reflecting=False, flag=None)
@@ -52,6 +62,21 @@ class SelfModelSync:
         elif topic.startswith("mission.") or topic == "presence.idle":
             self.model.set_transient(listening=False, speaking=False, reflecting=False, flag=None)
         self.model.update(self.resolve_mission(), current_action=self._current_action, **self.aux())
+
+    def _apply_experience(self, payload: dict):
+        """El Self Model recuerda la lección que la frontera autorizó (P0 §5.6.7).
+
+        Sólo entra si `can_teach` es True: el Self Model no aprende de una misión sin
+        verificar. Aquí no se decide nada; la frontera ya autorizó o vetó esta lección.
+        """
+        if not payload.get("can_teach"):
+            return
+        lesson = str(payload.get("lesson") or "").strip()
+        if not lesson:
+            return
+        objective = str(payload.get("objective") or "").strip()
+        entry = f"{objective}: {lesson}" if objective and not lesson.startswith(objective) else lesson
+        self.lessons = ([entry] + [x for x in self.lessons if x != entry])[: self.LESSON_HISTORY]
 
     def _apply_cognition(self, payload: dict):
         """El Self Model también refleja lo que hizo el bucle cognitivo.

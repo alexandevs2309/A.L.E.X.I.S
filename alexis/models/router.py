@@ -161,6 +161,8 @@ class ModelRouter:
                     response.latency_ms = int((time.monotonic() - started) * 1000)
                 response.chain = list(chain)
                 self._mark_fallback(response, chain)
+                if response.fallback_used:
+                    response.fallback_error = last_error
                 self._account(response)
                 self._audit(request, response)
                 return response
@@ -178,6 +180,7 @@ class ModelRouter:
                 response.outcome = ModelOutcome.DEGRADED
                 response.fallback_used = True
                 response.fallback_from = chain[0] if chain else None
+                response.fallback_error = last_error
                 response.chain = list(chain) + [degraded.id]
                 self._account(response)
                 self._audit(request, response)
@@ -206,7 +209,6 @@ class ModelRouter:
         if len(chain) > 1 or response.is_degraded:
             response.fallback_used = True
             response.fallback_from = chain[0] if len(chain) > 1 else None
-
     # ------------------------------------------------------------------ #
     # Contabilidad y auditoría
     # ------------------------------------------------------------------ #

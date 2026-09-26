@@ -23,17 +23,30 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from alexis.cognition.contracts import SelfBrief
+from alexis.cognition.contracts import DecisionRecord, SelfBrief
 from alexis.cognition.evidence import EvidenceStore
 from alexis.cognition.goal_verification import GoalVerification, GoalVerifier
+from alexis.cognition.response import ResponseComposer
 from alexis.cognition.state import Decision, KnowledgeState, NextAction, Verdict
-from alexis.contracts import ExecutionResult, Mission, MissionState, Plan, PlanStep, RiskLevel
+from alexis.contracts import (
+    ExecutionResult,
+    Mission,
+    MissionState,
+    Observation,
+    Plan,
+    PlanStep,
+    RiskLevel,
+)
+from alexis.learning.experience import Experience, LearningBoundary
+from alexis.learning.reflection import build_reflection
 from alexis.memory.contracts import MemoryQuery
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
 from alexis.tools.filesystem import extract_workspace_path
+from alexis.world.model import WorldEntity
 
 LOGGER = logging.getLogger("alexis.cognition.runtime")
 
@@ -196,6 +209,8 @@ class CognitiveRuntime:
         max_iterations: int = 12,
         max_replans: int = 2,
         max_stalls: int = 2,
+        decision_max_tokens: int = 2048,
+        decision_deadline_ms: int = 60000,
     ):
         self.policy = policy
         self.gate = gate
@@ -212,6 +227,12 @@ class CognitiveRuntime:
         self.max_iterations = max_iterations
         self.max_replans = max_replans
         self.max_stalls = max_stalls
+        # Presupuesto de la decisión. Un modelo de razonamiento consume parte de estos
+        # tokens en pensar ANTES de emitir el JSON: con topes estrechos la respuesta llega
+        # truncada (`finish_reason: length`) y el runtime la descarta como "no JSON
+        # utilizable", aunque la decisión fuese correcta. Configurable por proveedor.
+        self.decision_max_tokens = decision_max_tokens
+        self.decision_deadline_ms = decision_deadline_ms
 
     # ------------------------------------------------------------------ #
     # World Model: conocer el mundo para decidir
@@ -361,6 +382,86 @@ class CognitiveRuntime:
     # Knowledge
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # P0 GAP 3 — Reanudar una misión cognitiva tras reiniciar
+    # ------------------------------------------------------------------ #
+
+    def resume_cognition(self, mission) -> CognitiveResume:
+        """Comprueba si una misión cognitiva puede reanudarse sin inventar nada.
+
+        No reconstruye: lee lo que quedó en `mission.context` (que la capa de storage ya
+        persiste) y decide. Si falta el contexto cognitivo mínimo, devuelve
+        `safe=False` y la misión debe quedar en NEEDS_VERIFICATION: preferimos admitir
+        que no sabemos a dónde íbamos antes que fingir que lo sabemos.
+        """
+        context = getattr(mission, "context", {}) or {}
+        missing = [key for key in COGNITIVE_RECOVERY_KEYS if not context.get(key)]
+        knowledge = self.knowledge_for(mission)
+        resume = CognitiveResume(
+            safe=not missing,
+            iteration=int(getattr(knowledge, "iterations", 0) or 0),
+            replans=int(getattr(knowledge, "replans", 0) or 0),
+            stalls=int(getattr(knowledge, "stalls", 0) or 0),
+            claims=len(list(getattr(knowledge, "claims", []) or [])),
+            missing=missing,
+        )
+        if not resume.safe:
+            resume.reason = (
+                "el contexto cognitivo no se recuperó completo "
+                f"({', '.join(missing)}): la misión no puede reanudarse sin inventar"
+            )
+        return resume
+
+    def save_world(self, mission) -> int:
+        """Persiste el World Model en `mission.context` para que sobreviva al reinicio.
+
+        El World Model es sólo en RAM (el requisito 4 sigue PARTIAL por eso), pero lo que
+        se ha observado debe sobrevivir: sin estas entidades el `GoalVerifier` no podría
+        confirmar criterios tras el reinicio y la misión se quedaría sin verificar.
+        """
+        if self.world is None:
+            return 0
+        context = getattr(mission, "context", None)
+        if context is None:
+            return 0
+        rows = []
+        for entity in self.world.snapshot():
+            rows.append(entity.to_dict() if hasattr(entity, "to_dict") else dict(entity))
+        context["world"] = rows[-50:]
+        return len(context["world"])
+
+    def restore_world(self, mission) -> int:
+        """Restaura el World Model desde `mission.context`. `0` si no había nada."""
+        if self.world is None:
+            return 0
+        rows = (getattr(mission, "context", {}) or {}).get("world") or []
+        restored = 0
+        skipped: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            try:
+                self.world.entities[str(row["id"])] = WorldEntity(
+                    id=str(row["id"]),
+                    kind=str(row.get("kind") or "unknown"),
+                    name=str(row.get("name") or row["id"]),
+                    attributes=dict(row.get("attributes") or {}),
+                    source=str(row.get("source") or "recovered"),
+                    confidence=float(row.get("confidence") or 0.0),
+                    mission_id=row.get("mission_id"),
+                    observations=int(row.get("observations") or 0),
+                )
+                restored += 1
+            except Exception as exc:  # noqa: BLE001
+                # No se traga en silencio: una entidad que no se restaura se registra,
+                # porque un 0 devuelto con `except` parece "no había nada" y es mentira.
+                skipped.append(f"{row.get('id')}: {type(exc).__name__}")
+        if skipped:
+            context = getattr(mission, "context", None)
+            if context is not None:
+                context.setdefault("world_restore_skipped", skipped)
+        return restored
+
     def knowledge_for(self, mission: Mission) -> KnowledgeState:
         knowledge = KnowledgeState.from_dict(mission.context.get("knowledge"), mission.goal.objective)
         knowledge.objective = mission.goal.objective or knowledge.objective
@@ -372,6 +473,8 @@ class CognitiveRuntime:
     def store_knowledge(self, mission: Mission, knowledge: KnowledgeState) -> None:
         mission.context["knowledge"] = knowledge.to_dict()
         mission.context["claims"] = [c.to_dict() for c in knowledge.claims]
+        # P0 GAP 3: el World Model viaja con el contexto para sobrevivir al reinicio.
+        self.save_world(mission)
 
     def pending_steps(self, mission: Mission, plan: Plan | None, knowledge: KnowledgeState) -> list[PlanStep]:
         """Pasos que ni se completaron ni fallaron: los que aún se pueden intentar."""
@@ -519,10 +622,26 @@ class CognitiveRuntime:
 
         if knowledge.needs_replan and knowledge.replans < self.max_replans:
             blocked_by_world = self.world_blocked_ids(mission, pending_steps)
+            # P0 requisito 12 / §5.7: "Evitar repetir indefinidamente la misma acción con
+            # los mismos argumentos". Si el replan propose un paso ya intentado con los
+            # MISMOS argumentos, eso no es un replan: es un bucle. Se filtra, y si no queda
+            # nada distinto que probar, se bloquea en lugar de insistir.
+            # P0 §5.7: las firmas de acción quedan registradas y `repeated_actions()`
+            # expone la repetición, pero el filtro NO se aplica aquí a propósito.
+            #
+            # Motivo: `pending_steps` devuelve pasos del plan ACTUAL, y un plan puede
+            # legitimamente tener varios pasos con la misma capability y los mismos args
+            # (tres lecturas del mismo tipo en tres sitios, por ejemplo). Filtrarlos aquí
+            # impide trabajo legítimo y rompe comportamiento ya verificado
+            # (`test_replans_are_capped_and_then_it_asks_the_user`).
+            #
+            # Para distinguir "varios pasos iguales" de "el replan inventa un paso nuevo
+            # con los mismos argumentos" — que es el anti-patrón que §5.7 quiere cerrar —
+            # hace falta saber de dónde salió cada paso (plan original vs replan), y esa
+            # procedencia todavía no se registra. Se documenta como GAP, no se simula.
+            usable = [s for s in pending_steps if s.id not in blocked_by_world]
             return [self._replan_decision(knowledge, "la última acción falló")] + [
-                self._step_decision(step)
-                for step in pending_steps
-                if step.id not in blocked_by_world
+                self._step_decision(step) for step in usable
             ]
 
         if pending_steps:
@@ -643,9 +762,9 @@ class CognitiveRuntime:
             system=_DECIDER_SYSTEM,
             messages=[{"role": "user", "content": content}],
             schema=_decision_schema(),
-            max_tokens=320,
+            max_tokens=self.decision_max_tokens,
             temperature=0.0,
-            deadline_ms=20000,
+            deadline_ms=self.decision_deadline_ms,
         )
         try:
             response = await self.model_router.complete(request)
@@ -892,22 +1011,34 @@ class CognitiveRuntime:
         authorization = self._authorize(mission, step)
         if not authorization.allowed:
             knowledge.add_uncertainty(f"bloqueado por política: {authorization.reason}")
-            return self._settle(
-                StepOutcome(
-                    action=decision.action,
-                    knowledge=knowledge,
-                    decision=decision,
-                    done=True,
-                    mission_state=MissionState.BLOCKED,
-                    error=authorization.reason,
-                    verdict=Verdict.BLOCKED,
-                    verdict_reason=f"la autoridad no lo autorizó: {authorization.reason}",
-                ),
-                before,
+            blocked_outcome = StepOutcome(
+                action=decision.action,
+                knowledge=knowledge,
+                decision=decision,
+                done=True,
+                mission_state=MissionState.BLOCKED,
+                error=authorization.reason,
+                verdict=Verdict.BLOCKED,
+                verdict_reason=f"la autoridad no lo autorizó: {authorization.reason}",
             )
+            self._record_decision(
+                mission,
+                knowledge,
+                decision,
+                policy_verdict="deny",
+                verdict=Verdict.BLOCKED.value,
+            )
+            return self._settle(blocked_outcome, before)
         if authorization.requires_approval:
             approved = set(mission.context.get("approved_step_ids") or [])
             if step.id not in approved:
+                self._record_decision(
+                    mission,
+                    knowledge,
+                    decision,
+                    policy_verdict="require_approval",
+                    verdict=Verdict.BLOCKED.value,
+                )
                 return self._settle(
                     StepOutcome(
                         action=decision.action,
@@ -924,12 +1055,21 @@ class CognitiveRuntime:
                 )
             knowledge.add_known(f"'{step.id}' aprobado por el usuario")
 
+        self.record_signature(knowledge, step)
         result = await self._run(mission, step, decision)
         claims = self.evidence.from_execution_result(result)
         for claim in claims:
             knowledge.add_claim(claim)
         self.observe_world(mission, step, result)
         self._absorb(step, result, knowledge)
+        self._record_decision(
+            mission,
+            knowledge,
+            decision,
+            policy_verdict="allow",
+            execution_result="ok" if result.success else (result.error or "la acción falló"),
+            verdict=verdict_for_execution(result).value,
+        )
         return self._settle(
             StepOutcome(
                 action=decision.action,
@@ -1004,6 +1144,330 @@ class CognitiveRuntime:
         if self.gate is not None:
             return self.gate.decide(mission, step, self.policy)
         return self.policy.authorize(mission, step)
+
+    # ------------------------------------------------------------------ #
+    # P0 §5.6.2 — la decisión queda registrada como metadata operacional
+    # ------------------------------------------------------------------ #
+
+    def _record_decision(
+        self,
+        mission: Mission,
+        knowledge: KnowledgeState,
+        decision: Decision,
+        *,
+        policy_verdict: str = "",
+        execution_result: str = "",
+        verdict: str = "",
+    ) -> DecisionRecord:
+        """Guarda la decisión en `mission.context["decisions"]` (P0 §5.6.2).
+
+        El camino cognitivo antes NO registraba nada: `_record_decision` sólo existía en
+        el legacy (`core/runtime.py`), al que el loop cognitivo nunca llegaba porque
+        retorna antes. Con esto, una decisión es reconstruible tras reiniciar.
+
+        Lo que se guarda es **metadata operacional**: acción, capability, justificación
+        breve, veredicto de la policy, resultado, evidencia y contadores. Nunca el
+        razonamiento del modelo (`DecisionRecord` recorta la justificación).
+        """
+        evidence_refs: list[str] = []
+        for claim in list(getattr(knowledge, "claims", []) or []):
+            evidence_refs.extend(str(x) for x in (getattr(claim, "evidence_ids", []) or []))
+        record = DecisionRecord(
+            mission_id=str(getattr(mission, "id", "") or ""),
+            iteration=int(getattr(knowledge, "iterations", 0) or 0),
+            action=str(getattr(getattr(decision, "action", None), "value", decision) or ""),
+            capability=(
+                getattr(decision, "capability", None)
+                or (decision.step.capability if getattr(decision, "step", None) else None)
+            ),
+            justification=str(getattr(decision, "rationale", "") or ""),
+            policy_verdict=policy_verdict,
+            execution_result=execution_result,
+            evidence_refs=sorted(set(evidence_refs))[:8],
+            verdict=verdict or str(getattr(knowledge, "last_verdict", "") or ""),
+            timestamp=time.time(),
+            replan_count=int(getattr(knowledge, "replans", 0) or 0),
+            cognition_outcome=str(
+                getattr(decision, "cognition_outcome", "") or "none"
+            ),
+        )
+        context = getattr(mission, "context", None)
+        if context is not None:
+            decisions = context.setdefault("decisions", {})
+            key = f"{record.iteration}:{record.action}:{record.capability or '-'}"
+            decisions[key] = record.to_dict()
+        return record
+
+    #: Un reintento idéntico se permite UNA vez. El plan pide evitar repetir
+    #: "indefinidamente" la misma acción con los mismos argumentos: un reintento tras un
+    #: fallo transitorio es legítimo; el segundo con la misma firma ya es un bucle. Bloquear
+    #: el primero rompe missions que hoy pasan (ver `test_replan_tras_un_fallo_es_failure`).
+    max_identical_retries: int = 1
+
+    @classmethod
+    def _already_tried(cls, knowledge: KnowledgeState, step: PlanStep) -> bool:
+        """¿Esta acción con estos argumentos YA se agotó en su reintento?
+
+        La firma es `(capability, args canónicos)`, no el id del paso: `read-probe` y
+        `read-probe-2` con los mismos argumentos son la MISMA acción, y llamarlo replan
+        era el bucle del MVP.
+        """
+        signatures = getattr(knowledge, "action_signatures", None) or []
+        return signatures.count(_action_signature(step)) > cls.max_identical_retries
+
+    #: Tope de firmas guardadas. Acotado para que el contexto no crezca sin límite.
+    max_signatures: int = 50
+
+    def repeated_actions(self, knowledge: KnowledgeState, pending_steps) -> list[PlanStep]:
+        """Pasos pendientes cuya acción ya se reintentó de más. Exposición, no filtro.
+
+        Sirve para que quien planee vea la repetición, y para el test del invariante. No
+        se usa para descartar pasos: ver el comentario en la rama de replan.
+        """
+        return [s for s in pending_steps if self._already_tried(knowledge, s)]
+
+    def record_signature(self, knowledge: KnowledgeState, step: PlanStep) -> None:
+        """Deja constancia de la acción intentada, para poder compararla después.
+
+        Cuenta REPeticiones a propósito, no deduplica: `_already_tried` decide contando
+        cuántos veces se intentó la misma firma. Con deduplicar, el contador se quedaba
+        siempre en 1 y la guarda de §5.7 era código muerto.
+        """
+        signatures = getattr(knowledge, "action_signatures", None)
+        if signatures is None:
+            return
+        signatures.append(_action_signature(step))
+        if len(signatures) > self.max_signatures:
+            del signatures[: len(signatures) - self.max_signatures]
+
+    # ------------------------------------------------------------------ #
+    # P0 requisito 13 — ASK USER: preguntar y reanudar
+    # ------------------------------------------------------------------ #
+
+    def ask_user(
+        self,
+        mission: Mission,
+        knowledge: KnowledgeState,
+        question: str,
+        *,
+        reason: str = "",
+        category: str = "missing_information",
+        action: str = "",
+        capability: str | None = None,
+        step_id: str | None = None,
+    ) -> Clarification:
+        """Congela la pregunta y TODO el contexto para poder seguir después.
+
+        Va a `mission.context["clarification"]`, que la capa de storage ya persiste: la
+        pregunta sobrevive al reinicio sin tabla nueva ni estado en memoria.
+        """
+        clarification = Clarification(
+            mission_id=str(getattr(mission, "id", "") or ""),
+            question=str(question or ""),
+            reason=str(reason or ""),
+            category=category,
+            iteration=int(getattr(knowledge, "iterations", 0) or 0),
+            replans=int(getattr(knowledge, "replans", 0) or 0),
+            stalls=int(getattr(knowledge, "stalls", 0) or 0),
+            known=list(getattr(knowledge, "known", []) or [])[-10:],
+            unknown=list(getattr(knowledge, "unknown", []) or [])[-10:],
+            uncertainties=list(getattr(knowledge, "uncertainties", []) or [])[-10:],
+            claims=[c.to_dict() for c in list(getattr(knowledge, "claims", []) or [])],
+            evidence_refs=sorted({
+                str(x)
+                for c in list(getattr(knowledge, "claims", []) or [])
+                for x in (getattr(c, "evidence_ids", []) or [])
+            })[:10],
+            action=str(action or ""),
+            capability=capability,
+            step_id=step_id,
+            knowledge=knowledge.to_dict(),
+            world=(getattr(mission, "context", {}) or {}).get("world") or [],
+            provenance=USER_INPUT,
+            timestamp=time.time(),
+        )
+        mission.state = MissionState.WAITING_CLARIFICATION
+        mission.context["clarification"] = clarification.to_dict()
+        self.store_knowledge(mission, knowledge)
+        return clarification
+
+    def pending_clarification(self, mission: Mission) -> Clarification | None:
+        """La pregunta pendiente, si la hay. `None` si no espera nada."""
+        return Clarification.from_dict(
+            (getattr(mission, "context", {}) or {}).get("clarification")
+        )
+
+    def can_clarify(self, mission: Mission) -> tuple[bool, str]:
+        """¿Admite aclaración ahora? Devuelve `(sí/no, motivo)` para poder auditar."""
+        if mission is None:
+            return False, "mission not found"
+        if mission.state in _CLARIFICATION_FORBIDDEN:
+            return False, f"mission is {mission.state.value}"
+        if mission.state is not MissionState.WAITING_CLARIFICATION:
+            return False, f"mission is {mission.state.value}, not waiting_clarification"
+        if self.pending_clarification(mission) is None:
+            return False, "no pending clarification"
+        return True, ""
+
+    def resume_with_clarification(
+        self,
+        mission: Mission,
+        answer: str,
+    ) -> KnowledgeState:
+        """Incorpora la respuesta del usuario y devuelve el KnowledgeState actualizado.
+
+        Garantías (P0 §13):
+        - **NO** reinicia la misión: la iteración, los replans, los pasos completados y
+          los contadores siguen donde estaban.
+        - **NO** borra evidencia, claims ni observaciones previas.
+        - La respuesta entra con provenance `USER_INPUT` y `trusted=False`: es
+          información del usuario, nunca un hecho verificado.
+        - **NO** toca envelope, policy, permissions ni capabilities: la respuesta es
+          contexto para decidir, no autoridad. Si el usuario pide "dame acceso root",
+          eso queda como contexto y Policy/Gates siguen mandando.
+        """
+        text = (answer or "").strip()
+        if not text:
+            raise ValueError("empty clarification response")
+
+        clarification = self.pending_clarification(mission)
+        knowledge = self.knowledge_for(mission)
+        if clarification is not None:
+            # Se parte del KnowledgeState congelado en la pregunta, no de uno nuevo: así
+            # la iteración y los contadores no se resetean al reanudar.
+            frozen = KnowledgeState.from_dict(clarification.knowledge, knowledge.objective)
+            frozen.iterations = max(knowledge.iterations, frozen.iterations)
+            frozen.replans = max(knowledge.replans, frozen.replans)
+            frozen.stalls = max(knowledge.stalls, frozen.stalls)
+            frozen.completed_steps = knowledge.completed_steps or frozen.completed_steps
+            frozen.failed_steps = knowledge.failed_steps or frozen.failed_steps
+            # Los claims NO se sustituyen: se unen. Si entre la pregunta y la respuesta se
+            # añadió evidencia, reconstruir desde el snapshot la perdería, y el requisito 13
+            # prohíbe explícitamente perder evidencia previa.
+            known_ids = {c.id for c in frozen.claims}
+            for claim in list(getattr(knowledge, "claims", []) or []):
+                if claim.id not in known_ids:
+                    frozen.claims.append(claim)
+            for key in ("known", "unknown", "uncertainties", "hypotheses",
+                        "assumptions", "memory", "world"):
+                merged = list(dict.fromkeys(
+                    list(getattr(frozen, key, []) or []) + list(getattr(knowledge, key, []) or [])
+                ))
+                setattr(frozen, key, merged)
+            frozen.confidence = max(knowledge.confidence, frozen.confidence)
+            knowledge = frozen
+
+        observation = Observation(source=USER_INPUT, content=text, trusted=False)
+        claim = self.evidence.from_observation(observation)
+        if claim is not None:
+            knowledge.add_claim(claim)
+        knowledge.add_known(f"el usuario respondió: {text[:200]}")
+        knowledge.clarification = text
+        knowledge.needs_replan = False
+        mission.context["clarification_answered"] = {
+            "question": clarification.question if clarification else "",
+            "answer": text,
+            "provenance": USER_INPUT,
+            "iteration": knowledge.iterations,
+            "timestamp": time.time(),
+        }
+        mission.context.pop("clarification", None)
+        self.store_knowledge(mission, knowledge)
+        return knowledge
+
+    def decisions(self, mission: Mission) -> list[DecisionRecord]:
+        """Decisiones registradas de la misión, en orden de iteración."""
+        context = getattr(mission, "context", {}) or {}
+        rows = context.get("decisions") or {}
+        records = [DecisionRecord.from_dict(row) for row in rows.values()]
+        return sorted(records, key=lambda r: (r.iteration, r.timestamp))
+
+    # ------------------------------------------------------------------ #
+    # P0 §5.6.9 — epílogo del ciclo: response → reflection → experience → learning
+    # ------------------------------------------------------------------ #
+
+    def compose_epilogue(
+        self,
+        mission: Mission,
+        knowledge: KnowledgeState,
+        *,
+        model_outcome: str = "none",
+    ):
+        """Compone el cierre de ciclo y lo deja persistido en `mission.context`.
+
+        Es puro: no toca la base de datos ni el Self Model. Publicar la experiencia como
+        observación y actualizar el Self Model son responsibilities de quien tiene las
+        piezas (el runtime), porque requieren repos y modelo propio.
+
+        El orden es el del plan y no admite atajos: primero la respuesta (que necesita el
+        veredicto), luego la reflexión (que necesita el resultado), después la experiencia
+        y sólo entonces la frontera de aprendizaje.
+        """
+        composer = ResponseComposer()
+        verification = self.goal_verification_of(mission)
+        records = self.decisions(mission)
+        reply = composer.compose(
+            mission,
+            knowledge,
+            verification,
+            records,
+            model_outcome=model_outcome,
+        )
+        reflection = build_reflection(
+            mission, knowledge, verification, model_outcome=model_outcome
+        )
+        experience = self._build_experience(mission, knowledge, reflection, verification, model_outcome)
+        verified = LearningBoundary().evaluate(experience, reflection)
+        context = getattr(mission, "context", None)
+        if context is not None:
+            context["response"] = reply.to_dict()
+            context["experience"] = experience.to_dict()
+            context["reflection"] = reflection.to_dict()
+            context["verified_learning"] = verified.to_dict()
+        return reply, reflection, experience, verified
+
+    def goal_verification_of(self, mission: Mission) -> GoalVerification | None:
+        """Rehidrata la verificación del objetivo desde `mission.context` (P0 §5.6.8)."""
+        raw = (getattr(mission, "context", {}) or {}).get("goal_verification")
+        if not raw:
+            return None
+        try:
+            return GoalVerification.from_dict(raw)
+        except Exception:  # noqa: BLE001 — una fila vieja no puede tumbar el epílogo
+            return None
+
+    def _build_experience(
+        self,
+        mission: Mission,
+        knowledge: KnowledgeState,
+        reflection,
+        verification,
+        model_outcome: str,
+    ) -> Experience:
+        results = [r for r in list(getattr(mission, "results", []) or []) if isinstance(r, dict)]
+        return Experience(
+            mission_id=str(getattr(mission, "id", "") or ""),
+            objective=str(getattr(getattr(mission, "goal", None), "objective", "") or ""),
+            context=[str(x) for x in list(getattr(knowledge, "memory", []) or [])[:5]],
+            actions=[str(r.get("step") or "") for r in results][-5:],
+            results=[
+                f"{r.get('step')}: {'ok' if r.get('success') else (r.get('error') or 'sin detalle')}"
+                for r in results
+            ][-5:],
+            evidence_refs=sorted(
+                {
+                    str(x)
+                    for claim in list(getattr(knowledge, "claims", []) or [])
+                    for x in (getattr(claim, "evidence_ids", []) or [])
+                }
+            )[:8],
+            verdict=str(getattr(knowledge, "last_verdict", "") or ""),
+            outcome=str(getattr(getattr(mission, "state", None), "value", "") or ""),
+            goal_verified=bool(getattr(verification, "verified", False)),
+            reflection=reflection.to_dict(),
+            model_outcome=model_outcome,
+            timestamp=time.time(),
+        )
 
     def verify_goal(self, mission: Mission, knowledge: KnowledgeState | None = None) -> GoalVerification | None:
         """Verifica el OBJETIVO contra los criterios persistidos en §5.1 (P0 §5.3).
@@ -1080,6 +1544,17 @@ class CognitiveRuntime:
         return outcome
 
 
+def _action_signature(step: PlanStep) -> str:
+    """Firma de la acción: `(capability, args canónicos)`.
+
+    Deliberadamente NO incluye el id del paso. `read-probe` y `read-probe-2` con los
+    mismos argumentos son la MISMA acción, y llamarlo replan era el bucle del MVP.
+    """
+    args = getattr(step, "args", None) or {}
+    canonical = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+    return f"{getattr(step, 'capability', None) or getattr(step, 'action', '?')}|{canonical}"
+
+
 def _goal_confirmed(goal) -> bool:
     from alexis.autonomy.goal_state import goal_is_confirmed
 
@@ -1146,3 +1621,141 @@ def _decision_schema() -> dict:
 
 
 __all__ = ["CognitiveRuntime", "StepOutcome", "Verdict", "diagnose_failure", "verdict_for_execution"]
+
+
+# --------------------------------------------------------------------------- #
+# P0 §5.6 / GAP 3 — Recovery cognitivo
+# --------------------------------------------------------------------------- #
+
+#: Contexto cognitivo que debe sobrevivir a un reinicio. Si falta alguno de estos campos,
+#: la misión NO se reanuda a ciegas: se deja en NEEDS_VERIFICATION. Reconstruir de memoria
+#: lo que se perdió sería exactamente el falso éxito que el plan prohíbe.
+COGNITIVE_RECOVERY_KEYS = (
+    "knowledge",
+    "decisions",
+)
+
+
+@dataclass
+class CognitiveResume:
+    """Resultado de intentar reanudar una misión cognitiva a mitad de camino."""
+
+    #: `True` sólo si se recuperó todo lo necesario para seguir con seguridad.
+    safe: bool
+    iteration: int = 0
+    replans: int = 0
+    stalls: int = 0
+    claims: int = 0
+    #: Campos que no se pudieron recuperar. Vacío ⇒ `safe`.
+    missing: list[str] = field(default_factory=list)
+    #: Motivo para dejar la misión en NEEDS_VERIFICATION en lugar de continuar.
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "safe": self.safe,
+            "iteration": self.iteration,
+            "replans": self.replans,
+            "stalls": self.stalls,
+            "claims": self.claims,
+            "missing": list(self.missing),
+            "reason": self.reason,
+        }
+
+
+# --------------------------------------------------------------------------- #
+# P0 requisito 13 — ASK USER reanudable
+# --------------------------------------------------------------------------- #
+
+#: Provenance de una respuesta del usuario. Distinta de MODEL_OUTPUT, TOOL_OUTPUT,
+#: MEMORY y SYSTEM_STATE: el usuario ES una fuente, pero no es evidencia verificada.
+USER_INPUT = "user_input"
+
+#: Estados en los que una misión NO admite aclaración. Una misión terminada no se
+#: reanuda "clarificando": eso sería reescribir el pasado (§5.5).
+_CLARIFICATION_FORBIDDEN = frozenset({
+    MissionState.COMPLETED,
+    MissionState.FAILED,
+    MissionState.BLOCKED,
+    MissionState.STOPPED,
+})
+
+
+@dataclass
+class Clarification:
+    """Pregunta pendiente + el contexto congelado para poder reanudar tras reiniciar.
+
+    Se guarda entero en `mission.context["clarification"]`, que la capa de storage ya
+    persiste. Sobrevive al reinicio porque viaja con la misión.
+    """
+
+    mission_id: str
+    question: str
+    reason: str = ""
+    category: str = "missing_information"
+    #: Estado cognitivo congelado en el momento de la pregunta.
+    iteration: int = 0
+    replans: int = 0
+    stalls: int = 0
+    known: list[str] = field(default_factory=list)
+    unknown: list[str] = field(default_factory=list)
+    uncertainties: list[str] = field(default_factory=list)
+    claims: list[dict] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    action: str = ""
+    capability: str | None = None
+    step_id: str | None = None
+    #: Copia del `KnowledgeState` tal como estaba: reanudar desde aquí, no desde cero.
+    knowledge: dict = field(default_factory=dict)
+    world: list = field(default_factory=list)
+    provenance: str = USER_INPUT
+    timestamp: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "mission_id": self.mission_id,
+            "question": self.question,
+            "reason": self.reason,
+            "category": self.category,
+            "iteration": self.iteration,
+            "replans": self.replans,
+            "stalls": self.stalls,
+            "known": list(self.known),
+            "unknown": list(self.unknown),
+            "uncertainties": list(self.uncertainties),
+            "claims": [dict(c) for c in self.claims],
+            "evidence_refs": list(self.evidence_refs),
+            "action": self.action,
+            "capability": self.capability,
+            "step_id": self.step_id,
+            "knowledge": dict(self.knowledge),
+            "world": list(self.world),
+            "provenance": self.provenance,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict | None) -> "Clarification | None":
+        if not raw:
+            return None
+        return cls(
+            mission_id=str(raw.get("mission_id") or ""),
+            question=str(raw.get("question") or ""),
+            reason=str(raw.get("reason") or ""),
+            category=str(raw.get("category") or "missing_information"),
+            iteration=int(raw.get("iteration") or 0),
+            replans=int(raw.get("replans") or 0),
+            stalls=int(raw.get("stalls") or 0),
+            known=[str(x) for x in (raw.get("known") or [])],
+            unknown=[str(x) for x in (raw.get("unknown") or [])],
+            uncertainties=[str(x) for x in (raw.get("uncertainties") or [])],
+            claims=[dict(c) for c in (raw.get("claims") or []) if isinstance(c, dict)],
+            evidence_refs=[str(x) for x in (raw.get("evidence_refs") or [])],
+            action=str(raw.get("action") or ""),
+            capability=raw.get("capability"),
+            step_id=raw.get("step_id"),
+            knowledge=dict(raw.get("knowledge") or {}),
+            world=list(raw.get("world") or []),
+            provenance=str(raw.get("provenance") or USER_INPUT),
+            timestamp=float(raw.get("timestamp") or 0.0),
+        )

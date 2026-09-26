@@ -14,6 +14,29 @@ class Planner:
     usando los mismos ids para no romper checkpoint/resume/approval.
     """
 
+    def _select_execute_capability(self, mission, objective: str, intent: str):
+        """Capability de ejecución elegida por selección dinámica, o `None` si no se puede.
+
+        Se consulta al catálogo REAL. Si no hay catálogo (tests legacy, entornos sin
+        capabilities registradas), devuelve `None` y quien llama usa el respaldo.
+        """
+        from alexis.capabilities.catalog import build_catalog
+        from alexis.cognition.selection import CapabilitySelector
+
+        try:
+            catalog = build_catalog()
+        except Exception:  # noqa: BLE001 — sin catálogo no hay selección que hacer
+            return None
+        if not catalog.enabled():
+            return None
+        selector = CapabilitySelector(catalog=catalog)
+        selection = selector.best(objective, envelope=getattr(mission, "envelope", None))
+        if not selection.selected:
+            # Nada seleccionable: `decide_unavailable` dice si preguntar, replanear o abortar.
+            selector.decide_unavailable(selection)
+            return None
+        return selection.selected[0]
+
     async def create_plan(self, mission) -> Plan:
         objective = mission.goal.objective
         if is_activation_objective(objective):
@@ -46,11 +69,18 @@ class Planner:
             ])
 
         delicate = intent == "destructive"
-        execute_capability = {
-            "write": "fs.write",
-            "destructive": "fs.remove",
-            "unsupported": "execution.sandbox",
-        }.get(intent, "fs.read")
+        # P0 §5.6 / requisito 6: la capability ya NO se elige con un `dict.get` sobre la
+        # intención. La decide `CapabilitySelector` contra el catálogo real, el envelope y
+        # la policy. El `dict` queda sólo como respaldo cuando no hay catálogo disponible.
+        execute_capability = self._select_execute_capability(mission, objective, intent)
+        if execute_capability is None:
+            # Nada seleccionable: no se inventa una capability. Se deja el paso sin
+            # capability para que Policy/Gate decidan, o se bloquea más abajo.
+            execute_capability = {
+                "write": "fs.write",
+                "destructive": "fs.remove",
+                "unsupported": "execution.sandbox",
+            }.get(intent, "fs.read")
         steps = [
             PlanStep("understand", f"Understand objective: {objective}", "analyze", RiskLevel.LOW, "reasoner",
                      capability="cognition.understand"),
