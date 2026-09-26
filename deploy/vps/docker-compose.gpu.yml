@@ -1,0 +1,17 @@
+# ALEXIS - override opcional de GPU para Ollama.
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Requiere nvidia-container-toolkit instalado en el VPS (setup.sh lo detecta).
+# Si tu VPS no tiene GPU NVIDIA, NO uses este archivo (Ollama corre por CPU).
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
