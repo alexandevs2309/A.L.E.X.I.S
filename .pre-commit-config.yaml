@@ -6,8 +6,13 @@ repos:
         name: check-secrets (R1: sin credenciales en texto plano)
         entry: python3 scripts/check_secrets.py
         language: system
-        pass_filenames: false
-        always_run: true
+        # Solo los ficheros que se van a commitear. Con `always_run: true` el check
+        # escaneaba el repo entero y fallaba siempre en la máquina que tiene credenciales
+        # reales en `secrets/` (gitignored, nunca commiteables): el hook se desactivaba
+        # solo y la regla R1 quedaba decorativa. Así no puedes commitear un secreto nuevo,
+        # pero puedes seguir teniendo los tuyos en local. Para auditar el árbol entero:
+        #   python3 scripts/check_secrets.py
+        pass_filenames: true
       # R1: los secretos de verdad nunca se versionan (sí los *.example).
       - id: forbid-secrets-dir
         name: forbid-secrets-dir (R1: secrets/ sólo contiene *.example)

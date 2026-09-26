@@ -99,7 +99,7 @@ Solo tras B y C completos: v0.5 percepción/voz (STT/TTS/visión/pantallas), v0.
 
 ## 6. Decisión de fin de fase
 
-Una fase se cierra cuando el hito produce una **demo vertical**: una misión real que empieza, ejecuta con herramentas reales bajo política y evidencia, falla controlado cuando toca, se audita y termina en COMPLETED. Si "funciona" sin evidencia o sin política, la fase no está cerrada.
+Una fase se cierra cuando el hito produce una **demo vertical**: una misión real que empieza, ejecuta con herramentas reales bajo política y evidencia, falla controlado cuando toca, se audita y termina en COMPLETED, y **COMPLETED sólo es posible con el objetivo verificado** por el `GoalVerifier` (`alexis/cognition/goal_verification.py`): la invariante está en `Mission.__setattr__` y `settle()` es la única autoridad. Si "funciona" sin evidencia, sin política o sin verificación del objetivo, la fase no está cerrada.
 
 ## 7. Variables de entorno y secretos
 
@@ -153,8 +153,34 @@ Detecta prefijos de proveedor (`sk_…`, `sk-ant-…`, `ghp_…`, `github_pat_�
 posición (`change-me`, `REPLACE_ME`…). **Nunca imprime el valor detectado**: sólo ruta,
 línea y patrón.
 
-También está instalado como hook `pre-commit` (`.pre-commit-config.yaml`). `make check`
-ejecuta el gate completo: `secrets-check` + `env-check` + `test`.
+También está disponible como hook `pre-commit` (`.pre-commit-config.yaml`).
+
+#### El check de secretos y los secretos reales
+
+`secrets/*.env` está en `.gitignore`, pero el detector **sí escanea ese directorio**: una
+credencial en claro en disco es un riesgo exista o no el repo, y así lo fija
+`tests/test_security_secrets.py::test_real_env_file_is_scanned`. De ahí la tentación
+de relajar el detector y el problema que causa:
+
+| | Qué mira | Cuándo se ejecuta | Resultado en una máquina con secretos reales |
+|---|---|---|---|
+| `make secrets-check` / `python3 scripts/check_secrets.py` | el árbol entero | a mano, en CI | **falla**, y está bien que falle: informa de lo que hay en disco |
+| hook `pre-commit` | solo los ficheros que se commitean | en cada commit | pasa: tus secretos no se commitean, así que no se miran |
+
+Por eso el hook usa `pass_filenames: true`. Con `always_run: true` escaneaba el repo entero,
+fallaba siempre en la máquina del desarrollador y **nadie lo instalaba**: la regla R1 quedaba
+declarada en un YAML y sin ejecutar. Instalación:
+
+```bash
+pip install pre-commit && pre-commit install
+```
+
+Nunca relajes el detector para silenciar un falso positivo. El sitio correcto es el fixture:
+un DSN de test lleva `change-me`, que ya está en la lista de marcadores, no una palabra
+cualquiera. Y ojo: relajar la regla de contraseñas de DSN hace que `hunter2`, `admin` o
+`mypassword` pasen sin reportarse.
+
+`make check` ejecuta el gate completo: `secrets-check` + `env-check` + `test`.
 
 ### 7.4 Token de la API (R4)
 - `ALEXIS_API_TOKEN` vacío ⇒ en `development` la API arranca **sin auth** y deja un
