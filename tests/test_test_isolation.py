@@ -37,41 +37,44 @@ requires_db = pytest.mark.skipif(
 
 
 def test_derivation_keeps_credentials_host_and_port():
-    dev = "postgresql://alexis:clave@127.0.0.1:5433/alexis"
+    dev = "postgresql://alexis:change-me@127.0.0.1:5433/alexis"
     derived = with_database(dev, DEFAULT_TEST_DB_NAME)
 
-    assert derived == "postgresql://alexis:clave@127.0.0.1:5433/alexis_test"
+    assert derived == "postgresql://alexis:change-me@127.0.0.1:5433/alexis_test"
     assert database_name(derived) == "alexis_test"
-    assert "clave" in derived
+    # El DSN derivado conserva usuario y contraseña, no solo host y puerto. La contraseña
+    # del fixture es `change-me` a propósito: el detector de secretos la reconoce como
+    # placeholder, así que un DSN de test no puede enmascarar una credencial real.
+    assert "alexis:change-me@" in derived
 
 
 def test_explicit_test_dsn_wins():
-    explicit = "postgresql://u:p@host:5433/otro_test"
-    assert resolve_test_dsn("postgresql://a:b@h:5433/alexis", explicit=explicit) == explicit
+    explicit = "postgresql://u:change-me@host:5433/otro_test"
+    assert resolve_test_dsn("postgresql://a:change-me@h:5433/alexis", explicit=explicit) == explicit
 
 
 def test_test_database_is_not_the_development_database():
-    dev = "postgresql://alexis:clave@127.0.0.1:5433/alexis"
+    dev = "postgresql://alexis:change-me@127.0.0.1:5433/alexis"
     assert database_name(resolve_test_dsn(dev)) != database_name(dev)
 
 
 def test_guard_blocks_the_development_database():
-    dev = "postgresql://alexis:clave@127.0.0.1:5433/alexis"
+    dev = "postgresql://alexis:change-me@127.0.0.1:5433/alexis"
     with pytest.raises(DatabaseIsolationError) as exc:
         assert_isolated(dev, dev)
     assert "desarrollo" in str(exc.value)
 
 
 def test_guard_allows_a_different_database():
-    dev = "postgresql://alexis:clave@127.0.0.1:5433/alexis"
+    dev = "postgresql://alexis:change-me@127.0.0.1:5433/alexis"
     assert_isolated(with_database(dev, DEFAULT_TEST_DB_NAME), dev)
 
 
 def test_unsafe_database_name_is_rejected():
     with pytest.raises(DatabaseIsolationError):
-        with_database("postgresql://u:p@h:5433/alexis", "alexis; DROP DATABASE postgres")
+        with_database("postgresql://u:change-me@h:5433/alexis", "alexis; DROP DATABASE postgres")
     with pytest.raises(DatabaseIsolationError):
-        with_database("postgresql://u:p@h:5433/alexis", "Mayusculas")
+        with_database("postgresql://u:change-me@h:5433/alexis", "Mayusculas")
 
 
 # ----------------------------------------------------------------------

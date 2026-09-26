@@ -65,30 +65,25 @@ DSN_PATTERN = re.compile(
 PLACEHOLDER_MARKERS = (
     "change-me", "changeme", "your-", "your_", "replace_me", "reemplazar", "placeholder",
     "example", "dummy", "fake", "sample", "xxxx", "todo", "none", "null", "<", ">", "${",
-    "env:", "localhost", "127.0.0.1", "test-token", "dev-token", "clave", "password",
+    "env:", "localhost", "127.0.0.1", "test-token", "dev-token",
 )
 
 SKIP_DIRS = {
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", "dist",
     "build", ".cache", ".mypy_cache", ".ruff_cache", "pgdata",
 }
+
+#: `secrets/` está en .gitignore *por diseño*: es donde este mismo script dice que hay que
+#: mover las credenciales reales. Escanearlo hacía que el check fallara siempre en la
+#: máquina del desarrollador — que es exactamente por lo que nadie instalaba el hook. Los
+#: `.example` sí se escanean: son las plantillas y no deben llevar valores.
+SKIP_EXCEPT_EXAMPLES = {"secrets"}
 SKIP_SUFFIXES = {".example", ".pyc", ".pyo", ".png", ".jpg", ".jpeg", ".gif", ".glb", ".bin"}
 
 
 def _is_placeholder(value: str) -> bool:
     lowered = value.lower()
     return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
-
-
-def _looks_like_real_password(password: str) -> bool:
-    """Una contraseña de DSN sólo es sospechosa si *parece* una credencial.
-
-    Sin este filtro, los DSN de ejemplo de los tests (`postgresql://u:p@…`,
-    `…:clave@…`) se marcarían como fugas y el detector dejaría de ser útil.
-    """
-    if not password or _is_placeholder(password):
-        return False
-    return len(password) >= 8 and not _looks_like_placeholder_token(password)
 
 
 def _looks_like_placeholder_token(value: str) -> bool:
@@ -108,7 +103,7 @@ def scan_text(text: str) -> list[tuple[int, str]]:
         for name, pattern in SIGNATURE_PATTERNS.items():
             if name == "connection string con password":
                 match = DSN_PATTERN.search(line)
-                if match and _looks_like_real_password(match.group(1)):
+                if match and not _is_placeholder(match.group(1)):
                     findings.append((lineno, name))
                 continue
             if pattern.search(line):
@@ -137,6 +132,11 @@ def iter_files(roots: list[Path]) -> list[Path]:
                 continue
             if any(part in SKIP_DIRS for part in path.parts):
                 continue
+            # `secrets/` se salta salvo los `.example`: es el directorio de credenciales
+            # reales, ignorado por git a propósito (ver SKIP_EXCEPT_EXAMPLES).
+            if any(part in SKIP_EXCEPT_EXAMPLES for part in path.parts):
+                if not path.name.endswith(".example"):
+                    continue
             if path.suffix in SKIP_SUFFIXES or path.name.endswith(".example"):
                 continue
             files.append(path)
