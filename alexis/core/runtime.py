@@ -35,6 +35,7 @@ class AlexisRuntime:
         mission_repo=None,
         event_repo=None,
         audit_repo=None,
+        world_repo=None,
         verification_repo=None,
         task_runner=None,
         observation_repo=None,
@@ -56,6 +57,7 @@ class AlexisRuntime:
         self.mission_repo = mission_repo
         self.event_repo = event_repo
         self.audit_repo = audit_repo
+        self.world_repo = world_repo
         self.verification_repo = verification_repo
         self.task_runner = task_runner
         self.observation_repo = observation_repo
@@ -161,6 +163,39 @@ class AlexisRuntime:
             previo = context.get("replan_rejections") or []
             context["replan_rejections"] = (list(previo) + list(pendientes))[-20:]
         return len(pendientes)
+
+    async def _persist_world(self, mission: Mission) -> bool:
+        """Vuelca el WorldModel al store persistente. Devuelve si SE PERSISTIÓ.
+
+        P0 §4.4. El store es la fuente de autoridad del mundo, así que se escribe ANTES
+        que la proyección legacy: si el store falla, la proyección no puede fingir que el
+        conocimiento está a salvo. Y si la proyección falla después, el store ya tiene la
+        verdad.
+
+        Vive aquí, en código async del runtime, y no en `WorldModel`: el Core es síncrono
+        y no sabe de base de datos. `WorldModel.export()` es la costura.
+
+        El valor de retorno es deliberado: quien llama puede distinguir "persistido" de
+        "no persistido". Un fallo aquí NO se marca como éxito en ningún sitio.
+        """
+        world = getattr(self.cognitive, "world", None) if self.cognitive is not None else None
+        if self.world_repo is None or world is None:
+            return False
+        scope = getattr(world, "scope", None)
+        if scope is None:
+            return False
+        try:
+            salida = world.export(scope=scope.id)
+            await self.world_repo.save_snapshot(
+                salida["entities"], salida["edges"], scope=scope.id
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — el store no puede tumbar el bucle cognitivo
+            log.warning(
+                "no se pudo persistir el WorldModel de la misión %s (sigue en memoria, "
+                "NO consta como persistido): %s", mission.id, exc,
+            )
+            return False
 
     async def _close(self, mission: Mission, state: MissionState):
         # AUDIT es SECUNDARIO: el estado de la misión es lo PRINCIPAL. `audit_log.mission_id`
@@ -662,6 +697,11 @@ class AlexisRuntime:
             pending = cognitive.pending_steps(mission, plan, knowledge)
             outcome = await cognitive.step(mission, knowledge, pending_steps=pending, plan=plan)
             knowledge = outcome.knowledge
+            # P0 §4.4 — orden de autoridad. `cognitive.step()` ya observó el mundo en
+            # memoria. Aquí se persiste el store, y SOLO después `store_knowledge()`
+            # escribe la proyección legacy en `mission.context`. Si el store falla, la
+            # proyección no se escribe como si el conocimiento estuviera a salvo.
+            await self._persist_world(mission)
             cognitive.store_knowledge(mission, knowledge)
             # P0 §12.8: el filtro pudo descartar repeticiones en este paso. Se publican y
             # se auditan AQUÍ, con la infraestructura que ya existe (EventBus + audit_log),

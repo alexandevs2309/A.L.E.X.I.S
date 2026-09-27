@@ -63,6 +63,7 @@ def init_storage():
             ObservationRepository,
             TaskRepository,
             VerificationRepository,
+            WorldRepository,
         )
     except ImportError as exc:
         print(f"[warn] persistencia no disponible (faltan dependencias deps): {exc}")
@@ -84,7 +85,8 @@ def init_storage():
         STORAGE["execution"] = ExecutionRepository(db)
         STORAGE["observation"] = ObservationRepository(db)
         STORAGE["checkpoint"] = CheckpointRepository(db)
-        print("Persistencia PostgreSQL activa (missions, tasks, executions, checkpoints, verifications, observations, audit).")
+        STORAGE["world"] = WorldRepository(db)
+        print("Persistencia PostgreSQL activa (missions, tasks, executions, checkpoints, verifications, observations, audit, world).")
     except Exception as exc:
         print(f"[warn] persistencia no disponible: {exc}")
 
@@ -207,6 +209,7 @@ RUNTIME = AlexisRuntime(
     mission_repo=STORAGE.get("mission"),
     event_repo=STORAGE.get("event"),
     audit_repo=STORAGE.get("audit"),
+    world_repo=STORAGE.get("world"),
     verification_repo=STORAGE.get("verification"),
     task_runner=None,
     observation_repo=STORAGE.get("observation"),
@@ -231,6 +234,56 @@ STATE = {"mission_id": None, "verification": None}
 # que el servidor ya tiene resuelto. Sin esto el mundo sería global del proceso y
 # `file:notas.txt` significaría lo mismo en cualquier proyecto.
 WORLD = WorldModel(scope=Scope.from_workspace(WORKSPACE))
+
+# P0 §4.4 — HIDRATACIÓN DE ARRANQUE, UNA SOLA VEZ.
+# El World Model es la fuente de autoridad del mundo, y su almacén es `world_entities`.
+# Por eso el conocimiento de este proyecto tiene que entrar al arrancar, y no al empezar
+# cada misión: el store no cambia durante la vida del proceso, así que hidratar por misión
+# sería releer lo mismo una y otra vez. También es lo que hace que, después de un
+# reinicio, el mundo siga ahí —antes sólo sobrevivía dentro del proceso, porque `WORLD` es
+# un singleton en memoria.
+#
+# Se hidrata con `hydrate()`, que usa `put()`: rehidratar NO es observar, así que no suma
+# observaciones ni mueve `last_seen` de nada que nadie ha vuelto a mirar.
+#
+# Va ANTES de sembrar los hechos declarados del entorno (PostgreSQL, workspace, tools) para
+# que lo declarado ahora, que es cierto para este proceso, se imponga sobre lo que hubiera
+# en el store de una ejecución anterior.
+_WORLD_REPO = STORAGE.get("world")
+_WORLD_HYDRATED = False
+
+
+def hydrate_world_once() -> int:
+    """Carga el mundo persistente UNA vez. Devuelve cuántas entidades entraron.
+
+    Si la base no está, no se muere el arranque: se avisa y se sigue con el mundo en
+    memoria. Importa NO interpretar "no pude hidratar" como "el mundo está vacío": son
+    cosas distintas, y confundirlas haría que ALEXIS afirmara que no conoce el proyecto
+    cuando lo que happened es que no pudo leerlo.
+    """
+    global _WORLD_HYDRATED
+    if _WORLD_REPO is None or _WORLD_HYDRATED:
+        return 0
+
+    async def _hydrate():
+        scope = WORLD.scope.id
+        entidades = await _WORLD_REPO.list_entities(scope=scope)
+        aristas = await _WORLD_REPO.list_edges(scope=scope)
+        return WORLD.hydrate(entidades, aristas, scope=scope)
+
+    try:
+        n = asyncio.run_coroutine_threadsafe(_hydrate(), LOOP).result(timeout=10)
+        _WORLD_HYDRATED = True
+        print(f"World Model hidratado desde PostgreSQL: {n} entidades, ámbito {WORLD.scope.id}.")
+        return n
+    except Exception as exc:  # noqa: BLE001 — sin base, ALEXIS arranca igual
+        print(f"[warn] World Model NO hidratado (la base no respondió): {exc}. "
+              "El mundo sigue en memoria y VOLVERÁ A LEERSE al próximo arranque; "
+              "no se interpreta como que el proyecto no tenga nada.")
+        return 0
+
+
+hydrate_world_once()
 WORLD.upsert(WorldEntity("postgres", "database", "PostgreSQL pgvector", {"host": "127.0.0.1:5433", "db": "alexis"}))
 WORLD.upsert(WorldEntity("workspace", "sandbox", "Workspace autorizado read/write", {"path": str(WORKSPACE), "tools": [t.name for t in TOOLS.list()]}))
 WORLD.upsert(
