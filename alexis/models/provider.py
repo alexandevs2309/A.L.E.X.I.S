@@ -139,9 +139,21 @@ class ModelProvider(ABC):
     privacy_max: str = "normal"  # normal < sensitive < secret
     available: bool = True
     degraded: bool = False
+    #: Tope de espera PROPIO de este provider, en ms. `None` = usar el deadline de la
+    #: petición. Se combina con el global tomando el MÍNIMO, nunca el máximo: un cloud
+    #: lento no puede alargar el presupuesto del Core, y un cloud rápido no puede
+    #:ignorarlo. Existe porque un mismo `deadline_ms` para un cloud de 1s y para un
+    #: Ollama de 40s hace que uno de los dos sea siempre inútil.
+    deadline_ms: int | None = None
 
     @abstractmethod
     async def complete(self, request: ModelRequest) -> ModelResponse: ...
+
+    def effective_deadline_ms(self, request: ModelRequest) -> int:
+        """Deadline aplicable a este provider para esta petición (el más restrictivo)."""
+        if self.deadline_ms is None:
+            return max(request.deadline_ms, 1)
+        return max(min(self.deadline_ms, request.deadline_ms), 1)
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -153,4 +165,5 @@ class ModelProvider(ABC):
             "cost_per_1k_tokens": self.cost_per_1k_tokens,
             "latency_p50_ms": self.latency_p50_ms,
             "privacy_max": self.privacy_max,
+            "deadline_ms": self.deadline_ms,
         }

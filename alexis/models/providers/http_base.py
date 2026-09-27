@@ -20,6 +20,35 @@ from alexis.models.provider import (
 )
 
 
+#: Motivos legibles por código HTTP. El 429 se separa del resto porque NO es un fallo del
+#: provider: es cuota agotada. El router lo trata igual (siguiente provider), pero quien
+#: lea la auditoría tiene que poder distinguir "me ratearon" de "el endpoint está roto",
+#: porque las dos cosas piden acciones opuestas: esperar, o arreglar la config.
+_HTTP_REASONS = {
+    400: "petición rechazada (400)",
+    401: "credenciales ausentes o inválidas (401)",
+    403: "sin permiso para este modelo o cuenta (403)",
+    404: "endpoint o modelo inexistente (404)",
+    408: "el proveedor tardó demasiado (408)",
+    429: "cuota o rate limit alcanzado (429) — reintentar más tarde o usar otro provider",
+    499: "el cliente canceló (499)",
+    500: "error del proveedor (500)",
+    502: "puerta de enlace del proveedor caída (502)",
+    503: "servicio no disponible (503)",
+    504: "el proveedor no respondió a tiempo (504)",
+}
+
+
+def _http_error_reason(exc: urllib.error.HTTPError) -> str:
+    """Describe un HTTPError sin filtrar el cuerpo de la respuesta.
+
+    El cuerpo de un 401 puede incluir parte de la credencial en algunos gateways, así que
+    aquí NO se registra: sólo el código y su motivo. Los secretos no van a la auditoría.
+    """
+    reason = _HTTP_REASONS.get(exc.code)
+    return reason if reason else f"HTTP {exc.code}"
+
+
 class HTTPChatProvider(ModelProvider):
     """Provider HTTP de chat con dialectos `ollama` y `openai`."""
 
@@ -166,7 +195,7 @@ class HTTPChatProvider(ModelProvider):
                 provider=self.id,
                 model=self.model,
                 outcome=ModelOutcome.UNAVAILABLE,
-                error=f"HTTP {exc.code}",
+                error=_http_error_reason(exc),
                 latency_ms=int((time.monotonic() - started) * 1000),
             )
         except Exception as exc:  # noqa: BLE001 — fallo de red no tumba el Core

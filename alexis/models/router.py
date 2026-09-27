@@ -124,8 +124,9 @@ class ModelRouter:
         ]
         affordable = [p for p in eligible if self._within_budget(p, request)]
         pool = affordable or [p for p in eligible if not p.cost_per_1k_tokens]
-        in_deadline = [p for p in pool if p.latency_p50_ms <= request.deadline_ms]
-        late = [p for p in pool if p.latency_p50_ms > request.deadline_ms]
+        # "Caben" = su deadline efectivo (propio o global) cubre su latencia típica.
+        in_deadline = [p for p in pool if p.latency_p50_ms <= p.effective_deadline_ms(request)]
+        late = [p for p in pool if p.latency_p50_ms > p.effective_deadline_ms(request)]
         key = lambda p: (p.priority, p.cost_per_1k_tokens, p.latency_p50_ms, p.id)  # noqa: E731
         return sorted(in_deadline, key=key) + sorted(late, key=key)
 
@@ -151,7 +152,8 @@ class ModelRouter:
             chain.append(provider.id)
             try:
                 response = await asyncio.wait_for(
-                    provider.complete(request), timeout=max(request.deadline_ms, 1) / 1000.0
+                    provider.complete(request),
+                    timeout=provider.effective_deadline_ms(request) / 1000.0,
                 )
                 if response is None:
                     raise ModelProviderError(f"provider '{provider.id}' devolvió None")
@@ -182,6 +184,10 @@ class ModelRouter:
                 response.fallback_from = chain[0] if chain else None
                 response.fallback_error = last_error
                 response.chain = list(chain) + [degraded.id]
+                # La contingencia es instantánea, pero la CADENA no lo fue: reportar 0 ms
+                # escondería que se esperó el deadline de cada provider anterior. La
+                # latencia que se audita es la de la decisión completa.
+                response.latency_ms = int((time.monotonic() - started) * 1000)
                 self._account(response)
                 self._audit(request, response)
                 return response
@@ -242,6 +248,13 @@ def build_router_from_config(config, event_bus=None) -> ModelRouter:
     )
     for provider in config.build_providers():
         router.register(provider)
+    # La contingencia también se registra aquí. Antes sólo lo hacía `apps/demo/server.py`,
+    # a mano: quien usara este constructor se quedaba sin fallback determinista y acababa
+    # en UNAVAILABLE aunque `allow_degraded` estuviera activo. Dos caminos de construcción
+    # tienen que dar el mismo router.
+    degraded = config.build_degraded()
+    if degraded is not None:
+        router.register(degraded)
     return router
 
 

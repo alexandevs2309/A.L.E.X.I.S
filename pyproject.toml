@@ -32,3 +32,6 @@ include = ["alexis*", "apps*", "apps.api*", "apps.demo*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "external: requiere red y credenciales reales. No lo ejecuta la suite por defecto: se marca y se salta solo si no hay credencial.",
+]
