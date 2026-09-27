@@ -31,6 +31,12 @@ class IntentKind(str, Enum):
     #: P0 requisito 13: la respuesta del usuario a una pregunta pendiente. NO crea
     #: misión nueva: se asocia a la que ya está en WAITING_CLARIFICATION.
     CLARIFICATION = "clarification"
+    #: P0 requisito 1: CONTROL CONVERSACIONAL sobre el propio ALEXIS — "para", "cancela
+    #: eso", "repite", "status". NO es "cualquier frase imperativa": los imperativos
+    #: operativos ("abre la terminal", "borra el archivo") siguen siendo `TASK`, porque
+    #: son trabajo que necesita planificación, policy y verificación. Un comando de
+    #: control no tiene objetivo que verificar, así que no abre misión (P3.3).
+    COMMAND = "command"
     UNKNOWN = "unknown"
 
 
@@ -45,6 +51,8 @@ DIRECT_KINDS: frozenset[IntentKind] = frozenset(
         IntentKind.SELF_QUERY,
         IntentKind.CAPABILITY_QUERY,
         IntentKind.META_QUERY,
+        IntentKind.QUESTION,
+        IntentKind.COMMAND,
     }
 )
 

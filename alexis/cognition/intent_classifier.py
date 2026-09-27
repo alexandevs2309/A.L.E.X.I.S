@@ -37,15 +37,31 @@ _VALID_KINDS = {k.value for k in IntentKind}
 
 _SYSTEM_PROMPT = (
     "Eres el clasificador de intencion de ALEXIS. Responde solo JSON con el esquema dado. "
-    "kind=greeting: saludos. kind=capability_query: que puede hacer. kind=self_query: que hizo o "
-    "hace. kind=meta_query: como funciona o quien es. kind=task: pide una accion o resultado, y "
-    "entonces objective es obligatorio. requested_capabilities: solo ids de la lista dada, es una "
-    "sugerencia y NO un permiso; nunca inventes ids. Si no hay lista, deja el array vacio."
+    "Hay nueve kinds y cada uno tiene su significado; no los confundas. "
+    "kind=greeting: saludos. "
+    "kind=small_talk: cortesia que no pide nada (gracias, vale, perfecto). "
+    "kind=capability_query: que puede hacer. "
+    "kind=self_query: que hizo o hace. "
+    "kind=meta_query: como funciona o quien es. "
+    "kind=question: pregunta general sin objetivo concreto. "
+    "kind=clarification: la respuesta a una pregunta que ALEXIS ya hizo. "
+    "kind=command: control conversacional sobre ALEXIS (para, detente, cancela eso, "
+    "repite, status, reanuda). NO es un imperativo cualquiera: no pide trabajo sobre el "
+    "mundo, solo controla su comportamiento. "
+    "kind=task: pide una accion o un resultado sobre el mundo, y entonces objective es "
+    "obligatorio. 'cancela eso' es command; 'cancela el informe del trimestre' es task. "
+    "kind=unknown: el turno no se puede clasificar; entonces needs_clarification es true. "
+    "Solo task crea mission. "
+    "requested_capabilities: solo ids de la lista dada, es una sugerencia y NO un "
+    "permiso; nunca inventes ids. Si no hay lista, deja el array vacio."
 )
 
 _FEWSHOT = [
     ("Hola ALEXIS.", '{"kind":"greeting","objective":null,"target":null,"success_criteria":[],"requested_capabilities":[],"side_effects_intent":"unknown","ambiguity":null,"needs_clarification":false,"confidence":0.95}'),
     ("¿Qué puedes hacer?", '{"kind":"capability_query","objective":null,"target":null,"success_criteria":[],"requested_capabilities":[],"side_effects_intent":"unknown","ambiguity":null,"needs_clarification":false,"confidence":0.9}'),
+    # La distinción que más se confunde: control conversacional frente a trabajo real.
+    ("cancela eso", '{"kind":"command","objective":null,"target":null,"success_criteria":[],"requested_capabilities":[],"side_effects_intent":"unknown","ambiguity":null,"needs_clarification":false,"confidence":0.9}'),
+    ("borra el informe del trimestre", '{"kind":"task","objective":"Borrar el informe del trimestre","target":null,"success_criteria":["El informe ya no existe"],"requested_capabilities":["fs.remove"],"side_effects_intent":"delete","ambiguity":null,"needs_clarification":false,"confidence":0.85}'),
     ("Revisa este proyecto y dime qué problemas importantes encuentras.", '{"kind":"task","objective":"Revisar el proyecto e informar de los problemas importantes","target":null,"success_criteria":["Identificar problemas importantes con evidencia"],"requested_capabilities":["fs.read","fs.stat"],"side_effects_intent":"read","ambiguity":null,"needs_clarification":false,"confidence":0.85}'),
 ]
 
@@ -226,6 +242,19 @@ class RuleBasedIntentClassifier:
                 model_meta=meta,
             )
 
+        # P0 requisito 1: `command` = control conversacional sobre ALEXIS. Va DESPUÉS de
+        # los verbos de tarea a propósito: "abre la terminal" contiene "abre" y debe
+        # seguir siendo `TASK`, porque es trabajo que necesita plan, policy y
+        # verificación. Aquí ya no queda ningún verbo operativo, así que lo que queda es
+        # una orden de control, que no abre misión (P3.3) y se responde en el acto.
+        if _looks_like_command(text):
+            return Intent(
+                kind=IntentKind.COMMAND,
+                utterance=text,
+                confidence=0.85,
+                model_meta=meta,
+            )
+
         return Intent(
             kind=IntentKind.UNKNOWN,
             utterance=text,
@@ -234,6 +263,31 @@ class RuleBasedIntentClassifier:
             confidence=0.2,
             model_meta=meta,
         )
+
+
+#: P0 requisito 1 — `command` es CONTROL CONVERSACIONAL, no "cualquier imperativo".
+#:
+#: El vocabulario es cerrado y exige coincidencia EXACTA de la frase entera. No se busca
+#: por substring porque el riesgo real aquí es el contrario al habitual: "para" y "estado"
+#: son palabras muy frecuentes del español, y una búsqueda laxa las habría convertido en
+#: órdenes. Con la frase completa, "para mañana" o "estado del proyecto" NO son comandos.
+_COMMAND_VERBS = (
+    "para", "para ya", "detente", "detén", "detener", "cancela", "cancelar", "cancélalo",
+    "repite", "repetir", "repites", "repítelo", "olvida", "olvidar", "olvídalo",
+    "reanuda", "reanudar", "reanúdalo", "status", "estado", "estado actual",
+)
+#: Objeto admisible del comando. Deliberadamente corto: "cancela eso" es control sobre la
+#: operación en curso; "cancela el proyecto entero" es trabajo sobre el mundo y debe caer
+#: en las reglas de tarea, no en un comando de conversación.
+_COMMAND_TAIL = r"(?:\s+(?:eso|esto|la\s+operaci[oó]n|la\s+tarea|el\s+plan|ahora))?"
+_COMMAND_RE = re.compile(
+    rf"^(?:{'|'.join(re.escape(v) for v in _COMMAND_VERBS)}){_COMMAND_TAIL}[.!?]*$"
+)
+
+
+def _looks_like_command(text: str) -> bool:
+    """¿El turno es una orden de control sobre el propio ALEXIS?"""
+    return bool(_COMMAND_RE.match(_normalize(text or "").strip("?!. ")))
 
 
 #: Aperturas interrogativas en español e inglés. Suficiente para distinguir una pregunta
@@ -418,6 +472,25 @@ class IntentClassifier:
                     **(meta or {}),
                     "source": "deterministic",
                     "fallback_reason": "el modelo desclasificó un verbo de tarea claro; reglas deterministas pesan más",
+                    "model_outcome": response.outcome.value,
+                    "cognition_outcome": ModelOutcome.DEGRADED.value,
+                }
+                self.last_proposal = None
+                return rule
+
+        # Simétrico, y por el mismo motivo que el guard anterior pero en la otra
+        # dirección: un comando de control NUNCA debe abrir misión. El vocabulario de
+        # control es cerrado y exacto —no depende de razonamiento del modelo—, así que si
+        # las reglas reconocen un comando y el modelo dijo `task`, manda la regla. Sin
+        # esto, un "para" clasificado como TASK por un modelo pequeño abriría una misión
+        # con el único propósito de dejar de hacer nada.
+        if intent.kind is IntentKind.TASK:
+            rule = self.rule_based.classify(text, brief)
+            if rule.kind is IntentKind.COMMAND:
+                rule.model_meta = {
+                    **(meta or {}),
+                    "source": "deterministic",
+                    "fallback_reason": "el modelo quiso abrir una misión para un comando de control; las reglas lo corrigen",
                     "model_outcome": response.outcome.value,
                     "cognition_outcome": ModelOutcome.DEGRADED.value,
                 }

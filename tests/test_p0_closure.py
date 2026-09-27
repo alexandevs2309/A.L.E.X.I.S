@@ -738,10 +738,18 @@ class TestFaseDIntentEngine:
         assert consulta.kind is IntentKind.CAPABILITY_QUERY and not consulta.is_task
         assert tarea.kind is IntentKind.TASK and tarea.is_task
 
-    def test_d9_clarification_ya_existe_y_command_sigue_ausente(self):
-        """`clarification` llegó con §13. `command` sigue sin clase propia: documentado."""
-        from alexis.cognition.contracts import IntentKind
+    def test_d9_clarification_ya_existe_y_command_ya_no_esta_ausente(self):
+        """`clarification` llegó con §13; `command` se cerró en el cierre de #1.
+
+        Este test nació para documentar la ausencia de `command`. Ya no la documenta: lo
+        verifica. La parte de `clarification` se conserva intacta.
+        """
+        from alexis.cognition.contracts import MISSION_KINDS, IntentKind
 
         values = {k.value for k in IntentKind}
         assert "clarification" in values, "§13 añadió el kind"
-        assert "command" not in values, "command sigue sin clase propia (hoy cae en TASK)"
+        assert "command" in values, "el cierre de #1 añadió el kind"
+        # Y con las dos clases propias, la regla P3.3 sigue siendo la de una sola kind.
+        assert MISSION_KINDS == frozenset({IntentKind.TASK}), (
+            "ni command ni clarification pueden abrir misión"
+        )

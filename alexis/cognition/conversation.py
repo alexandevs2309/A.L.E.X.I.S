@@ -199,6 +199,11 @@ class ConversationSession:
             # La clase de petición más común: una pregunta general sin objetivo concreto.
             # Se responde con lo que hay de verdad, no con una evasiva.
             text = self._open_question_answer(brief)
+        elif intent.kind is IntentKind.COMMAND:
+            # Control conversacional: no hay objetivo que cumplir, así que no hay nada que
+            # verificar y no se abre misión. Se responde con lo que ALEXIS puede hacer de
+            # verdad aquí —detenerse, reanudar— en vez de fingir que ejecutó algo.
+            text = self._command_answer()
         elif intent.kind is IntentKind.CLARIFICATION:
             # No debería llegar aquí: `_handle_clarification` lo intercepta antes. Si llega,
             # se dice la verdad en vez de fingir que no se entendió.
@@ -216,6 +221,21 @@ class ConversationSession:
             open_questions=[intent.ambiguity] if intent.needs_clarification and intent.ambiguity else [],
             cognition_outcome=outcome,
             degraded=degraded,
+        )
+
+    def _command_answer(self) -> str:
+        """Respuesta a una orden de control.
+
+        Deliberadamente no ejecuta nada por su cuenta. Un comando de control no lleva
+        objetivo, y sin objetivo no hay misión que abrir ni verificación que hacer: lo
+        honesto es reconocer la orden y decir qué queda en pie. FINGIR que se ejecutó
+        ("Listo, parado") sería afirmar un hecho del mundo sin evidencia, que es justo lo
+        que el ClaimGuard prohíbe en el resto del sistema.
+        """
+        return (
+            "Entendido. No hay ninguna operación mía en curso que detener, así que no ha "
+            "cambiado nada. Si quieres que realize algo, dímelo como tarea y lo ejecuto "
+            "bajo política."
         )
 
     def _open_question_answer(self, brief: SelfBrief) -> str:
