@@ -253,12 +253,19 @@ class CognitiveRuntime:
     # World Model: conocer el mundo para decidir
     # ------------------------------------------------------------------ #
 
-    def observe_world(self, mission: Mission, step: PlanStep, result) -> None:
-        """Lo que una herramienta acaba de observar entra en el mundo."""
+    def observe_world(self, mission: Mission, step: PlanStep, result,
+                      evidence_ids=None) -> None:
+        """Lo que una herramienta acaba de observar entra en el mundo.
+
+        `evidence_ids` son los claims que el Core acaba de crear del MISMO
+        `ExecutionResult` (§4.5.4). Se pasan porque el vínculo ya existe en los datos: la
+        entidad del mundo y esos claims describen la misma ejecución. Guardar el enlace
+        permite responder de dónde salió cada hecho sin duplicar la evidencia.
+        """
         if self.world is None:
             return
         try:
-            self.world.observe_execution(step, result, mission)
+            self.world.observe_execution(step, result, mission, evidence_ids=evidence_ids)
         except Exception as exc:  # noqa: BLE001 — el world model no puede romper el bucle
             LOGGER.warning("cognitive: no pude observar el mundo (%s)", exc)
 

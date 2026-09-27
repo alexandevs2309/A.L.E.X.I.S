@@ -256,18 +256,47 @@ def test_17_el_mundo_sigue_siendo_una_fuente_de_conocimiento():
     """
     from alexis.world.model import ABSENCE_TTL_S
 
-    world = WorldModel(scope=Scope.from_workspace("/tmp/a"))
     # Fresca: el mundo tiene razón en sostener la ausencia.
-    world.upsert(_entity("notas.txt", exists=False, last_seen=time.time(),
-                         scope=world.scope.id))
-    assert world.missing_paths(["notas.txt"]) == ["notas.txt"]
-    # Vencida: ya no la sostiene, y se difiere a la herramienta.
+    fresco = WorldModel(scope=Scope.from_workspace("/tmp/a"))
+    fresco.upsert(_entity("notas.txt", exists=False, last_seen=time.time(),
+                          scope=fresco.scope.id))
+    assert fresco.missing_paths(["notas.txt"]) == ["notas.txt"]
+
+    # Vencida: ya no la sostiene, y se difiere a la herramienta. Va en un mundo APARTE,
+    # y no "envejeciendo" el anterior, porque desde §4.5.5 `last_seen` es el MÁXIMO de los
+    # instantes observados: una observación posterior no puede rebobinar el reloj de la
+    # entidad. Envejecer la que ya era fresca la dejaría, con razón, tan fresca como antes.
+    # La caducidad se comprueba sobre una ausencia que ya arrastra el TTL de atraso.
+    world = WorldModel(scope=Scope.from_workspace("/tmp/a"))
     world.upsert(_entity("notas.txt", exists=False,
                          last_seen=time.time() - ABSENCE_TTL_S - 10,
                          scope=world.scope.id))
     assert world.missing_paths(["notas.txt"]) == []
     # Y la observación sigue consultable: caducar no es borrar.
     assert world.known_path("notas.txt").attributes["exists"] is False
+
+
+def test_18_una_observacion_tardia_no_refresca_lo_que_ya_se_vio():
+    """La regla que sostiene lo anterior, comprobada en la dirección que importa.
+
+    Un resultado encolado, un reintento o un evento que llega tarde trae una marca de
+    tiempo antigua. No debe rejuvenecer la entidad: si lo hiciera, una ausencia vencida
+    volvería a bloquearse y el TTL dejaría de significar nada.
+    """
+    from alexis.world.model import ABSENCE_TTL_S
+
+    world = WorldModel(scope=Scope.from_workspace("/tmp/a"))
+    world.upsert(_entity("notas.txt", exists=False, last_seen=time.time(),
+                         scope=world.scope.id))
+    antes = world.known_path("notas.txt").last_seen
+
+    world.upsert(_entity("notas.txt", exists=False,
+                         last_seen=time.time() - ABSENCE_TTL_S - 10,
+                         scope=world.scope.id))
+    assert world.known_path("notas.txt").last_seen == antes
+    assert world.missing_paths(["notas.txt"]) == ["notas.txt"], (
+        "la observación tardía no debe resucitar la ausencia"
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -142,4 +142,37 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   );
   CREATE INDEX IF NOT EXISTS ix_world_edges_scope ON world_edges(scope_id, parent_id);
   CREATE INDEX IF NOT EXISTS ix_world_edges_child ON world_edges(scope_id, child_id);
+
+  -- P0 §4.5.2/.3/.4 — evolution de confianza, conflictos y procedencia.
+  --
+  -- Son ALTER y no CREATE porque `world_entities` YA existe desde §4.3: hace falta
+  -- añadir columnas sin perder las filas. `IF NOT EXISTS` los hace idempotentes, así que
+  -- `migrate()` puede ejecutarse las veces que haga falta (y en una base recién creada,
+  -- donde las columnas nacen vacías con sus defaults).
+  --
+  -- `base_confidence` se persiste aparte de `confidence` porque la confianza es un valor
+  -- DERIVADO de (base, support, contradictions). Guardar sólo el resultado impediría
+  -- recalcularla sin perder el historial, que es lo que hace §4.5.5 al rehidratar.
+  ALTER TABLE world_entities
+      ADD COLUMN IF NOT EXISTS base_confidence REAL NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS support INT NOT NULL DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS contradictions INT NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ADD COLUMN IF NOT EXISTS conflicts JSONB NOT NULL DEFAULT '[]'::jsonb,
+      -- El recuento de valores por atributo. Sin esto, al rehidratar una entidad se
+      -- perdería el historial de contradicciones y la confianza volvería a la de una
+      -- única observación.
+      ADD COLUMN IF NOT EXISTS value_counts JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+  -- `confidence` y `base_confidence` pasan a DOUBLE PRECISION, por el mismo motivo que
+  -- `last_seen` arriba. Con §4.5.2 la confianza dejó de ser un 0/1/0.7 aproximado para
+  -- depender de un conteo de fuentes, y `REAL` (float4) se la comía: al rehidratar,
+  -- 0.814106108683 volvía como 0.8141061, así que el estado recuperado NO era el que se
+  -- observó y el determinismo entre procesos se rompía sin que nada fallara.
+  -- Reejecutable sin efecto: si la columna ya es DOUBLE PRECISION, la conversión es no-op.
+  -- Las filas ya truncadas por REAL conservan su valor (esa precisión no se recupera);
+  -- a partir de aquí las escrituras son exactas.
+  ALTER TABLE world_entities
+      ALTER COLUMN confidence TYPE DOUBLE PRECISION,
+      ALTER COLUMN base_confidence TYPE DOUBLE PRECISION;
   """

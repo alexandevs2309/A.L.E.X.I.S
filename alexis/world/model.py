@@ -152,6 +152,290 @@ class Scope:
         return {"id": self.id, "kind": self.kind, "label": self.label, "root": self.root}
 
 
+import json
+import math
+
+#: Base de confianza por procedencia. Es la confianza de UNA observación, no un techo.
+#: Un hecho declarado no vale más que lo que vale verlo con una tool: vale lo que vale
+#: su ORIGEN, y luego lo que lo corrobore.
+CONFIDENCE_BY_SOURCE = {
+    "tool": 0.7,          # observado por una herramienta
+    "test": 0.9,          # salida de una suite ejecutada
+    "registry": 1.0,      # declarado por el catálogo
+    "declared": 1.0,      # declarado a mano
+    "recovered": 0.0,     # sin confianza: no se sabe de dónde viene
+}
+
+#: Tope de confianza por observación corroborada. No llega a 1.0 nunca: ver algo una vez
+#: y verlo cuatro no es lo mismo que haberlo PROBADO, y el GoalVerifier tiene su propio
+#: camino para eso. El mundo habla de lo que ha visto, no de certeza.
+CONFIDENCE_CEILING = 0.99
+
+#: Cuánto pesa una contradicción frente a un apoyo. Una contradicción vale más que un
+#: apoyo: conseguir que algo diga lo contrario cuesta más que que lo repita, así que debe
+#: mover más la aguja.
+CONTRADICTION_WEIGHT = 1.5
+
+#: Rango de procedencia, para desempatar de forma determinista. Mayor = más fiable.
+#: Sólo se usa para desempatar: el valor vigente NO depende de esto salvo que el número
+#: de apoyos sea exactamente igual.
+_SOURCE_RANK = {
+    "registry": 4, "declared": 4, "test": 3, "tool": 2, "recovered": 1,
+}
+
+
+def _normalize_bucket(vals: dict) -> dict:
+    """Deja cada valor como `{"n": int, "rank": int}`.
+
+    Tolera las filas escritas antes de que existiera `rank` (que eran `{"true": 1}`), así
+    que una base con datos de §4.5.2 no necesita migración: se leen igual.
+    """
+    out: dict[str, dict] = {}
+    for clave, dato in (vals or {}).items():
+        if isinstance(dato, dict):
+            out[str(clave)] = {"n": int(dato.get("n") or 0),
+                               "rank": int(dato.get("rank") or 0),
+                               "seen": float(dato.get("seen") or 0.0)}
+        else:
+            out[str(clave)] = {"n": int(dato or 0), "rank": 0, "seen": 0.0}
+    return out
+
+
+def _merge_value_counts(previous: dict, incoming: dict, rank: int = 0,
+                        seen: float = 0.0) -> dict:
+    """Suma frecuencias de valores. Conmutativa: A+B == B+A.
+
+    Cada valor guarda cuántas veces se vio Y la procedencia más fiable con que se vio. El
+    `rank` es un máximo, también conmutativo, así que el determinismo no depende de que el
+    orden sea estable.
+
+    Es una copia profunda a propósito: el `previous` no se toca, para que la entidad que
+    estaba en el modelo no cambie por debajo cuando otra la referencia.
+    """
+    conteo = {attr: _normalize_bucket(vals) for attr, vals in (previous or {}).items()}
+    for atributo, valor in (incoming or {}).items():
+        bucket = conteo.setdefault(atributo, {})
+        clave = value_key(valor)
+        actual = bucket.get(clave) or {"n": 0, "rank": 0, "seen": 0.0}
+        bucket[clave] = {
+            "n": actual["n"] + 1,
+            "rank": max(actual["rank"], int(rank)),
+            # El INSTANTE más reciente en que se vio este valor. Es un máximo, así que
+            # sigue siendo conmutativo: depende de la observación, no de cuándo llegó.
+            "seen": max(actual.get("seen", 0.0), float(seen)),
+        }
+    return conteo
+
+
+def resolve_vigente(conteo: dict) -> dict:
+    """Valor vigente de cada atributo. P0 §4.5.3. Determinista y sin LLM.
+
+    ## Qué es un conflicto
+
+    Un atributo se ha visto con más de un valor distinto. Eso es todo: no hace falta que
+    las observaciones vinieran de fuentes distintas ni que una sea más antigua. "El mundo
+    me dice dos cosas sobre lo mismo" es un conflicto por sí mismo.
+
+    ## Cómo se decide el vigente
+
+    Tres reglas, en este orden:
+
+    ## Por qué manda la RECENCIA y no la frecuencia
+
+    Un primer intento de esta regla era "gana la frecuencia". Es un error, y el test de
+    borrar un archivo lo cazó: `fs.stat` ve el archivo, `verify` lo vuelve a ver y
+    `fs.remove` lo borra. Queda `exists=True` DOS veces y `exists=False` UNA, así que la
+    mayoría gana y el mundo afirma que el archivo existe DESPUÉS de haberlo borrado.
+
+    El motivo de fondo es que los atributos de un mundo son MUTABLES: el estado actual es
+    el último observado, y la frecuencia dice cuántos lo respaldan, no si es el presente.
+    Confundir ambas cosas produce un mundo que se contradice a sí mismo.
+
+    ## Las reglas, en orden
+
+    1. **Gana la observación más reciente.** Se usa el `seen` de cada valor, que es un
+       MÁXIMO sobre las observaciones de ese valor. Al ser un máximo depende del conjunto
+       de observaciones y NO del momento en que llegaron, así que el determinismo se
+       conserva: es conmutativo como todo máximo.
+    2. **Empate de fecha -> la más frecuente.** Sólo decide si dos valores se vieron por
+       última vez exactamente en el mismo instante.
+    3. **Empate total -> la procedencia más fiable.** Mayor `rank`
+       (registry > test > tool > recovered). Es el mismo criterio que usa la base de
+       confianza, así que el sistema razona igual sobre "de quién es esto" y "cuánto
+       confío".
+    4. **Empate total -> orden de la clave.** Como último recurso, la clave del valor
+       ordena alfabéticamente. Es arbitrario pero FIJO: dos ejecuciones con los mismos
+       datos dan el mismo resultado, que es lo único que se le pide a un desempate.
+
+    ## Por qué no decide el LLM
+
+    Un modelo puede elegir razonablemente, pero no de forma reproducible, y su criterio
+    cambiaría con el prompt. Aquí la contradicción se resuelve con una regla del World
+    Model. El LLM puede proponer una OBSERVACIÓN; nunca puede decidir cuál es la verdad.
+    La autoridad sigue estando en Policy; esto es conocimiento, no permiso.
+    """
+    vigente: dict = {}
+    for atributo, valores in (conteo or {}).items():
+        if not valores:
+            continue
+        if len(valores) == 1:
+            clave = next(iter(valores))
+            vigente[atributo] = _decode_value(clave)
+            continue
+        mejor = sorted(
+            valores.items(),
+            key=lambda par: (-par[1].get("seen", 0.0), -par[1]["n"], -par[1]["rank"], par[0]),
+        )[0]
+        vigente[atributo] = _decode_value(mejor[0])
+    return vigente
+
+
+def _decode_value(clave: str) -> Any:
+    """Inverso de `value_key`. Si la clave no es JSON, se devuelve tal cual."""
+    try:
+        return json.loads(clave)
+    except (ValueError, TypeError):
+        return clave
+
+
+def build_conflicts(conteo: dict) -> list[dict]:
+    """Registro de TODAS las contradicciones vistas, sin silenciar ninguna. §4.5.3.
+
+    Un atributo con más de un valor genera una entrada por cada valor, con su recuento y
+    la procedencia más fiable con que se vio. Aunque el vigente cambie, las entradas
+    permanecen: una contradicción que se borra al resolverse es una contradicción
+    silenciada, que es justo lo que el requisito prohíbe.
+    """
+    registros: list[dict] = []
+    for atributo, valores in sorted((conteo or {}).items()):
+        if len(valores) < 2:
+            continue
+        for clave, dato in sorted(valores.items(), key=lambda par: par[0]):
+            registros.append({
+                "attribute": atributo,
+                "value": _decode_value(clave),
+                "observations": int(dato["n"]),
+                "best_source_rank": int(dato["rank"]),
+                # `last_observed` es el MÁXIMO de los instantes en que se vio ESE valor,
+                # y por tanto conmutativo. No se guarda el `last_seen` de la entidad: ese
+                # es el de la observación que llegó última, y haría que el registro
+                # dependiera del orden de llegada.
+                "last_observed": float(dato.get("seen", 0.0) or 0.0),
+            })
+    return registros
+
+
+def _tally(conteo: dict) -> tuple[int, int]:
+    """`(apoyo, contradicciones)` del conjunto entero de observaciones.
+
+    Para cada atributo, el valor MÁS FRECUENTO es el vigente y cuenta como apoyo; el resto
+    de valores son contradicciones. Sin rango mínimo: si un valor no se ha visto, no se
+    cuenta como apoyo ni como contradicción.
+    """
+    apoyo = 0
+    contra = 0
+    for valores in (conteo or {}).values():
+        if not valores:
+            continue
+        mayor = max(v["n"] for v in valores.values())
+        ganadores = [v for v in valores.values() if v["n"] == mayor]
+        if len(ganadores) > 1:
+            # Empate: no hay valor mayoritario, luego nada apoya y todo queda en
+            # disputa. Ver el porqué en el docstring.
+            contra += sum(v["n"] for v in valores.values())
+            continue
+        for v in valores.values():
+            if v["n"] == mayor:
+                apoyo += v["n"]
+            else:
+                contra += v["n"]
+    return apoyo, contra
+
+
+def value_key(value: Any) -> str:
+    """Clave estable y reversible de un valor de atributo.
+
+    `json.dumps` con `sort_keys` hace que la clave no dependa del orden de las claves de
+    un dict, y `loads` la devuelve intacta. Sin esto, `{exists: True}` y `{exists: "True"}`
+    — o dos claves con distinto orden — serían o no el mismo valor.
+    """
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _merge_evidence_ids(previous: WorldEntity, current: WorldEntity) -> list:
+    """Une los ids de evidencia sin duplicar y sin depender del orden (P0 §4.5.4).
+
+    Es un conjunto ordenado: el mismo conjunto de evidencias produce la misma lista llegue
+    como llegue, que es lo que exige el determinismo de §4.5.5.
+    """
+    return sorted({*(previous.evidence_ids or []), *(current.evidence_ids or [])})
+
+
+def _base_confidence(source: str) -> float:
+    """Confianza de una observación según de dónde viene. Determinista y explicable."""
+    text = (source or "").strip().lower()
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    return CONFIDENCE_BY_SOURCE.get(text, 0.5)
+
+
+def source_rank(source: str) -> int:
+    """Fiabilidad de una procedencia. Sólo desempata; no decide por sí sola."""
+    text = (source or "").strip().lower()
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    return _SOURCE_RANK.get(text, 0)
+
+
+def evolved_confidence(base: float, support: int, contradictions: int) -> float:
+    """Confianza como FUNCIÓN PURA de los contadores. P0 §4.5.2.
+
+    ## Por qué pura y no acumulativa
+
+    La forma intuitiva —`conf += 0.1` por cada corroboración— depende del ORDEN: el mismo
+    conjunto de observaciones daría valores distintos según llegaran en un orden u otro, y
+    dos máquinas con la misma evidencia discreparían. Aquí no hay memoria del valor
+    anterior: `confidence` se recalcula desde cero a partir de (base, support,
+    contradictions). Como contar es conmutativo, el resultado final depende del CONJUNTO y
+    no de la secuencia. Ése es el determinismo que pide el requisito.
+
+    ## Las cuatro respuestas, en una función
+
+    - **cómo nace**: una observación sin corroborar vale exactamente su BASE, la de su
+      origen. Una tool que ve algo una vez → 0.7. Ni más ni menos.
+    - **cómo sube con evidencia**: cada apoyo posterior la acerca al techo
+      `CONFIDENCE_CEILING` (0.99), con rendimientos decrecientes: los primeros apoyos valen
+      mucho y a partir de ahí cada uno aporta menos. Nunca llega a 1.0 porque ver algo
+      repetido no es haberlo PROBADO, y el GoalVerifier tiene su propio camino para eso.
+    - **qué pasa con contradicción**: una contradicción pesa más que un apoyo
+      (`CONTRADICTION_WEIGHT`), así que puede bajar el hecho por debajo de una observación
+      sola. Un 1-1 es genuinamente una incógnita y sale 0.1: hubo observaciones, sólo que
+      se contradicen, y eso no es ausencia de conocimiento.
+    - **qué pasa con nada**: sin apoyos ni contradicciones no hay nada que afirmar → 0.0.
+    """
+    base = min(max(float(base), 0.0), 1.0)
+    contradictions = max(0, int(contradictions))
+    # Se resta 1: la PRIMERA observación no corrobora nada, así que vale lo que vale su
+    # fuente. Sólo a partir de la segunda hay corroboración que sumar.
+    corroborated = max(0.0, float(support) - 1.0)
+    # El techo nunca puede quedar POR DEBAJO de la base: corroborar algo que una fuente
+    # fiable declaró no puede rebajarlo. Un hecho de catálogo corroborado sigue siendo 1.0.
+    ceiling = max(CONFIDENCE_CEILING, base)
+
+    if contradictions <= 0:
+        if corroborated <= 0.0:
+            return base
+    else:
+        effective = corroborated - CONTRADICTION_WEIGHT * contradictions
+        if effective <= 0.0:
+            return 0.1
+        corroborated = effective
+
+    # 1 - exp(-0.5 * n): n=1 -> 0.39, n=3 -> 0.78, n=9 -> 0.99. Saturante, y sin
+    # parámetros que haya que calibrar contra nada externo.
+    growth = 1.0 - math.exp(-0.5 * corroborated)
+    return min(base + (ceiling - base) * growth, ceiling)
+
 @dataclass
 class WorldEntity:
     id: str
@@ -166,6 +450,34 @@ class WorldEntity:
     #: Ámbito al que pertenece la entidad. Va AL FINAL a propósito: el servidor construye
     #: `WorldEntity(...)` posicionalmente y ese orden es parte de la API pública.
     scope: str = ""
+    # ── P0 §4.5.2: contadores que hacen la confianza EVOLUTIVA y DETERMINISTA ──
+    #: Base de confianza = la de la procedencia MÁS FIABLE que ha observado esto, como
+    #: MÁXIMO de todas las vistas. El máximo es conmutativo, así que el resultado no
+    #: depende del orden de llegada. Sin este campo, la base sería la de la última
+    #: observación y dos máquinas con la misma evidencia darían distinta confianza.
+    base_confidence: float = 0.0
+    #: Observaciones que APOYAN el estado vigente. Empieza en 1: la observación que creó
+    #: la entidad es un apoyo. Lo cuenta la observación, no la repetición: una tool que
+    #: dice lo mismo diez veces sigue siendo un dato, no diez datos.
+    support: int = 1
+    #: Observaciones que CONTRADICEN el estado vigente.
+    contradictions: int = 0
+    #: Ids de los claims que respaldan esta entidad (§4.5.4). Los crea el mismo
+    #: `ExecutionResult` que la observación, así que el enlace existe en los datos.
+    evidence_ids: list = field(default_factory=list)
+    #: Cuántas veces se ha visto CADA VALOR de cada atributo: `{atributo: {valor: n}}`.
+    #:
+    #: Esto es lo que hace la confianza INDEPENDIENTE DEL ORDEN. Comparar cada
+    #: observación con el valor "actual" parece más sencillo pero es secuencial: con
+    #: (True, False, True) da dos contradicciones y con (False, True, True) da una, para
+    #: el mismo conjunto de observaciones. Contar FRECUENCIAS de cada valor es
+    #: conmutativo, así que el resultado depende del conjunto y no de la secuencia, y de
+    #: aquí salen el estado vigente y el recuento de contradicciones.
+    value_counts: dict = field(default_factory=dict)
+    #: Contradicciones REALES que se han visto sobre esta entidad (§4.5.3). Se conservan
+    #: aunque el estado vigente ya no sea el de la otra parte: una contradicción que se
+    #: borra es una contradicción silenciada.
+    conflicts: list = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -178,6 +490,15 @@ class WorldEntity:
             "mission_id": self.mission_id,
             "observations": self.observations,
             "scope": self.scope,
+            # §4.5.2/.3/.4: contadores, conflictos y procedencia también viajan. Si no,
+            # al restaurar una entidad volvería a nacer con confianza de primera
+            # observación y sin rastro de que hubo contradicciones.
+            "base_confidence": self.base_confidence,
+            "support": self.support,
+            "contradictions": self.contradictions,
+            "evidence_ids": list(self.evidence_ids),
+            "value_counts": {a: dict(v) for a, v in (self.value_counts or {}).items()},
+            "conflicts": [dict(c) for c in (self.conflicts or [])],
             # §4.2: sin esto, la edad real de la observación se perdía al serializar y al
             # restaurar la entidad parecía recién observada. El float viaja tal cual: se
             # comprobó que un float64 sobrevive al viaje por JSONB sin perder un bit.
@@ -206,17 +527,50 @@ class WorldEntity:
         if last_seen <= 0.0:
             # Cero, negativo o ausente: edad desconocida, no "observado en el epoch".
             last_seen = LAST_SEEN_UNKNOWN
+        atributos = dict(data.get("attributes") or {})
+        source = str(data.get("source") or "declared")
+        confianza = float(data.get("confidence") or 0.0)
+        conteos = {
+            str(a): _normalize_bucket(v)
+            for a, v in (data.get("value_counts") or {}).items()
+        }
+        # ── Reparación de filas anteriores a §4.5 ──────────────────────────────
+        # Esas filas no tienen `value_counts` (la columna nace con `{}`) ni
+        # `base_confidence` (nace con 0). Sin repararlas, la PRIMERA observación nueva
+        # que llegara después de migrar fusionaría contra un historial vacío: el conteo
+        # anterior se perdía y la base pasaba a ser sólo la de esa observación, borrando
+        # de hecho la confianza que la fila sí tenía guardada.
+        #
+        # Lo que se puede reconstruir sin inventar nada es el estado vigente: hay al
+        # menos una observación, y la marca de tiempo es la de la entidad.
+        if not conteos and atributos:
+            conteos = _merge_value_counts(
+                {}, atributos, source_rank(source), last_seen)
+        # La base es la confianza que la fuente tenía; es la misma regla con la que §4.3
+        # generó el `confidence` de esa fila, así que se recupera en vez de inventarse.
+        # `confidence` NO se toca: rehidratar no observa, y aquí no se reescribe nada.
+        base = float(data.get("base_confidence") or 0.0)
+        if base <= 0.0 and confianza > 0.0:
+            base = _base_confidence(source)
         return cls(
             id=str(data.get("id") or ""),
             kind=str(data.get("kind") or "unknown"),
             name=str(data.get("name") or data.get("id") or ""),
-            attributes=dict(data.get("attributes") or {}),
-            source=str(data.get("source") or "declared"),
-            confidence=float(data.get("confidence") or 0.0),
+            attributes=atributos,
+            source=source,
+            confidence=confianza,
             mission_id=data.get("mission_id"),
             observations=int(data.get("observations") or 0),
             last_seen=last_seen,
             scope=str(data.get("scope") or ""),
+            base_confidence=base,
+            support=int(data.get("support") or 0) or 1,
+            contradictions=int(data.get("contradictions") or 0),
+            evidence_ids=list(data.get("evidence_ids") or []),
+            # `_normalize_bucket` deja cada valor como {"n":..,"rank":..} y tolera las
+            # filas antiguas que eran un entero suelto.
+            value_counts=conteos,
+            conflicts=[dict(c) for c in (data.get("conflicts") or []) if isinstance(c, dict)],
         )
 
     def to_line(self) -> str:
@@ -271,6 +625,11 @@ class WorldModel:
     # ------------------------------------------------------------------ #
 
     def upsert(self, entity: WorldEntity) -> WorldEntity:
+        """Registra una observación. Es la ÚNICA vía que evoluciona el estado (§4.5).
+
+        `put()` no pasa por aquí: rehidratar no es observar, así que un restore del
+        store NO puede subir la confianza de nada.
+        """
         if not entity.scope:
             entity.scope = self.scope.id
         # La clave se calcula con el ámbito de la ENTIDAD, no con el de la instancia: una
@@ -278,9 +637,59 @@ class WorldModel:
         # defecto. Es lo que permite que un solo modelo aloje varios proyectos.
         key = self._key(entity.id, entity.scope)
         previous = self.entities.get(key)
+        base = _base_confidence(entity.source)
         if previous is not None:
-            entity.attributes = {**previous.attributes, **entity.attributes}
+            # Lo que DICE esta observación, antes de fusionar. Hace falta para poder
+            # distinguir "apoya lo que ya sabíamos" de "dice lo contrario".
+            dicho = dict(entity.attributes)
+            # Instante al que se vio ESTA observación. Se captura antes de tocar
+            # `last_seen` más abajo: ese campo pasa a ser el máximo histórico de la
+            # entidad, y usarlo aquí atribuiría a un valor el instante de otro hecho.
+            observado_en = float(entity.last_seen or 0.0)
             entity.observations = previous.observations + 1
+            # `last_seen` es el MÁXIMO de los instantes observados, no el de la
+            # observación que llegó última. Con lo segundo, una observación que llega tarde
+            # (un reintento, un resultado encolado) rebobina el reloj de la entidad y la
+            # haría parecer más fresca de lo que es: justo lo que gobierna la caducidad de
+            # §4.5.1. El máximo es conmutativo, así que además quita una fuente de
+            # dependencia del orden.
+            entity.last_seen = max(
+                float(previous.last_seen or 0.0), float(entity.last_seen or 0.0)
+            )
+            # La base es el MÁXIMO de las procedencias vistas. Máximo es conmutativo,
+            # así que el orden de llegada no cambia el resultado.
+            base = max(base, previous.base_confidence or 0.0)
+            # Cada atributo se cuenta a favor o en contra SEGÚN SU VALOR. Un `exists`
+            # nuevo que coincide apoya; uno distinto contradice. La cuenta es por
+            # comparación, no por tiempo, así que no depende del orden.
+            # Se acumula la FRECUENCIA de cada valor, no una comparación secuencial.
+            conteo = _merge_value_counts(
+                previous.value_counts, dicho, source_rank(entity.source), observado_en)
+            entity.value_counts = conteo
+            apoyo, contra = _tally(conteo)
+            entity.support = apoyo
+            entity.contradictions = contra
+            entity.evidence_ids = _merge_evidence_ids(previous, entity)
+            # P0 §4.5.3: el estado vigente se RESUELVE, no es "el último que escribió".
+            # Antes `{**previo, **nuevo}` hacía que el valor dependiera del orden de
+            # llegada, que es justo lo que el determinismo prohíbe. Con el conteo de
+            # frecuencias, el vigente sale de una regla fija y es el mismo llegue como
+            # llegue el conjunto de observaciones.
+            entity.attributes = {**previous.attributes, **resolve_vigente(conteo)}
+        else:
+            # Primera observación: su valor es el único conocido, y cuenta como apoyo.
+            entity.value_counts = _merge_value_counts(
+                {}, entity.attributes, source_rank(entity.source),
+                float(entity.last_seen or 0.0))
+            apoyo, contra = _tally(entity.value_counts)
+            entity.support = apoyo
+            entity.contradictions = contra
+        entity.base_confidence = base
+        entity.confidence = evolved_confidence(base, entity.support, entity.contradictions)
+        # §4.5.3: el registro de contradicciones se reconstruye desde el conteo, de modo
+        # que se puede hacer idempotente y no depende de cuántas veces se haya llamado a
+        # `upsert`. Conserva TODOS los valores vistos, vigente incluido.
+        entity.conflicts = build_conflicts(entity.value_counts)
         self.entities[key] = entity
         return entity
 
@@ -424,7 +833,8 @@ class WorldModel:
     # ------------------------------------------------------------------ #
 
     def observe_execution(self, step, result, mission=None, *,
-                          scope: Scope | str | None = None) -> list[WorldEntity]:
+                          scope: Scope | str | None = None,
+                          evidence_ids=None) -> list[WorldEntity]:
         """Registra en el mundo lo que una ejecución REAL devolvió.
 
         Solo extrae hechos que la herramienta afirma explícitamente (ruta, existencia,
@@ -435,6 +845,10 @@ class WorldModel:
         declararía un hecho sobre un proyecto del que no salió.
         """
         target = self._scope(scope)
+        # Ids de la evidencia que respalda esta observación (§4.5.4). Son enlaces, no
+        # copias: el texto de la evidencia vive en el `EvidenceStore`, y duplicarlo aquí
+        # haría que el mundo dejara de ser "estado" para ser también "memoria".
+        evidencia = list(evidence_ids or [])
         observed: list[WorldEntity] = []
         output = getattr(result, "output", None)
         if not isinstance(output, dict):
@@ -442,7 +856,9 @@ class WorldModel:
         success = bool(getattr(result, "success", False))
 
         if output.get("test_run"):
-            observed.append(self._observe_test_run(step, output, mission, target))
+            observed.append(
+                self._observe_test_run(step, output, mission, target, evidencia)
+            )
 
         path = output.get("path")
         if isinstance(path, str) and path:
@@ -468,13 +884,15 @@ class WorldModel:
                         confidence=0.7,
                         mission_id=getattr(mission, "id", None),
                         scope=target.id,
+                        evidence_ids=evidencia,
                     )
                 )
             )
         return observed
 
     def _observe_test_run(self, step, output: dict, mission=None,
-                          scope: Scope | None = None) -> WorldEntity:
+                          scope: Scope | None = None,
+                          evidence_ids=None) -> WorldEntity:
         """El resultado de una suite ejecutada es un hecho del mundo, no una opinión.
 
         Se registra aunque la suite falle: un fallo observado es exactamente el tipo de
@@ -499,6 +917,10 @@ class WorldModel:
                 confidence=0.9,
                 mission_id=getattr(mission, "id", None),
                 scope=target.id,
+                # Un test run afirma algo del mundo ("esto pasa"), así que responde por sus
+                # claims igual que una lectura de archivo. Dejarlo sin ellos dejaba
+                # conocimiento verificable sin trazabilidad.
+                evidence_ids=list(evidence_ids or []),
             )
         )
 

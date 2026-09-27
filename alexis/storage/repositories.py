@@ -326,9 +326,13 @@ class WorldRepository:
             """
             INSERT INTO world_entities
                 (scope_id, entity_id, kind, name, attributes, source, confidence,
-                 mission_id, observations, last_seen)
+                 mission_id, observations, last_seen,
+                 base_confidence, support, contradictions, evidence_ids, conflicts,
+                 value_counts)
             VALUES (%(scope_id)s, %(entity_id)s, %(kind)s, %(name)s, %(attributes)s::jsonb,
-                    %(source)s, %(confidence)s, %(mission_id)s, %(observations)s, %(last_seen)s)
+                    %(source)s, %(confidence)s, %(mission_id)s, %(observations)s, %(last_seen)s,
+                    %(base_confidence)s, %(support)s, %(contradictions)s,
+                    %(evidence_ids)s::jsonb, %(conflicts)s::jsonb, %(value_counts)s::jsonb)
             ON CONFLICT (scope_id, entity_id) DO UPDATE SET
                 kind = EXCLUDED.kind,
                 name = EXCLUDED.name,
@@ -337,20 +341,18 @@ class WorldRepository:
                 confidence = EXCLUDED.confidence,
                 mission_id = EXCLUDED.mission_id,
                 observations = EXCLUDED.observations,
-                last_seen = EXCLUDED.last_seen
+                last_seen = EXCLUDED.last_seen,
+                base_confidence = EXCLUDED.base_confidence,
+                support = EXCLUDED.support,
+                contradictions = EXCLUDED.contradictions,
+                evidence_ids = EXCLUDED.evidence_ids,
+                conflicts = EXCLUDED.conflicts,
+                value_counts = EXCLUDED.value_counts
             """,
-            {
-                "scope_id": entity.scope,
-                "entity_id": entity.id,
-                "kind": entity.kind,
-                "name": entity.name,
-                "attributes": json.dumps(entity.attributes, ensure_ascii=False, default=str),
-                "source": entity.source,
-                "confidence": entity.confidence,
-                "mission_id": entity.mission_id,
-                "observations": entity.observations,
-                "last_seen": float(entity.last_seen),
-            },
+            # El ámbito sale de la ENTIDAD, no del argumento: así no puede acabarse
+            # escribiendo en el ámbito equivocado por descuido. Es el mismo motivo por el
+            # que la clave del `WorldModel` usa `entity.scope`.
+            {"scope_id": entity.scope, **_entity_params(entity)},
         )
 
     async def get_entity(self, entity_id: str, *, scope: str) -> object | None:
@@ -478,9 +480,13 @@ class WorldRepository:
                     """
                     INSERT INTO world_entities
                         (scope_id, entity_id, kind, name, attributes, source, confidence,
-                         mission_id, observations, last_seen)
+                         mission_id, observations, last_seen,
+                         base_confidence, support, contradictions, evidence_ids, conflicts,
+                        value_counts)
                     VALUES (%(scope_id)s, %(entity_id)s, %(kind)s, %(name)s, %(attributes)s::jsonb,
-                            %(source)s, %(confidence)s, %(mission_id)s, %(observations)s, %(last_seen)s)
+                            %(source)s, %(confidence)s, %(mission_id)s, %(observations)s, %(last_seen)s,
+                            %(base_confidence)s, %(support)s, %(contradictions)s,
+                            %(evidence_ids)s::jsonb, %(conflicts)s::jsonb, %(value_counts)s::jsonb)
                     ON CONFLICT (scope_id, entity_id) DO UPDATE SET
                         kind = EXCLUDED.kind,
                         name = EXCLUDED.name,
@@ -489,20 +495,15 @@ class WorldRepository:
                         confidence = EXCLUDED.confidence,
                         mission_id = EXCLUDED.mission_id,
                         observations = EXCLUDED.observations,
-                        last_seen = EXCLUDED.last_seen
+                        last_seen = EXCLUDED.last_seen,
+                        base_confidence = EXCLUDED.base_confidence,
+                        support = EXCLUDED.support,
+                        contradictions = EXCLUDED.contradictions,
+                        evidence_ids = EXCLUDED.evidence_ids,
+                        conflicts = EXCLUDED.conflicts,
+                        value_counts = EXCLUDED.value_counts
                     """,
-                    {
-                        "scope_id": scope,
-                        "entity_id": entity.id,
-                        "kind": entity.kind,
-                        "name": entity.name,
-                        "attributes": json.dumps(entity.attributes, ensure_ascii=False, default=str),
-                        "source": entity.source,
-                        "confidence": entity.confidence,
-                        "mission_id": entity.mission_id,
-                        "observations": entity.observations,
-                        "last_seen": float(entity.last_seen),
-                    },
+                    {**_entity_params(entity), "scope_id": scope},
                 )
             for parent_id, child_id, *rest in edges:
                 relation = rest[0] if rest else "depends_on"
@@ -516,6 +517,31 @@ class WorldRepository:
                      "relation": relation},
                 )
         return len(entities)
+
+
+def _entity_params(entity) -> dict:
+    """Fila de parámetros de una entidad. Compartido por `upsert_entity` y
+    `save_snapshot` para que las dos vías no puedan separarse nunca."""
+    return {
+        "entity_id": entity.id,
+        "kind": entity.kind,
+        "name": entity.name,
+        "attributes": json.dumps(entity.attributes, ensure_ascii=False, default=str),
+        "source": entity.source,
+        "confidence": float(entity.confidence),
+        "mission_id": entity.mission_id,
+        "observations": int(entity.observations),
+        "last_seen": float(entity.last_seen),
+        "base_confidence": float(getattr(entity, "base_confidence", 0.0) or 0.0),
+        "support": int(getattr(entity, "support", 1) or 0),
+        "contradictions": int(getattr(entity, "contradictions", 0) or 0),
+        "evidence_ids": json.dumps(list(getattr(entity, "evidence_ids", []) or []),
+                                   ensure_ascii=False),
+        "conflicts": json.dumps([dict(c) for c in (getattr(entity, "conflicts", []) or [])],
+                                ensure_ascii=False, default=str),
+        "value_counts": json.dumps(getattr(entity, "value_counts", {}) or {},
+                                   ensure_ascii=False, default=str),
+    }
 
 
 def _entity_from_row(row) -> object:
@@ -539,4 +565,10 @@ def _entity_from_row(row) -> object:
         "observations": row["observations"],
         "last_seen": row["last_seen"],
         "scope": row["scope_id"],
+        "base_confidence": row.get("base_confidence") or 0.0,
+        "support": row.get("support") or 1,
+        "contradictions": row.get("contradictions") or 0,
+        "evidence_ids": row.get("evidence_ids") or [],
+        "conflicts": row.get("conflicts") or [],
+        "value_counts": row.get("value_counts") or {},
     })
