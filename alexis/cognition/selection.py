@@ -488,7 +488,7 @@ def _conflicting_family(capability_id: str, family: str) -> str:
     return ""
 
 
-#: Plurales y formas，吾它们的 tocante: "archivo" tiene que casar con "archivos" o el
+#: Plurales y formas. Lo tocante: "archivo" tiene que casar con "archivos" o el
 #: selector puntúa 0 una capability que sí encaja. No es un stemmer lingü completo; es
 #: la normalización mínima que evita el fallo observado.
 def _stem(word: str) -> str:
