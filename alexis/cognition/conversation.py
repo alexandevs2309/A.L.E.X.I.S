@@ -163,7 +163,20 @@ class ConversationSession:
         )
 
     def _direct_reply(self, intent: Intent, brief: SelfBrief, outcome: str) -> UserReply:
-        """Respuesta sin misión. El texto es la experiencia principal (F2 §14)."""
+        """Respuesta sin misión. El texto es la experiencia principal (F2 §14).
+
+        ## Por qué este método cubre TODOS los kinds que no abren misión
+
+        El clasificador devuelve nueve `IntentKind` y sólo `TASK` abre misión. Antes de
+        esto se respondían cuatro y los otros cuatro caían en un `else` que decía "no he
+        entendido la petición con suficiente claridad". Eso era FALSO: "me ayudas?" se
+        clasifica como `question` con total normalidad, y "¿qué quieres que hagas?" igual. El
+        sistema noignoraba al usuario; lo entendía y se quedaba mudo.
+
+        Un reply honesto vale más que uno decorativo: si ALEXIS capta la clase de
+        petición, lo dice y ofrece lo que SÍ puede hacer, que además sale del registro
+        real de capacidades y no de una frase inventada.
+        """
         degraded = outcome != ModelOutcome.REAL.value
         if intent.kind is IntentKind.GREETING:
             identity = (brief.identity or {}).get("name", "ALEXIS")
@@ -179,11 +192,22 @@ class ConversationSession:
                 "capacidades que tengo habilitadas, lo ejecuto bajo política y verifico "
                 "el resultado antes de dártlo por bueno. Lo que no puedo hacer no lo invento."
             )
+        elif intent.kind is IntentKind.SMALL_TALK:
+            # "gracias", "vale", "perfecto": no piden nada. Confirmar y seguir disponible.
+            text = "Cuando quieras."
+        elif intent.kind is IntentKind.QUESTION:
+            # La clase de petición más común: una pregunta general sin objetivo concreto.
+            # Se responde con lo que hay de verdad, no con una evasiva.
+            text = self._open_question_answer(brief)
+        elif intent.kind is IntentKind.CLARIFICATION:
+            # No debería llegar aquí: `_handle_clarification` lo intercepta antes. Si llega,
+            # se dice la verdad en vez de fingir que no se entendió.
+            text = "Te escucho. Dime el objetivo concreto y lo trabajo."
         else:
-            text = (
-                "No he entendido la petición con suficiente claridad. ¿Me lo dices de otra "
-                "forma, con el objetivo concreto?"
-            )
+            # `unknown`: aquí SÍ es verdad que no se entendió. Pero la redacción HONESTA
+            # dice qué se necesita para poder hacer algo, en vez de devolver la frase
+            # inhábil que desanimaba a la gente a rendirse.
+            text = self._unclear_answer(brief)
         if degraded:
             text = f"{text}\n\n(Nota: esta respuesta se compuso sin un modelo real disponible.)"
         return UserReply(
@@ -193,6 +217,55 @@ class ConversationSession:
             cognition_outcome=outcome,
             degraded=degraded,
         )
+
+    def _open_question_answer(self, brief: SelfBrief) -> str:
+        """"¿me ayudas?", "¿qué quieres hacer?": sí, y esto es lo que hay.
+
+        Se apoya en el registro real de capacidades, así que la respuesta no puede
+        prometer nada que ALEXIS no vaya a poder hacer.
+        """
+        disponibles = self._available(brief)
+        if not disponibles:
+            return (
+                "Ahora mismo no tengo ninguna capacidad habilitada, así que no podría "
+                "hacer nada aunque me lo pidieras. En cuanto me habilites alguna, dime "
+                "el objetivo y voy."
+            )
+        muestra = disponibles[:6]
+        resto = len(disponibles) - len(muestra)
+        texto = (
+            "Sí. Esto es lo que puedo hacer ahora mismo:\n"
+            + "\n".join(f"  · {cid}" for cid in muestra)
+        )
+        if resto > 0:
+            texto += f"\n  · … y {resto} más."
+        return (
+            f"{texto}\n\nDime el objetivo concreto —qué quieres que ocurra al final— y lo "
+            "encaro. Si no sabes por dónde empezar, descríbeme la situación y propongo yo."
+        )
+
+    def _unclear_answer(self, brief: SelfBrief) -> str:
+        """No se entendió: se dice eso, y se dice qué haría falta para entenderlo."""
+        disponibles = self._available(brief)
+        cierre = (
+            "Ahora mismo puedo hacer esto:\n" + "\n".join(f"  · {cid}" for cid in disponibles[:4])
+            if disponibles else "Ahora mismo no tengo capacidades habilitadas."
+        )
+        return (
+            "No he logrado entender qué quieres. No es un no: es que necesito el "
+            "objetivo en una frase.\n\n"
+            "Ayúdame con algo así:\n"
+            "  · qué quieres que ocurra al final\n"
+            "  · sobre qué —un archivo, una carpeta, un texto—\n"
+            f"{cierre}"
+        )
+
+    def _available(self, brief: SelfBrief) -> list[str]:
+        available = brief.available_capabilities
+        if not available and self.capability_registry is not None:
+            available = [s.id for s in self.capability_registry.enabled()]
+        return list(available or [])
+
 
     def _capability_answer(self, brief: SelfBrief) -> str:
         available = brief.available_capabilities

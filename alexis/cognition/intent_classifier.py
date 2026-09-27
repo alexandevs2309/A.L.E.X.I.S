@@ -78,6 +78,20 @@ _META_WORDS = (
     "cual es tu proposito", "explica tu arquitectura", "cómo estás hecho",
 )
 
+#: Cortesía: turnos que se entienden y no piden nada. Coincidencia exacta.
+_SMALL_TALK_EXACT = (
+    "ok", "okay", "vale", "bien", "perfecto", "perfecta", "genial", "claro",
+    "estupendo", "entendido", "entendida", "recibido", "recibida", "gracias",
+    "muchas gracias", "mil gracias", "de nada", "nada", "ya", "sip", "nop",
+    "adiós", "adios", "hasta luego", "chao", "chau", "nos vemos",
+)
+
+#: Las mismas, pero como fragmento: "gracias por eso" también es cortesía.
+_SMALL_TALK_WORDS = (
+    "gracias", "de nada", "hasta luego", "nos vemos", "perfecto", "perfecta",
+    "estupendo", "estupenda", "muchas gracias",
+)
+
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
@@ -157,8 +171,21 @@ class RuleBasedIntentClassifier:
             )
 
         if is_activation_objective(text) or low in ("hola", "hola alexis", "hey", "hey alexis",
-                                                    "buenas", "buenos dias", "buenas tardes"):
+                                                      "buenas", "buenos dias", "buenas tardes"):
             return Intent(kind=IntentKind.GREETING, utterance=text, confidence=0.9, model_meta=meta)
+
+        # P0 requisito 1: la cortesía NO es una petición. "Gracias" caía en `UNKNOWN` y
+        # recibía "no he entendido la petición", que es absurdo: el turno se entiende
+        # perfectamente, sólo no pide nada. `SMALL_TALK` existía en el enum y era
+        # inalcanzable; aquí por fin tiene origen.
+        #
+        # Coincidencia EXACTA para las cortas, y por substring para las largas. "ok" suelta
+        # es cortesía; "ok, borra el directorio" es una orden y tiene que llegar a las
+        # reglas de tarea, así que no se busca como substring.
+        if low in _SMALL_TALK_EXACT or any(word in low for word in _SMALL_TALK_WORDS):
+            return Intent(kind=IntentKind.SMALL_TALK, utterance=text, confidence=0.85,
+                          model_meta=meta)
+
 
         if any(word in low for word in _CAPABILITY_WORDS):
             return Intent(
