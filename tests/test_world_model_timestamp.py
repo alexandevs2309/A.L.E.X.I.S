@@ -248,13 +248,26 @@ def test_16_save_world_lleva_el_timestamp_en_la_fila():
 
 
 def test_17_el_mundo_sigue_siendo_una_fuente_de_conocimiento():
-    """`last_seen` es informativo: no cambia qué se consulta ni qué se decide."""
+    """`last_seen` es informativo mientras la observación sea fresca.
+
+    §4.2 lo dejó así a propósito, con la nota de que §4.5 haría que la edad influyera.
+    §4.5 (caducidad de ausencias) ya existe: una ausencia VENCIDA deja de bloquear, y
+    una fresca sigue bloqueando. Las dos mitades se comprueban aquí.
+    """
+    from alexis.world.model import ABSENCE_TTL_S
+
     world = WorldModel(scope=Scope.from_workspace("/tmp/a"))
-    world.upsert(_entity("notas.txt", exists=False, last_seen=time.time() - 99999,
+    # Fresca: el mundo tiene razón en sostener la ausencia.
+    world.upsert(_entity("notas.txt", exists=False, last_seen=time.time(),
                          scope=world.scope.id))
-    assert world.missing_paths(["notas.txt"]) == ["notas.txt"], (
-        "§4.5 hará que la edad influya; §4.2 NO lo hace todavía"
-    )
+    assert world.missing_paths(["notas.txt"]) == ["notas.txt"]
+    # Vencida: ya no la sostiene, y se difiere a la herramienta.
+    world.upsert(_entity("notas.txt", exists=False,
+                         last_seen=time.time() - ABSENCE_TTL_S - 10,
+                         scope=world.scope.id))
+    assert world.missing_paths(["notas.txt"]) == []
+    # Y la observación sigue consultable: caducar no es borrar.
+    assert world.known_path("notas.txt").attributes["exists"] is False
 
 
 # --------------------------------------------------------------------------- #

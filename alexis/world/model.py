@@ -57,6 +57,17 @@ IMPLICIT_SCOPE = "default"
 #: Portanto quien lo lea puede exigir re-observación en vez de confiar.
 LAST_SEEN_UNKNOWN = 0.0
 
+#: Cuánto se cree una observación de AUSENCIA (P0 §4.5, parcial).
+#:
+#: Es un plazo corto a propósito. La observación existe para no repetir un fallo que se
+#: acaba de producir; a partir de un par de minutos, lo que el usuario quiere puede haber
+#: cambiado. Ante la duda, la checker de la herramienta decide: preguntar al usuario
+#: interrumpe su autonomía, un `fs.stat` devuelve la verdad.
+#:
+#: NO caducan las presencias: una presencia vieja sólo provoca un fallo honesto y barato si
+#: el archivo ya no está. Ver `is_absence_fresh()` para el argumento completo.
+ABSENCE_TTL_S = 120.0
+
 
 @dataclass(frozen=True)
 class Scope:
@@ -308,20 +319,74 @@ class WorldModel:
         return self.query(text=objective, limit=limit, scope=scope)
 
     def known_path(self, path: str, *, scope: Scope | str | None = None) -> WorldEntity | None:
+        """La ÚLTIMA observación de esa ruta, aunque sea vieja. Lectura cruda.
+
+        No decide nada: `GoalVerifier` la usa como evidencia sin mirar `exists`. Para
+        *actuar* sobre una ausencia está `observed_absent()`, que sí exige frescura.
+        """
         if not path:
             return None
         return self.entities.get(self._key(f"{FILE}:{path}", scope))
 
-    def missing_paths(self, paths, *, scope: Scope | str | None = None) -> list[str]:
-        """Rutas que ESTE ámbito ya observó como inexistentes.
+    def is_absence_fresh(self, entity: WorldEntity, *, now: float | None = None) -> bool:
+        """¿Esta observación de ausencia sigue siendo creíble?
+
+        Una ausencia envejece. La herramienta dijo "aquí no hay nada" en el momento T; el
+        usuario puede crear el archivo un segundo después, y a partir de ese momento
+        esa afirmación es falsa. Un `exists: False` muy viejo no es información, es una suposición
+        con aspecto de evidencia.
+
+        ## Por qué sólo caducan las ausencias, y no las presencias
+
+        Una presencia vieja no hace daño por sí sola: si el archivo se borró, la lectura
+        falla y ALEXIS se entera con un error HONESTO y barato. Una ausencia vieja sí hace
+        daño: impide actuar y lanza una pregunta al usuario sobre algo que sí existe. El
+        coste de equivocarse es asimétrico, así que sólo la ausencia caduca.
+
+        ## Por qué el plazo es corto
+
+        Lo que esta comprobación evita es repetir un fallo que acabamos de ver. Eso vale
+        durante un instante, no durante una tarde. Y ante la duda se difiere a la
+        herramienta: preguntar al usuario cuando se podía actuar interrumpe su autonomía,
+        mientras que un `fs.stat` que devuelve "no existe" es un dato correcto y barato.
+
+        ## Edad desconocida
+
+        `LAST_SEEN_UNKNOWN` (0.0) cuenta como VIEJA. No es posible afirmar que algo se acaba
+        de observar si no se sabe cuándo se observó, y tratarlo como fresco sería volver a
+        convertir "no lo sé" en "lo sé".
+        """
+        if entity is None or entity.attributes.get("exists") is not False:
+            return False
+        seen = float(getattr(entity, "last_seen", LAST_SEEN_UNKNOWN) or LAST_SEEN_UNKNOWN)
+        if seen <= 0.0:
+            return False
+        return (time.time() if now is None else now) - seen <= ABSENCE_TTL_S
+
+    def observed_absent(self, path: str, *, scope: Scope | str | None = None,
+                        now: float | None = None) -> WorldEntity | None:
+        """La entidad si ACABA de observarse como ausente; `None` si no se puede afirmar.
+
+        `None` significa "el mundo no sostiene la ausencia": o nunca se observó, o se
+        observó positiva, o la observación es demasiado vieja. En los tres casos la
+        respuesta correcta es dejar que la herramienta lo compruebe, no afirmarlo.
+        """
+        entity = self.known_path(path, scope=scope)
+        if entity is None or not self.is_absence_fresh(entity, now=now):
+            return None
+        return entity
+
+    def missing_paths(self, paths, *, scope: Scope | str | None = None,
+                      now: float | None = None) -> list[str]:
+        """Rutas que ESTE ámbito acaba de observar como inexistentes.
 
         Con `scope` explícito no puede devolver una ruta que otro proyecto ya observó
-        como ausente: es la lectura que antes cruzaba proyectos.
+        como ausente: es la lectura que antes cruzaba proyectos. Y con `scope=None` no
+        devuelve una ausencia vencida, por la misma razón que `observed_absent`.
         """
         missing = []
         for path in paths or []:
-            entity = self.known_path(path, scope=scope)
-            if entity is not None and entity.attributes.get("exists") is False:
+            if self.observed_absent(path, scope=scope, now=now) is not None:
                 missing.append(path)
         return missing
 

@@ -273,18 +273,26 @@ class CognitiveRuntime:
             return []
 
     def world_missing_path(self, mission: Mission) -> tuple | None:
-        """`(path, entidad)` si el mundo YA observó que la ruta del objetivo no existe."""
+        """`(path, entidad)` si el mundo ACABA de observar que la ruta del objetivo no existe.
+
+        P0 §4.5: la ausencia tiene que seguir siendo **fresca** para bloquear. Antes bastaba
+        con que se hubiera observado alguna vez, y como §4.4 la persiste entre reinicios, un
+        `exists: False` viejo sobrevivía al arranque y hacía que ALEXIS afirmara al usuario que
+        un archivo no existía cuando acababa de crearse. Una observación vencida ya no es un
+        hecho: es una suposición con aspecto de evidencia, y ante eso se deja decidir a la
+        herramienta.
+        """
         if self.world is None:
             return None
         path = extract_workspace_path(mission.goal.objective or "")
         if not path:
             return None
         try:
-            entity = self.world.known_path(path)
+            entity = self.world.observed_absent(path)
         except Exception as exc:  # noqa: BLE001 — un world model roto no bloquea la misión
             LOGGER.warning("cognitive: el world model no pudo consultarse (%s)", exc)
             return None
-        if entity is None or entity.attributes.get("exists") is not False:
+        if entity is None:
             return None
         return path, entity
 

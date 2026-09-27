@@ -502,7 +502,9 @@ async def test_23_e2e_dos_workspaces_aislados_tras_reinicio(tmp_path, db):
     scope_b = Scope.from_workspace(ws_b)
     assert scope_a.id != scope_b.id
 
-    marca_a, marca_b = 1790416504.5493128, 1790416505.5
+    # Frescos a propósito: §4.5 hace que una ausencia vencida deje de bloquear, y
+    # este test verifica persistencia y aislamiento, no caducidad.
+    marca_a, marca_b = time.time(), time.time() + 1
     mundo = WorldModel()          # un solo modelo, dos ámbitos: la forma de §4.3
     mundo.observe_execution(_step(), _result("notas.txt", exists=True, size=15),
                             scope=scope_a)
