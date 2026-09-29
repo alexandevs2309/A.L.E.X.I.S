@@ -55,7 +55,17 @@ class ModelResponse:
     text: str
     data: dict[str, Any] | None = None
     provider: str = "unknown"
+    #: Modelo PEDIDO. Se mantiene como es para no cambiar la semántica de un campo que ya
+    #: se leía como "el slug configurado". Cuando la API devuelve otro, el modelo realmente
+    #: usado va en `resolved_model`.
     model: str = "unknown"
+    #: Modelo que la API dice haber ejecutado. Es distinto de `model` cuando hay un router
+    #: detrás: OpenRouter con `openrouter/free` pidió un slug y acabó en
+    #: `poolside/laguna-xs-2.1:free`. Sin esto, la auditoría registraba el slug pedido y
+    #: daba por hecho qué modelo respondió.
+    resolved_model: str | None = None
+    #: Proveedor final cuando la API lo declara (`raw["provider"]`); `None` si no lo dice.
+    resolved_provider: str | None = None
     outcome: ModelOutcome = ModelOutcome.REAL
     fallback_used: bool = False
     fallback_from: str | None = None
@@ -86,6 +96,8 @@ class ModelResponse:
             "text": self.text,
             "provider": self.provider,
             "model": self.model,
+            "resolved_model": self.resolved_model,
+            "resolved_provider": self.resolved_provider,
             "outcome": self.outcome.value,
             "fallback_used": self.fallback_used,
             "fallback_from": self.fallback_from,
@@ -103,6 +115,8 @@ class ModelResponse:
             "task": task.value,
             "provider": self.provider,
             "model": self.model,
+            "resolved_model": self.resolved_model,
+            "resolved_provider": self.resolved_provider,
             "outcome": self.outcome.value,
             "fallback_used": self.fallback_used,
             "fallback_from": self.fallback_from,

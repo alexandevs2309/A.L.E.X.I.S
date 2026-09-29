@@ -208,13 +208,22 @@ class HTTPChatProvider(ModelProvider):
                 latency_ms=int((time.monotonic() - started) * 1000),
             )
         text, data, tokens_in, tokens_out = self.parse_response(raw)
+        resolved_model, resolved_provider = _resolved_provenance(raw)
         if not text:
             return ModelResponse(
                 text="",
                 provider=self.id,
                 model=self.model,
+                resolved_model=resolved_model,
+                resolved_provider=resolved_provider,
                 outcome=ModelOutcome.UNAVAILABLE,
-                error="respuesta vacía del proveedor (finish sin contenido)",
+                # Los tokens SÍ se registran aunque no haya texto: se consumieron. Es la
+                # diferencia entre "el proveedor falló" y "el modelo se quedó pensando y
+                # no llegó a responder", y el segundo caso se pierde si se informa como
+                # "vacío" a secas.
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                error=_empty_reason(raw),
                 latency_ms=int((time.monotonic() - started) * 1000),
             )
         cost = self.cost_per_1k_tokens / 1000.0 * (tokens_in + tokens_out)
@@ -223,12 +232,57 @@ class HTTPChatProvider(ModelProvider):
             data=data,
             provider=self.id,
             model=self.model,
+            resolved_model=resolved_model,
+            resolved_provider=resolved_provider,
             outcome=ModelOutcome.REAL,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             cost_usd=cost,
             latency_ms=int((time.monotonic() - started) * 1000),
         )
+
+
+def _resolved_provenance(raw: dict) -> tuple[str | None, str | None]:
+    """Qué modelo ejecutó realmente la inferencia, según dice la propia respuesta.
+
+    Se lee de la raíz porque es ahí donde OpenAI-compatible lo pone. Si la API no lo
+    declara, se devuelve `None`: es preferible un hueco honesto a un valor supuesto.
+    """
+    if not isinstance(raw, dict):
+        return None, None
+    model = raw.get("model")
+    upstream = raw.get("provider")
+    return (str(model) if isinstance(model, str) and model else None,
+            str(upstream) if isinstance(upstream, str) and upstream else None)
+
+
+def _finish_reason(raw: dict) -> str | None:
+    if not isinstance(raw, dict):
+        return None
+    choices = raw.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return None
+    reason = choices[0].get("finish_reason")
+    return str(reason) if reason else None
+
+
+def _empty_reason(raw: dict) -> str:
+    """Por qué no hay texto. Distinguir TRUNCADO de VACÍO no es un detalle.
+
+    Con `finish_reason="length"` el modelo se gastó el presupuesto de tokens (típico de un
+    modelo con razonamiento) y no llegó a emitir contenido: es un límite de generación, no
+    un proveedor que devuelve basura. Decir "respuesta vacía" en los dos casos oculta el
+    diagnóstico y hace que el ajuste correcto —más Tokens— parezca un fallo del proveedor.
+    """
+    reason = _finish_reason(raw)
+    if reason == "length":
+        return (
+            "respuesta sin contenido: la generación terminó por límite de tokens "
+            "(finish_reason=length); no se emitió texto final"
+        )
+    if reason:
+        return f"respuesta sin contenido (finish_reason={reason})"
+    return "respuesta vacía del proveedor (sin finish_reason)"
 
 
 def _maybe_json(text: str) -> dict | None:
