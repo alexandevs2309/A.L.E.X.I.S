@@ -118,6 +118,11 @@ class SelfBrief:
     envelope: dict[str, Any] = field(default_factory=dict)
     context: list[str] = field(default_factory=list)
     uncertainties: list[str] = field(default_factory=list)
+    # P0 requisito 3: lo que ALEXIS SUPONE. `uncertainties` es lo que no sabe; esto es lo
+    # que da por hecho sin haberlo comprobado. Sin la distinción, el Core no puede
+    # distinguir qué parte de su contexto es sólida y cuál se sostiene en un supuesto.
+    assumptions: list[str] = field(default_factory=list)
+    hypotheses: list[str] = field(default_factory=list)
     confidence: float | None = None
     pending_approvals: list[dict[str, Any]] = field(default_factory=list)
     recent_actions: list[dict[str, Any]] = field(default_factory=list)
@@ -137,6 +142,8 @@ class SelfBrief:
             "envelope": dict(self.envelope),
             "context": list(self.context),
             "uncertainties": list(self.uncertainties),
+            "assumptions": list(self.assumptions),
+            "hypotheses": list(self.hypotheses),
             "confidence": self.confidence,
             "pending_approvals": list(self.pending_approvals),
             "recent_actions": list(self.recent_actions),
@@ -161,6 +168,8 @@ class SelfBrief:
             envelope=dict(snapshot.get("active_envelope") or {}),
             context=list(snapshot.get("active_context") or []),
             uncertainties=list(snapshot.get("uncertainties") or []),
+            assumptions=list(snapshot.get("assumptions") or []),
+            hypotheses=list(snapshot.get("hypotheses") or []),
             confidence=snapshot.get("confidence"),
             pending_approvals=list(snapshot.get("pending_approvals") or []),
             recent_actions=list(snapshot.get("recent_actions") or []),

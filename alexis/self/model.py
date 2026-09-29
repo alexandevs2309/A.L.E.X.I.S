@@ -21,18 +21,32 @@ DEFAULT_IDENTITY = {
 
 _QUESTION_ZONE = [
     (("quién soy", "que soy", "qué soy", "quien eres", "qué eres", "que eres", "what am i"), "identity"),
-    (("no puedo", "limite", "límite", "no soy capaz", "te esta prohibido"), "limits"),
+    # P0 requisito 3: las claves de antes sólo cubrían "no puedo", y la pregunta
+    # "¿qué no puedes hacer?" caía sin zona. La zona existía; el vocabulario no la
+    # alcanzaba. Se amplían las claves, no la semántica de la zona.
+    (("no puedo", "no puedes", "limite", "límite", "no soy capaz", "te esta prohibido"),
+     "limits"),
     (("haciendo", "que haces", "qué haces", "estas haciendo", "estás haciendo"), "doing"),
     (("objetivo", "hacia donde", "intentando alcanzar", "goal", "qué objetivo"), "goal"),
     (("puedo hacer", "capacidad", "qué puedes", "que puedes", "what can"), "capabilities"),
     (("autorizad", "permis", "allowed", "tengo derecho"), "permissions"),
     (("necesito", "para continuar", "me hace falta", "que me falta", "needs"), "needed"),
-    (("qué sé", "que se", "sé que", "conozco", "que se"), "knowledge"),
-    (("que no sé", "qué no sé", "no sé", "no se", "desconozco", "ignoro"), "unknown"),
+    (("qué sé", "que se", "qué sabes", "que sabes", "sé que", "sabiendo", "conozco"),
+     "knowledge"),
+    (("que no sé", "qué no sé", "no sé", "no se", "qué no sabes", "que no sabes",
+      "no sabes", "desconozco", "ignoro"), "unknown"),
+    # P0 requisito 3: "qué supone" era el único hueco de la lista del plan. Distinguir
+    # esta zona de `unknown` es lo que la hace útil: `unknown` es lo que NO sabe, esto es
+    # lo que da POR HECHO sin haberlo comprobado. Confundirlas sería justo el error que
+    # el ClaimGuard prohíbe.
+    (("qué supone", "que supone", "qué asumes", "que asumes", "supones", "suposiciones",
+      "asunciones", "asumo", "supongo", "suponiendo", "suposiciones", "assumption"),
+     "assumed"),
     (("segura", "seguro", "confianza", "confidence", "certeza"), "confidence"),
     (("ocurri", "pasó", "paso", "acaba de ocurrir", "que paso", "que pasó"), "happened"),
     (("por que tome", "por qué tomé", "porque tomé", "por qué toma", "decision", "decisión"), "decisions"),
-    (("ahora", "debería", "siguiente", "next", "que hago"), "next"),
+    (("ahora", "debería", "siguiente", "next", "que hago", "qué debo hacer",
+      "que debo hacer", "después", "a continuación"), "next"),
 ]
 
 
@@ -74,6 +88,11 @@ class SelfModel:
         self.recent_actions = []
         self.decisions = []
         self.uncertainties = []
+        # P0 requisito 3: "qué supone". Antes sólo había `uncertainties` (lo que NO sabe),
+        # así que esta pregunta del plan no tenía zona donde responder. Se guardan aparte
+        # porque no son lo mismo: ignorancia frente a posición de trabajo sin verificar.
+        self.assumptions = []
+        self.hypotheses = []
         self.confidence = None
         self.pending_approvals = []
         self.commitments = []
@@ -105,6 +124,21 @@ class SelfModel:
         self.observations_about_self = self.observations_about_self[-6:]
 
     # ------------------------------------------------------------------ #
+
+    def note_knowledge(self, knowledge) -> None:
+        """Proyecta los supuestos reales del KnowledgeState en el Self Model (P0 #3).
+
+        ASIGNA, no acumula: la zona es una proyección del estado vivo, no una lista que
+        crece. Así no puede quedar desfasada respecto a lo que el Core realmente supone, y
+        un supuesto que ya se comprobó desaparece solo en vez de quedar mintiendo.
+
+        Acepta el `KnowledgeState` o cualquier cosa con esos atributos (`getattr`), para
+        que funcione igual con el objeto en memoria que con su `to_dict()`persistido.
+        """
+        if knowledge is None:
+            return
+        self.assumptions = [str(a) for a in (getattr(knowledge, "assumptions", None) or [])][-5:]
+        self.hypotheses = [str(h) for h in (getattr(knowledge, "hypotheses", None) or [])][-5:]
 
     def update(
         self,
@@ -325,6 +359,8 @@ class SelfModel:
             "decisions": list(self.decisions),
             "observations_about_self": list(self.observations_about_self),
             "uncertainties": list(self.uncertainties),
+            "assumptions": list(self.assumptions),
+            "hypotheses": list(self.hypotheses),
             "confidence": self.confidence,
             "pending_approvals": list(self.pending_approvals),
             "active_commitments": list(self.commitments),
@@ -400,6 +436,20 @@ class SelfModel:
             if self.uncertainties:
                 return "No estoy seguro de: " + "; ".join(self.uncertainties) + "."
             return "No tengo incertidumbres explícitas registradas en el último paso."
+        if zone == "assumed":
+            # Se separa de `unknown` a propósito: aquí no esignorancia, es una posición
+            # de trabajo que todavía no ha pasado por verificación.
+            partes = []
+            if self.assumptions:
+                partes.append("Supongo: " + "; ".join(self.assumptions))
+            if self.hypotheses:
+                partes.append("Hipótesis sin comprobar: " + "; ".join(self.hypotheses))
+            if not partes:
+                return (
+                    "No estoy suponiendo nada explícito: en este punto sólo me apoyo en lo "
+                    "que he observado y verificado."
+                )
+            return ". ".join(partes) + "."
         if zone == "confidence":
             conf = self.confidence
             if conf is None:

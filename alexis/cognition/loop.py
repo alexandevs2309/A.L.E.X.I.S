@@ -353,10 +353,22 @@ class CognitiveRuntime:
     # Self Model como entrada de decisión
     # ------------------------------------------------------------------ #
 
-    def self_brief(self) -> SelfBrief | None:
-        """Brief operacional del Self Model. `None` si no hay Self Model inyectado."""
+    def self_brief(self, knowledge=None) -> SelfBrief | None:
+        """Brief operacional del Self Model. `None` si no hay Self Model inyectado.
+
+        `knowledge` es opcional y sólo sirve para refrescar la zona de supuestos del Self
+        Model (P0 #3) justo antes de decidir. Es el punto UNICO por el que se actualiza,
+        a propósito: como está en el camino de la decisión, la zona no puede quedarse
+        desfasada respecto a lo que el Core realmente supone. Sin Self Model, o con un
+        Self Model que no sepa refinarse, se sigue exactamente igual que antes.
+        """
         if self.self_model is None:
             return None
+        if knowledge is not None:
+            try:
+                self.self_model.note_knowledge(knowledge)
+            except Exception as exc:  # noqa: BLE001 — un Self Model tonto no bloquea la decisión
+                LOGGER.warning("cognitive: Self Model no pudo proyectar el conocimiento (%s)", exc)
         snapshot = getattr(self.self_model, "snapshot", None)
         if snapshot is None:
             return None
@@ -794,7 +806,7 @@ class CognitiveRuntime:
             mission,
             knowledge,
             conversation=turns,
-            self_brief=self.self_brief(),
+            self_brief=self.self_brief(knowledge),
             world=self.world,
             memory_context=memory_context,
             policy=self.policy,

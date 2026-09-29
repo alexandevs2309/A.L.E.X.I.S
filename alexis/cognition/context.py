@@ -228,6 +228,12 @@ def assemble(
         missing = list(getattr(self_brief, "missing_capabilities", []) or [])
         brief_lines.append(f"puedo: {', '.join(available) or '(nada)'}")
         brief_lines.append(f"me falta: {', '.join(missing) or '(nada de lo que pide)'}")
+        # P0 requisito 3: la zona de supuestos del Self Model entra por SU propio canal.
+        # No se crea una fuente nueva —el Context ya tiene diez y su contrato no cambia—,
+        # pero el Self Model no participa en la decisión si sólo declara lo que puede hacer.
+        assumptions = list(getattr(self_brief, "assumptions", []) or [])
+        if assumptions:
+            brief_lines.append(f"supongo (sin verificar): {'; '.join(assumptions)}")
     sources["self_model"] = Source(name="self_model", lines=brief_lines)
 
     # 3. World Model — lo observado, nunca lo supuesto.
