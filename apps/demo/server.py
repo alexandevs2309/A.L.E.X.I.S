@@ -30,6 +30,7 @@ from alexis.experience.presenter import present
 from alexis.learning.system import ExperienceLearner
 from alexis.memory.provider import InProcessMemoryProvider, PostgresMemoryProvider
 from alexis.memory.store import InMemoryMemory
+from apps.demo.runtime_flags import resolve_cognitive_runtime
 from alexis.models.config import ModelConfig
 from alexis.models.degraded import EchoModel
 from alexis.models.router import ModelRouter
@@ -418,12 +419,17 @@ CONVERSATION = ConversationSession(
     resume=lambda mission, answer: RUNTIME.resume_from_clarification(mission, answer),
 )
 
-# --- F2.1/Fase 1: Cognitive Runtime (ALEXIS_COGNITIVE=1) --------------------
-# Con el flag apagado (por defecto) el runtime legacy recorre el plan una vez, igual
-# que hasta ahora. Con el flag activo, `AlexisRuntime.run_mission` pide una decisión
-# antes de cada acción y vuelve a decidir después de observar. Mismo executor, misma
-# policy, mismo verifier: lo que cambia es quién decide el siguiente paso.
-if os.environ.get("ALEXIS_COGNITIVE", "0") == "1":
+# --- F2.1/Fase 1: Cognitive Runtime (por defecto) -----------------------------
+# El CognitiveRuntime es el camino PRINCIPAL: sin configurar nada, ALEXIS decide antes
+# de cada acción y vuelve a decidir después de observar. El recorrido legacy del plan —
+#que lo hace una vez y sigue— se conserva, pero hay que pedirlo explícitamente con
+# `ALEXIS_COGNITIVE=0`. Mismo executor, misma policy, mismo verifier en los dos caminos:
+# lo único que cambia es quién decide el siguiente paso.
+#
+# La decisión de unset/0/1 vive en `runtime_flags.resolve_cognitive_runtime()` y no aquí,
+# para que sea testeable: `server.py` levanta la app entera al importarse.
+USAR_COGNITIVE, _COGNITIVE_MOTIVO = resolve_cognitive_runtime()
+if USAR_COGNITIVE:
 
     async def _cognitive_execute(mission, step, tool_name=None):
         if RUNNER is not None:
@@ -469,9 +475,10 @@ if os.environ.get("ALEXIS_COGNITIVE", "0") == "1":
         decision_max_tokens=MODEL_CONFIG.max_tokens,
         decision_deadline_ms=MODEL_CONFIG.deadline_ms,
     )
-    print("[cognitive] CognitiveRuntime activo (ALEXIS_COGNITIVE=1): decide→policy→execute→observe→evaluate")
+    print(f"[cognitive] CognitiveRuntime activo ({_COGNITIVE_MOTIVO}): "
+          "decide→policy→execute→observe→evaluate")
 else:
-    print("[cognitive] runtime legacy (ALEXIS_COGNITIVE != 1): el plan se recorre una vez")
+    print(f"[cognitive] runtime legacy ({_COGNITIVE_MOTIVO}): el plan se recorre una vez")
 
 # --- Percepción: la palmada es solo una FUENTE de eventos. -------------------
 # El cereor es ALEXIS: el evento se convierte en una misión de activación que
