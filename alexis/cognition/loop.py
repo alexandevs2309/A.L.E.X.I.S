@@ -196,6 +196,37 @@ def diagnose_failure(result: ExecutionResult) -> tuple[str, str, list[str]]:
     )
 
 
+def _model_provenance(response) -> dict:
+    """Todo lo que la respuesta del modelo dice de si misma, para la decision.
+
+    Antes aqui solo llegaban `provider`, `model` y `latency_ms`, y el resto se perdia al
+    cruzar la frontera del Core. No era un detalle: cuando hay un router de modelos el slug
+    pedido y el modelo realmente ejecutado son distintos, y sin `resolved_model` la
+    auditoria de una decision daba por hecho que habia respondido. La Fase 2 anadio esos
+    campos a `ModelResponse`; sin este volcado, seguian sin llegar.
+
+    Aditivo y a prueba de proveedores: se lee por `getattr` de un contrato, asi que el
+    Core no conoce ningun provider concreto y un `ModelResponse` antiguo o de prueba no
+    rompe nada. Lo que la API no declare queda en `None`, que es un hecho distinto de
+    "no lo se todavia".
+    """
+    return {
+        "provider": getattr(response, "provider", None),
+        "model": getattr(response, "model", None),
+        "resolved_model": getattr(response, "resolved_model", None),
+        "resolved_provider": getattr(response, "resolved_provider", None),
+        "latency_ms": getattr(response, "latency_ms", None),
+        "tokens_in": getattr(response, "tokens_in", None),
+        "tokens_out": getattr(response, "tokens_out", None),
+        "cost_usd": getattr(response, "cost_usd", None),
+        "outcome": getattr(getattr(response, "outcome", None), "value", None),
+        "fallback_used": getattr(response, "fallback_used", None),
+        "fallback_from": getattr(response, "fallback_from", None),
+        "fallback_error": getattr(response, "fallback_error", None),
+        "chain": list(getattr(response, "chain", None) or []),
+    }
+
+
 class CognitiveRuntime:
     """Bucle cognitivo mínimo: una iteración por llamada. El runtime decide cuándo parar."""
 
@@ -542,10 +573,39 @@ class CognitiveRuntime:
         entities = self.world_hint(mission, knowledge)
         if entities:
             knowledge.world = [entity.to_line() for entity in entities]
-        if len(options) == 1 or self.model_router is None:
+        # B3. La condición es SEMÁNTICA, no un recuento. Antes era
+        # `len(options) == 1 or self.model_router is None`, y eso mezclaba "no hay
+        # alternativa" con "no hay nada que decidir": una misión bloqueada, verificada o
+        # sin iteraciones produce UNA sola opción, y en ninguno de esos casos el modelo
+        # puede cambiar el desenlace. Preguntarle en esos estados no ahorraba una llamada,
+        # fabricaba una respuesta que después había que marcar como `degraded` para no
+        # presentarla como razonamiento.
+        #
+        # Ahora se pregunta a la decisión si exige cognición. Un paso de ejecución (o un
+        # replan) SÍ la exige aunque sea el único: el Core tiene una alternativa y el
+        # modelo puede juzgar si de verdad sirve al objetivo. Eso es lo que hace posible un
+        # E2E con un plan de un solo paso sin obligar a nadie a preguntar por gusto.
+        if not options:
+            # defensivo: `options()` no debería devolver vacío, pero indexar [0] aquí
+            # convertiría un futuro caso mal cubierto en un IndexError en producción.
+            return Decision(
+                action=NextAction.ABORT,
+                rationale="no hay ninguna acción disponible; el runtime no sabe continuar",
+                proposed_by="deterministic",
+            )
+        if self.model_router is None:
             chosen = options[0]
-            if self.model_router is None:
-                chosen.model_meta = {"fallback_reason": "sin ModelRouter: decisión determinista"}
+            chosen.model_meta = {"fallback_reason": "sin ModelRouter: decisión determinista"}
+            return chosen
+        if len(options) == 1 and not options[0].decision_required:
+            chosen = options[0]
+            chosen.model_meta = {
+                **chosen.model_meta,
+                "decision_reason": (
+                    f"el runtime ya decidió '{chosen.action.value}'; no hay decisión que "
+                    "el modelo pueda alterar"
+                ),
+            }
             return chosen
         return await self._ask_model(mission, knowledge, options, context)
 
@@ -866,11 +926,7 @@ class CognitiveRuntime:
             LOGGER.warning("cognitive: el modelo no pudo decidir (%s); elijo determinista", exc)
             return self._degraded(options[0], "none", f"model error: {exc}")
 
-        meta = {
-            "provider": getattr(response, "provider", None),
-            "model": getattr(response, "model", None),
-            "latency_ms": getattr(response, "latency_ms", None),
-        }
+        meta = _model_provenance(response)
         if response.outcome is not ModelOutcome.REAL:
             reason = (
                 "respuesta DEGRADED del router"

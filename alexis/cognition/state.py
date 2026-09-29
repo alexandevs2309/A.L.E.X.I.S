@@ -44,6 +44,25 @@ class NextAction(str, Enum):
     def is_terminal(self) -> bool:
         return self in (NextAction.FINISH, NextAction.ABORT, NextAction.ASK_USER, NextAction.WAIT)
 
+    @property
+    def requires_cognition(self) -> bool:
+        """¿Esta acción exige que un modelo opine, o la decidió ya el runtime?
+
+        No es lo mismo que `is_execution`, y esa diferencia es la que hace útil la
+        pregunta. Dar al modelo la decisión de *elegir entre alternativas* es su trabajo;
+        darle la de *anunciar un resultado del protocolo* no lo es. Si la misión está
+        verificada, lo correcto es terminar; si se agotaron las iteraciones, abandonar; si
+        no hay capacidad, preguntar. En esos casos el modelo no puede cambiar nada, y
+        consultarlo produce ruido que después hay que marcar como `degraded` para no
+        fingir que hubo razonamiento.
+
+        Sólo `EXECUTE_TOOL`, `RESEARCH` y `REPLAN` son decisiones genuinas: son las
+        acciones donde el Core tiene una alternativa real y el modelo puede ayudar a
+        elegir —o a rechazar— si de verdad sirve al objetivo. `VERIFY` tampoco lo es: la
+        verificación es obligatoria e independiente del modelo por construcción (§5.3).
+        """
+        return self in (NextAction.EXECUTE_TOOL, NextAction.RESEARCH, NextAction.REPLAN)
+
 
 class Verdict(str, Enum):
     """Veredicto de evaluar UNA ACCIÓN. Nunca del objetivo (P0 §5.2).
@@ -358,6 +377,18 @@ class Decision:
     cognition_outcome: str = "unavailable"
     model_meta: dict[str, Any] = field(default_factory=dict)
     rejected: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def decision_required(self) -> bool:
+        """¿Esta decisión DEBE pasar por el modelo, o el runtime ya la ha cerrado?
+
+        Es la semántica que `decide_next_action()` necesita, expresada en el dominio en
+        vez de deducida contando cuántas opciones hay. Contar opciones confundía dos
+        cosas: "no hay alternativa" con "no hay nada que decidir". Preguntar al modelo
+        cuando el runtime ya sabe la respuesta no es un ahorro: es una degradación
+        disfrazada de razonamiento.
+        """
+        return self.action.requires_cognition
 
     def to_dict(self) -> dict[str, Any]:
         return {
