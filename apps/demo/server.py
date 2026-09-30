@@ -18,6 +18,7 @@ from alexis.autonomy.scheduler import Scheduler
 from alexis.autonomy.task_runner import TaskRunner
 from alexis.capabilities import build_catalog
 from alexis.cognition.conversation import ConversationSession
+from alexis.cognition.goal_verification import GoalVerifier
 from alexis.cognition.intent_classifier import IntentClassifier
 from alexis.cognition.loop import CognitiveRuntime
 from alexis.cognition.planner_model import ModelPlanner, PlanValidator
@@ -471,6 +472,8 @@ if USAR_COGNITIVE:
         memory=memory_provider,
         self_model=SELF,
         world=WORLD,
+        catalog=CAPABILITIES,
+        goal_verifier=GoalVerifier(world=WORLD),
         plan_validator=RUNTIME.plan_validator,
         decision_max_tokens=MODEL_CONFIG.max_tokens,
         decision_deadline_ms=MODEL_CONFIG.deadline_ms,
