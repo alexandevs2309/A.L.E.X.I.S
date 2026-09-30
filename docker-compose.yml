@@ -7,18 +7,35 @@
 # Setup: cp .env.example .env  y define ambos valores. Ver docs/DEVELOPMENT.md §7.
 
 services:
-  alexis-api:
+  # CORE-03: el runtime OFICIAL. Es el único servicio que ejecuta CognitiveRuntime +
+  # IntentClassifier + catálogo + Policy + Gate + SandboxExecutor + GoalVerifier, y el
+  # único que persiste en PostgreSQL.
+  alexis:
     build: .
+    command: ["python3", "-m", "apps.demo.server"]
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8100:8100"
     environment:
-      # Fuera de development, la API exige token (ver apps/api/main.py).
-      ALEXIS_ENV: ${ALEXIS_ENV:-development}
+      ALEXIS_DEMO_PORT: "8100"
       ALEXIS_DATABASE_URL: postgresql://alexis:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio (definelo en .env)}@postgres:5432/alexis
-      ALEXIS_API_TOKEN: ${ALEXIS_API_TOKEN:?ALEXIS_API_TOKEN es obligatorio (definelo en .env)}
     depends_on:
       postgres:
         condition: service_healthy
+
+  # Fachada HTTP del MISMO runtime oficial (token + OpenAPI). No es un segundo ALEXIS:
+  # delega en la aplicación oficial. Descomentarlo si se quiere servir bajo uvicorn.
+  # alexis-api:
+  #   build: .
+  #   command: ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  #   ports:
+  #     - "127.0.0.1:8000:8000"
+  #   environment:
+  #     ALEXIS_ENV: ${ALEXIS_ENV:-development}
+  #     ALEXIS_DATABASE_URL: postgresql://alexis:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio}@postgres:5432/alexis
+  #     ALEXIS_API_TOKEN: ${ALEXIS_API_TOKEN:?ALEXIS_API_TOKEN es obligatorio (definelo en .env)}
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
 
   postgres:
     image: pgvector/pgvector:pg16

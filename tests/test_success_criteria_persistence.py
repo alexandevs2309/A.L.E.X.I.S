@@ -158,13 +158,13 @@ def test_una_mision_vieja_sin_criterios_aun_carga():
 def test_el_servidor_de_demo_pasa_los_criterios_del_intent():
     """Guarda de cableado del call site de producción.
 
-    `apps/demo/server.py` compone toda la app al importarse (levanta el puerto, Ollama y
-    PostgreSQL), así que no se puede importar en un test. Se verifica estáticamente que
-    `_create_mission_from_intent` sigue pasando los criterios: si alguien revierte ese
-    argumento, el GAP #11 vuelve a estar BROKEN aunque MissionEngine siga bien.
+    CORE-03 movió la construcción del runtime a `apps/demo/app.py` (el módulo oficial,
+    importable); `server.py` quedó como lanzador. La guarda sigue donde ahora vive el
+    call site: si alguien revierte ese argumento, el GAP #11 vuelve a estar BROKEN
+    aunque MissionEngine siga bien.
     """
-    source = (REPO_ROOT / "apps" / "demo" / "server.py").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "apps" / "demo" / "app.py").read_text(encoding="utf-8")
     start = source.index("def _create_mission_from_intent(")
-    body = source[start : source.index("\ndef ", start)]
+    body = source[start : source.index("\n    def ", start)]
 
     assert "success_criteria=intent.success_criteria" in body

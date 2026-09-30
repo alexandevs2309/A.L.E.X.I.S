@@ -113,19 +113,43 @@ def _mision(utterance, criteria):
 
 
 def test_la_instancia_productiva_inyecta_goalverifier_y_catalog():
-    """Guarda estática del wiring de producción (server.py no es importable).
+    """Guarda estática del wiring de producción.
+
+    CORE-03 movió la construcción del runtime a `apps/demo/app.py`, que es el módulo
+    oficial e importable; `server.py` quedó como lanzador. La guarda se mueve con ella:
+    lo que se comprueba es el MISMO invariante —el runtime oficial inyecta
+    `GoalVerifier` y el catálogo—, sólo que leído donde ahora vive el cableado.
 
     Si alguien revierte el cableado de CORE-01, este test lo detecta aunque la suite
     ya no pueda importar el módulo que compone la app entera.
     """
-    fuente = (PROJECT_ROOT / "apps" / "demo" / "server.py").read_text(encoding="utf-8")
+    fuente = (PROJECT_ROOT / "apps" / "demo" / "app.py").read_text(encoding="utf-8")
 
     assert "from alexis.cognition.goal_verification import GoalVerifier" in fuente
 
-    start = fuente.index("RUNTIME.cognitive = CognitiveRuntime(")
-    bloque = fuente[start : fuente.index(")", start) + 1]
+    bloque = _bloque_de_llamada(fuente, "RUNTIME.cognitive = CognitiveRuntime(")
     assert "goal_verifier=GoalVerifier(world=WORLD)" in bloque
     assert "catalog=CAPABILITIES" in bloque
+
+
+def _bloque_de_llamada(fuente: str, cabecera: str) -> str:
+    """El texto de una llamada, hasta su paréntesis de cierre REAL.
+
+    Cortar por el primer `)` no vale: `memory=(PostgresMemoryProvider(...) if ...)`
+    tiene paréntesis anidados y truncaría el bloque antes de tiempo, dejando pasar
+    un cableado que ya no inyecta el `GoalVerifier`.
+    """
+    inicio = fuente.index(cabecera)
+    i, depth = inicio, 0
+    while i < len(fuente):
+        if fuente[i] == "(":
+            depth += 1
+        elif fuente[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return fuente[inicio : i + 1]
+        i += 1
+    raise AssertionError(f"llamada sin cerrar: {cabecera}")
 
 
 @pytest.mark.asyncio

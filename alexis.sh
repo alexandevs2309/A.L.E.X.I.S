@@ -42,7 +42,9 @@ up() {
   echo "✓ PostgreSQL ($PG)"
   docker start "$DEMO" >/dev/null
   echo "✓ Demo ($DEMO)"
-  echo "  ALEXIS en: $URL   (/   /classic   /avatar   /state   /missions)"
+  echo "  ALEXIS en: $URL"
+  echo "  oficial:   /health /ui /chat /missions /stream /state /self /capabilities"
+  echo "  demo:      / /classic /avatar /face /voice-mode /clap"
   return 0
 }
 

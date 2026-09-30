@@ -45,18 +45,30 @@ This is an architectural and executable foundation. Provider integrations, persi
 
 ## Running
 
+El **runtime oficial de ALEXIS es `apps/demo`**. Es el único que ejecuta
+`CognitiveRuntime` + `IntentClassifier` + catálogo de capacidades + `PolicyEngine` +
+`AutonomyGate` + `SandboxExecutor` + `GoalVerifier`, y el único que persiste en
+PostgreSQL. No hay un segundo runtime: `apps/api` es una fachada HTTP del mismo.
+
 ```bash
 pip install -e .
-uvicorn apps.api.main:app --reload     # o: make run
+python3 -m apps.demo.server            # o: make run     → http://127.0.0.1:8100
 ```
 
-API: `GET /health`, `GET /ui` (interfaz en vivo), `POST /missions`, `GET /missions[/{id}]`, `POST /missions/{id}/run`, `POST /missions/{id}/approve`, `GET /stream` (Server-Sent Events del runtime real).
+Superficie oficial: `GET /health`, `GET /ui`, `POST /chat`, `GET|POST /missions`,
+`POST /missions/{id}/approve`, `POST /missions/{id}/clarify`, `POST /missions/{id}/deny`,
+`GET /stream` (SSE del `EventBus` real), `GET /state`, `GET /self`, `GET /capabilities`.
 
-Alternativa sin dependencias (solo stdlib):
+Opcional: la fachada FastAPI, que **delega en el mismo runtime oficial** y exige
+`X-ALEXIS-Token` fuera de development:
 
 ```bash
-python3 -m apps.demo.server            # http://127.0.0.1:8100
+uvicorn apps.api.main:app --reload     # o: make run-api
 ```
+
+`ALEXIS_COGNITIVE` ya no elige entre dos recorridos: el `CognitiveRuntime` es obligatorio.
+Ponerla a `0` **no** arranca un modo alternativo —aborta el arranque, porque un runtime
+sin `GoalVerifier` no puede cerrar ninguna misión (ver `apps/demo/runtime_flags.py`).
 
 ## Documentation map
 

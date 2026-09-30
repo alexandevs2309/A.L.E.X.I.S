@@ -1,8 +1,13 @@
 PYTHON ?= python3
 VENV_PYTHON ?= .venv/bin/python
 
+# CORE-03: el runtime oficial es `apps/demo`. `apps/api` es una fachada del mismo
+# runtime, no un segundo ALEXIS: por eso tiene su propio target.
 run:
-	uvicorn apps.api.main:app --reload --host 127.0.0.1 --port 8000
+	$(PYTHON) -m apps.demo.server
+
+run-api:
+	uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
 
 test:
 	pytest -q
