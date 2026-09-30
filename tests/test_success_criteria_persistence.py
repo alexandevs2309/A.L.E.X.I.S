@@ -61,7 +61,13 @@ def _envelope(objective: str) -> MissionEnvelope:
 
 @pytest.mark.asyncio
 async def test_los_criterios_del_intent_llegan_al_goal():
-    """Intent → Mission → Goal: la cadena real, sin atajos."""
+    """Intent → Mission → Goal: la cadena real, sin atajos.
+
+    CORE-02: lo que el modelo emite en texto libre llega al Goal ya canónico
+    (el clasificador normaliza antes de crear la misión). El invariante P0 §5.1 —los
+    criterios no se pierden al crear la misión— sigue siendo el que se prueba aquí; lo
+    que llega es su versión verificable.
+    """
     intent = await IntentClassifier(_ModelWithCriteria()).classify(
         "investiga y corrige el fallo de normalización de orden en utils.py"
     )
@@ -74,10 +80,12 @@ async def test_los_criterios_del_intent_llegan_al_goal():
         success_criteria=intent.success_criteria,
     )
 
+    # P0 §5.1: lo que produce el Intent llega al Goal sin perder nada.
     assert mission.goal.success_criteria == intent.success_criteria
+    # CORE-02: y llega en el vocabulario que el GoalVerifier sabe comprobar.
     assert mission.goal.success_criteria == [
-        "Los tests del proyecto pasan",
-        "El cambio está aplicado en utils.py",
+        "tests_passing:suite",
+        "file_exists:utils.py",
     ]
 
 

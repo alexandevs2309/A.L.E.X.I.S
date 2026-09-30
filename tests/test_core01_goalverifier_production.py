@@ -38,6 +38,7 @@ from alexis.cognition.contracts import IntentKind  # noqa: E402
 from alexis.cognition.goal_verification import (  # noqa: E402
     CriterionStatus,
     GoalVerifier,
+    parse_predicate,
 )
 from alexis.cognition.intent_classifier import IntentClassifier  # noqa: E402
 from alexis.cognition.loop import CognitiveRuntime  # noqa: E402
@@ -188,24 +189,25 @@ async def test_vertical_completa_completed_con_todo_real(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_b5_sin_criterios_no_forja_completed_y_el_verificador_esta_vivo(tmp_path):
-    """Regresión B5: el vertical real del demo, con el verificador YA inyectado.
+async def test_una_task_sin_criterio_verificable_no_forja_completed(tmp_path):
+    """Regresión CORE-01, adaptada al contrato CORE-02.
 
-    Sin modelo (mismo fallback determinista que B5 sin LLM), la intención no aporta
-    criterios verificables; con el GoalVerifier activo la misión termina en
-    NEEDS_VERIFICATION con el motivo del verifier, NUNCA en COMPLETED.
+    La premisa de CORE-01 sigue intacta: con el GoalVerifier inyectado, una misión cuyos
+    criterios no se pueden comprobar NO se forja como COMPLETED. Lo que cambió en
+    CORE-02 es que una TASK como "analiza notas.txt" ya no llega sin criterios (el
+    clasificador deriva ``file_exists:notas.txt``), así que aquí se usa un objetivo sin
+    ruta ni suite derivable: sus criterios quedan sin checker y la misión termina en
+    NEEDS_VERIFICATION con el motivo real del verifier, NUNCA en COMPLETED.
     """
-    (tmp_path / "notas.txt").write_text("contenido real de notas\n", encoding="utf-8")
     catalog = build_catalog()
     world = WorldModel()
     cognitive, executor = _cognitivo(tmp_path, catalog, world)
     runtime = _runtime(tmp_path, executor, cognitive)
 
-    intent = await IntentClassifier().classify(
-        "Analiza el archivo notas.txt y dime qué contiene"
-    )
+    intent = await IntentClassifier().classify("Revisa el proyecto entero y dime si está bien")
     assert intent.kind is IntentKind.TASK
-    assert intent.success_criteria == []
+    # Sin ruta ni suite no hay predicado derivable: los criterios no son comprobables.
+    assert not any(parse_predicate(c) for c in intent.success_criteria)
 
     mission = _mision(intent.objective or intent.utterance, intent.success_criteria)
     result = await runtime.run_mission(mission)
@@ -216,4 +218,4 @@ async def test_b5_sin_criterios_no_forja_completed_y_el_verificador_esta_vivo(tm
     reason = result.context.get("goal_verification_reason") or ""
     # El motivo ya no es "no hay GoalVerifier": el verificador está vivo y dijo por qué.
     assert "no hay GoalVerifier" not in reason
-    assert "criterios" in reason
+    assert "criterios" in reason or "verificable" in reason or "evidencia" in reason

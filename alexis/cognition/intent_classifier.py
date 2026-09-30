@@ -29,6 +29,7 @@ from alexis.cognition.contracts import (
     IntentKind,
     SelfBrief,
 )
+from alexis.cognition.criteria import normalize_criteria
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
 
 LOGGER = logging.getLogger("alexis.cognition.intent")
@@ -52,6 +53,14 @@ _SYSTEM_PROMPT = (
     "obligatorio. 'cancela eso' es command; 'cancela el informe del trimestre' es task. "
     "kind=unknown: el turno no se puede clasificar; entonces needs_clarification es true. "
     "Solo task crea mission. "
+    "success_criteria: solo para kind=task, y en el vocabulario que ALEXIS sabe comprobar, "
+    "con el formato predicado:argumento y el predicado pegado a la ruta, sin texto libre: "
+    "file_exists:RUTA (el archivo existe), file_missing:RUTA (el archivo no debe existir), "
+    "file_size_at_least:RUTA:BYTES (pesa al menos N bytes), tests_passing:suite (la suite pasa), "
+    "tests_failing:suite (la suite falla). Ejemplo correcto: \"file_exists:notas.txt\". "
+    "Si la tarea no admite ninguno de esos predicados, deja el array vacio: es honesto, "
+    "mientras que un criterio de texto libre no se puede comprobar y la mission no podra "
+    "darse por cumplida. "
     "requested_capabilities: solo ids de la lista dada, es una sugerencia y NO un "
     "permiso; nunca inventes ids. Si no hay lista, deja el array vacio."
 )
@@ -61,8 +70,11 @@ _FEWSHOT = [
     ("¿Qué puedes hacer?", '{"kind":"capability_query","objective":null,"target":null,"success_criteria":[],"requested_capabilities":[],"side_effects_intent":"unknown","ambiguity":null,"needs_clarification":false,"confidence":0.9}'),
     # La distinción que más se confunde: control conversacional frente a trabajo real.
     ("cancela eso", '{"kind":"command","objective":null,"target":null,"success_criteria":[],"requested_capabilities":[],"side_effects_intent":"unknown","ambiguity":null,"needs_clarification":false,"confidence":0.9}'),
-    ("borra el informe del trimestre", '{"kind":"task","objective":"Borrar el informe del trimestre","target":null,"success_criteria":["El informe ya no existe"],"requested_capabilities":["fs.remove"],"side_effects_intent":"delete","ambiguity":null,"needs_clarification":false,"confidence":0.85}'),
-    ("Revisa este proyecto y dime qué problemas importantes encuentras.", '{"kind":"task","objective":"Revisar el proyecto e informar de los problemas importantes","target":null,"success_criteria":["Identificar problemas importantes con evidencia"],"requested_capabilities":["fs.read","fs.stat"],"side_effects_intent":"read","ambiguity":null,"needs_clarification":false,"confidence":0.85}'),
+    ("borra el informe del trimestre", '{"kind":"task","objective":"Borrar el informe del trimestre","target":"informe del trimestre","success_criteria":["file_missing:informe.txt"],"requested_capabilities":["fs.remove"],"side_effects_intent":"delete","ambiguity":null,"needs_clarification":false,"confidence":0.85}'),
+    ("Revisa este proyecto y dime qué problemas importantes encuentras.", '{"kind":"task","objective":"Revisar el proyecto e informar de los problemas importantes","target":null,"success_criteria":["tests_passing:suite"],"requested_capabilities":["fs.read","fs.stat"],"side_effects_intent":"read","ambiguity":null,"needs_clarification":false,"confidence":0.85}'),
+    # B5: leer un archivo del workspace. El criterio es la existencia observada por una
+    # herramienta, no "he entendido el contenido": el vocabulario no llega más lejos.
+    ("Analiza el archivo notas.txt y dime qué contiene", '{"kind":"task","objective":"Analizar el archivo notas.txt y explicar su contenido","target":"notas.txt","success_criteria":["file_exists:notas.txt"],"requested_capabilities":["fs.read"],"side_effects_intent":"read","ambiguity":null,"needs_clarification":false,"confidence":0.85}'),
 ]
 
 #: Palabras que delatan una petición de acción (fallback determinista).
@@ -414,6 +426,12 @@ class IntentClassifier:
       clasificó.
     - `source == "deterministic"` y `cognition_outcome == "degraded"` → no hubo
       razonamiento real (o su salida no validó) y se usó el clasificador de palabras.
+
+    CORE-02: este punto de salida también es el que aplica el contrato de
+    `success_criteria` (`criteria.normalize_criteria`). El clasificador decide QUÉ pide
+    el usuario; el contrato decide cómo se escribe eso de forma que el `GoalVerifier`
+    pueda comprobarlo. Sin él, una TASK podía llegar a la misión con criterios vacíos o
+    en lenguaje libre y el objetivo no se cerraba nunca.
     """
 
     def __init__(self, router=None, *, rule_based: RuleBasedIntentClassifier | None = None,
@@ -425,6 +443,40 @@ class IntentClassifier:
 
     async def classify(self, utterance: str, brief: SelfBrief | None = None,
                        *, pending_clarification: bool = False) -> Intent:
+        """Punto único de salida de una intención: aquí se cierra el contrato CORE-02.
+
+        La clasificación (modelo primero, reglas como contingencia) ocurre en
+        `_classify`. Este envoltorio es el único sitio donde se normalizan los
+        criterios de éxito, y por eso los cubre TODOS los caminos: el del modelo, el
+        fallback determinista y las correcciones de reglas. Así ninguna TASK llega a
+        la misión con criterios que el `GoalVerifier` no sepa leer, sin tocar el
+        verificador.
+        """
+        intent = await self._classify(utterance, brief, pending_clarification=pending_clarification)
+        return self._with_canonical_criteria(intent)
+
+    def _with_canonical_criteria(self, intent: Intent) -> Intent:
+        """CORE-02: los `success_criteria` de una TASK salen canónicos y trazados.
+
+        Sólo las TASK llevan criterios: una pregunta o un comando de control no abre
+        misión, así que no hay nada que verificar y no hay contrato que cumplir. Los
+        criterios que no se pueden canonizar NO se descartan: se conservan y quedan
+        contados como `unverifiable` en `model_meta["criteria_status"]`, para que la
+        traza diga por qué el objetivo no cerró en vez de perder el rastro.
+        """
+        if not intent.is_task:
+            return intent
+        criteria, status = normalize_criteria(
+            intent.utterance or "",
+            intent.objective or intent.utterance or "",
+            intent.success_criteria,
+        )
+        intent.success_criteria = criteria
+        intent.model_meta = {**(intent.model_meta or {}), "criteria_status": status}
+        return intent
+
+    async def _classify(self, utterance: str, brief: SelfBrief | None = None,
+                        *, pending_clarification: bool = False) -> Intent:
         text = (utterance or "").strip()
         if pending_clarification and text:
             # Hay una pregunta abierta: este turno la responde. Ni el modelo ni las reglas
