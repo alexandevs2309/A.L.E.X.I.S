@@ -30,6 +30,26 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS ix_audit_mission ON audit_log(mission_id, created_at);
 
+-- CORE-07 — Estado APRENDIDO del Self Model (lo único que no se puede recalcular).
+-- Se guarda una fila por tipo de registro con su contenido y su provenance. NO se
+-- guardan `current_goal`, `decisions`, `task_results`, `confidence`, `permissions` ni
+-- `current_policy`: eso es una proyección del objeto misión en vivo, que ya vive en
+-- `missions`. Copiarlo aquí sería una segunda memoria que puede contradecir a la real.
+--
+-- `mission_id` es provenance OPCIONAL y NULLABLE: una lección pre-misión (o de origen
+-- desconocido) es legítima sin misión. Y NO es identidad: las lecciones son conocimiento
+-- global del Self Model, no están particionadas por misión.
+CREATE TABLE IF NOT EXISTS self_learnings (
+    id BIGSERIAL PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('lesson', 'observation', 'reflection')),
+    text TEXT NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    mission_id TEXT REFERENCES missions(id) ON DELETE SET NULL,
+    at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_self_learnings_kind ON self_learnings(kind, at DESC);
+CREATE INDEX IF NOT EXISTS ix_self_learnings_mission ON self_learnings(mission_id, at DESC);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,

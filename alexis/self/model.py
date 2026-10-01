@@ -140,6 +140,28 @@ class SelfModel:
         self.assumptions = [str(a) for a in (getattr(knowledge, "assumptions", None) or [])][-5:]
         self.hypotheses = [str(h) for h in (getattr(knowledge, "hypotheses", None) or [])][-5:]
 
+    def restore(self, learned: dict | None) -> "SelfModel":
+        """Rehidrata el estado APRENDIDO desde la fuente durable (CORE-07).
+
+        `learned` es lo que devuelve `SelfModelPersistence.load()`. Sólo se restauran
+        las tres zonas que son aprendizaje acumulado —lecciones, auto-observaciones y
+        reflexiones—; NO se toca nada derivado (`current_goal`, `decisions`,
+        `task_results`, `confidence`, `permissions`…), porque eso se recalcula desde la
+        misión real, que es la autoridad. Restaurar una proyección sería una segunda
+        memoria capaz de contradecir a la real.
+
+        Es idempotente y no inventa: si no hay nada guardado, el modelo conserva su
+        estado inicial legítimo.
+        """
+        if not learned:
+            return self
+        self.lessons_learned = list(learned.get("lessons") or [])
+        self.observations_about_self = list(learned.get("observations") or [])
+        self.reflections = list(learned.get("reflections") or [])
+        return self
+
+    # ------------------------------------------------------------------ #
+
     def update(
         self,
         mission,
@@ -159,6 +181,12 @@ class SelfModel:
             self.available = list(available)
         if mission is None:
             self.current_state = derive_presence(None, **self.transient)
+            # CORE-07: sin misión no hay estado de misión que derivar, pero lo APRENDIDO
+            # sigue siendo válido y no depende de ninguna. Antes este `return` temprano
+            # descartaba las lecciones, y por eso el Self Model no mostraba nada
+            # aprendido aunque se le entregaran: se perdían en silencio.
+            if lessons:
+                self.lessons_learned = list(lessons)
             return
 
         self.current_goal = mission.goal.objective

@@ -659,9 +659,15 @@ def build_official_runtime(
     )
 
 
-def _self_aux_factory(RUNTIME, TOOLS, RUNNING, STATE, SELF, enabled):
-    """Vista auxiliar del Self Model: herramientas, compromisos y estado real."""
+def _self_aux_factory(RUNTIME, TOOLS, RUNNING, STATE, SELF, enabled, self_sync=None):
+    """Vista auxiliar del Self Model: herramientas, compromisos y estado real.
 
+    CORE-07: las lecciones se leen de `self_sync.lessons`, que es quien las autoriza
+    (`can_teach`). Antes se leía `SELF.lessons`, un atributo que `SelfModel` no define
+    (el real es `lessons_learned`); como era un `getattr` con default, no lanzaba y las
+    lecciones verificadas se perdían en silencio: el Self Model no mostraba nada
+    aprendido. `self_sync` es opcional para no romper otras compositions.
+    """
     def _self_aux():
         return {
             "tools": TOOLS.list(),
@@ -669,7 +675,7 @@ def _self_aux_factory(RUNTIME, TOOLS, RUNNING, STATE, SELF, enabled):
                 {"id": m.id, "objective": m.goal.objective, "state": m.state.value}
                 for m in RUNNING.values()
             ],
-            "lessons": list(getattr(SELF, "lessons", []) or []),
+            "lessons": list(getattr(self_sync, "lessons", []) or []) if self_sync else [],
             "memory_items": getattr(RUNTIME.memory, "items", []),
             "verification": STATE.get("verification"),
             "available": enabled,
@@ -1151,9 +1157,40 @@ def start_services(rt: OfficialRuntime) -> dict:
     """
     from alexis.self.sync import SelfModelSync
 
+    # CORE-07: antes de encender nada, el Self Model recupera lo que aprendió en
+    # ejecuciones anteriores. Sin esto, `SelfModel(...)` nacía vacío y toda lección,
+    # auto-observación y reflexión verificadas se perdían al reiniciar.
+    if rt.storage.get("db") is not None:
+        from alexis.self.persistence import SelfModelPersistence
+
+        try:
+            aprendido = asyncio.run_coroutine_threadsafe(
+                SelfModelPersistence(rt.storage["db"]).load(), rt.loop
+            ).result(timeout=10)
+            rt.self_model.restore(aprendido)
+            if aprendido.get("lessons") or aprendido.get("observations") or aprendido.get("reflections"):
+                print(
+                    "[self] estado aprendido recuperado: "
+                    f"{len(aprendido.get('lessons') or [])} lección/es, "
+                    f"{len(aprendido.get('observations') or [])} observación/es, "
+                    f"{len(aprendido.get('reflections') or [])} reflexión/es."
+                )
+        except Exception as exc:  # noqa: BLE001 — no poder recordar no puede tumbar el arranque
+            print(f"[warn] no se pudo recuperar el estado aprendido del Self Model: {exc}")
+
     # Self Model: se actualiza consumiendo los eventos reales del bus oficial.
     self_sync = SelfModelSync(
-        rt.self_model, rt.extras["resolve_mission"], aux=rt.extras["self_aux"]
+        rt.self_model, rt.extras["resolve_mission"], aux=rt.extras["self_aux"],
+        persistence=(
+            SelfModelPersistence(rt.storage["db"]) if rt.storage.get("db") is not None else None
+        ),
+    )
+    # CORE-07: el `aux` se reconstruye apuntando al sync recién creado, para que las
+    # lecciones que éste autoriza lleguen al modelo (antes se leía un atributo
+    # inexistente y se perdían en silencio).
+    rt.extras["self_aux"] = _self_aux_factory(
+        rt.runtime, rt.tools, rt.running, rt.state, rt.self_model,
+        rt.enabled_capabilities, self_sync,
     )
     self_sync.attach(rt.events, rt.loop)
 

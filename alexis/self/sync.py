@@ -7,8 +7,11 @@ reflecting/evaluating/replanning/recovering) se marcan por evento real.
 """
 
 import asyncio
+import logging
 
 from alexis.self.model import SelfModel
+
+LOGGER = logging.getLogger("alexis.self.sync")
 
 
 class SelfModelSync:
@@ -16,7 +19,7 @@ class SelfModelSync:
     #: aprendizaje es un borde del Self Model, no su memoria (P0 §5.6.7).
     LESSON_HISTORY = 5
 
-    def __init__(self, model, resolve_mission, aux=None):
+    def __init__(self, model, resolve_mission, aux=None, persistence=None, *, on_persist=None):
         self.model = model
         self.resolve_mission = resolve_mission  # () -> Mission | None
         self.aux = aux or (lambda: {})  # () -> dict(tools, commitments, lessons, memory_items, verification)
@@ -27,8 +30,19 @@ class SelfModelSync:
         #: evento `mission.experience`; aquí no se decide nada, sólo se recuerda lo ya
         #: verificado. `self.aux()` es quien las inyecta en `update()`.
         self.lessons: list[str] = []
+        #: CORE-07: fuente durable del estado aprendido (opcional). Si está, cada
+        #: registro nuevo se guarda para que sobreviva a un reinicio. No se inventa
+        #: nada: sin repositorio, el comportamiento es el de siempre (sólo memoria).
+        self.persistence = persistence
+        #: Hook opcional para que quien compone sepa cuándo hubo algo que persistir.
+        self.on_persist = on_persist
 
     def apply_event(self, topic, payload):
+        antes = (
+            len(self.lessons),
+            len(self.model.observations_about_self),
+            len(self.model.reflections),
+        )
         if topic == "presence.listening":
             self.model.set_transient(listening=True, speaking=False, reflecting=False)
         elif topic == "presence.speaking":
@@ -62,6 +76,54 @@ class SelfModelSync:
         elif topic.startswith("mission.") or topic == "presence.idle":
             self.model.set_transient(listening=False, speaking=False, reflecting=False, flag=None)
         self.model.update(self.resolve_mission(), current_action=self._current_action, **self.aux())
+        self._persist_if_learned(antes, topic)
+
+    def _persist_if_learned(self, antes, topic: str) -> None:
+        """Vuelca a la fuente durable SOLO si este evento añadió algo aprendido.
+
+        Se compara antes/después para no escribir en cada evento (presencia, transitorios)
+        que no aporta conocimiento: persistir es caroso y la base debe reflejar lo que
+        ALEXIS sabe, no cada latido del bus.
+        """
+        if self.persistence is None:
+            return
+        ahora = (
+            len(self.lessons),
+            len(self.model.observations_about_self),
+            len(self.model.reflections),
+        )
+        if ahora == antes:
+            return
+        self._schedule_persist(topic)
+
+    def _schedule_persist(self, topic: str) -> None:
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._persist_now(topic), loop)
+
+    async def _persist_now(self, topic: str) -> None:
+        try:
+            await self.persistence.save(
+                lessons=self.lessons,
+                observations=self.model.observations_about_self,
+                reflections=self.model.reflections,
+                mission_id=self._mission_id(),
+            )
+            if self.on_persist is not None:
+                self.on_persist(topic)
+        except Exception as exc:  # noqa: BLE001 — no recordar no puede tumbar el runtime
+            LOGGER.warning(
+                "no se pudo persistir el estado aprendido del Self Model: %s", exc
+            )
+
+    def _mission_id(self):
+        mission = None
+        try:
+            mission = self.resolve_mission()
+        except Exception:  # noqa: BLE001 — la provenance es opcional por diseño
+            mission = None
+        return getattr(mission, "id", None) if mission is not None else None
 
     def _apply_experience(self, payload: dict):
         """El Self Model recuerda la lección que la frontera autorizó (P0 §5.6.7).
@@ -123,6 +185,7 @@ class SelfModelSync:
 
     def attach(self, bus, loop):
         self._sub = bus.subscribe_async()
+        self._loop = loop
         self._task = asyncio.run_coroutine_threadsafe(self._consume(), loop)
 
     async def _consume(self):
