@@ -65,6 +65,14 @@ class ModelRouter:
         self.allow_degraded = allow_degraded
         self.budget_usd = budget_usd  # 0 = sin límite
         self.spent_usd = 0.0
+        # CORE-06: gasto acumulado POR CORRELACIÓN (cada misión lleva la suya). El
+        # router es un singleton de proceso compartido por el clasificador de
+        # intención, el runtime cognitivo y el planner, así que un contador único
+        # convertiría el presupuesto de cada misión en un presupuesto global de
+        # ALEXIS. La clave es la de `RoutingCorrelation` (misión o pre-misión), nunca
+        # un contador compartido. `spent_usd` sigue siendo el total del proceso: no
+        # cambia de semántica.
+        self._spent_by_correlation: dict[str, float] = {}
         self.event_bus = event_bus
         #: Últimas rutas (introspección/tests sin event bus).
         self.routings: list[dict] = []
@@ -88,9 +96,36 @@ class ModelRouter:
         return [p.describe() for p in self._providers.values()]
 
     def reset_budget(self, budget_usd: float) -> None:
-        """Reinicia el presupuesto (por turno/misión: p.ej. `envelope.max_cost_usd`)."""
+        """Reinicia el presupuesto GLOBAL del proceso.
+
+        No debe usarse para el presupuesto de una misión: eso convertiría el límite de
+        una misión en el de todo ALEXIS y borraría el gasto de las demás. Para el
+        presupuesto por misión, cada petición lleva su `max_cost_usd` y su gasto se
+        contabiliza por correlación.
+        """
         self.budget_usd = budget_usd
         self.spent_usd = 0.0
+        self._spent_by_correlation.clear()
+
+    def spent_usd_for(self, correlation_key: str | None) -> float:
+        """Gasto acumulado de UNA correlación (misión). 0.0 si no ha gastado.
+
+        Las llamadas sin correlación (pre-misión) cuelgan de su propia clave, así que no
+        se imputan a ninguna misión posterior.
+        """
+        return self._spent_by_correlation.get(correlation_key or "", 0.0)
+
+    @staticmethod
+    def _budget_key(correlation) -> str:
+        """Clave de accumulación de una petición.
+
+        La correlación manda: es lo que aísla el presupuesto de cada misión. Sin ella
+        (llamadas que no la aportan) se usa una clave propia, para que ese gasto no
+        termine descontándose de la primera misión que pase.
+        """
+        if correlation is None:
+            return ""
+        return str(correlation.correlation_id or "")
 
     # ------------------------------------------------------------------ #
     # Selección de candidatos
@@ -105,29 +140,52 @@ class ModelRouter:
             return False
         return True
 
-    def _within_budget(self, provider: ModelProvider, request: ModelRequest) -> bool:
+    def _within_budget(
+        self,
+        provider: ModelProvider,
+        request: ModelRequest,
+        *,
+        spent: float = 0.0,
+    ) -> bool:
+        """¿Cabe este provider en lo que QUEDA de presupuesto?
+
+        `spent` es lo ya gastado por la MISMA correlación (la misión), no el total del
+        proceso. Es lo que hace que el límite sea por misión: con el total global, una
+        misión que ya gastó dejaría sin presupuesto a la siguiente aunque ésta tuviese
+        el suyo entero.
+
+        `max_cost_usd == 0` sigue significando "sin límite", tanto en la petición como
+        en el global del operador; si ambos son 0, no hay límite.
+        """
         if self.budget_usd <= 0 and request.max_cost_usd <= 0:
             return True
         limit = min(x for x in (self.budget_usd, request.max_cost_usd) if x > 0)
-        return self.spent_usd + _estimate_cost(provider, request) <= limit
+        return spent + _estimate_cost(provider, request) <= limit
 
-    def candidates(self, request: ModelRequest) -> list[ModelProvider]:
+    def candidates(
+        self,
+        request: ModelRequest,
+        *,
+        correlation: "RoutingCorrelation | None" = None,
+    ) -> list[ModelProvider]:
         """Providers reales usables para la petición, en orden determinista.
 
         Los providers de contingencia (`degraded=True`) quedan **fuera** de la cadena:
         sólo se usan después, vía `_degraded_provider()`, para que `DEGRADED` sea
         siempre un desenlace explícito y no un candidato más (P1).
 
-        Orden: providers que caben en el deadline primero; luego `priority`, coste y
-        latencia. Un provider que no cabe en el deadline no se descarta (se intenta al
-        final) pero nunca se promete que lo cumpla.
+        El presupuesto se evalúa contra lo gastado por **esta** correlación. Si ningún
+        candidato cabe, se cae a los providers sin coste por token —que no cuestan nada
+        y por tanto nunca exceden el límite— en vez de a los caros: el presupuesto
+        acotado no puede saltarse por un `or`.
         """
+        spent = self.spent_usd_for(self._budget_key(correlation))
         eligible = [
             p
             for p in self._providers.values()
             if not p.degraded and self._eligible(p, request)
         ]
-        affordable = [p for p in eligible if self._within_budget(p, request)]
+        affordable = [p for p in eligible if self._within_budget(p, request, spent=spent)]
         pool = affordable or [p for p in eligible if not p.cost_per_1k_tokens]
         # "Caben" = su deadline efectivo (propio o global) cubre su latencia típica.
         in_deadline = [p for p in pool if p.latency_p50_ms <= p.effective_deadline_ms(request)]
@@ -166,7 +224,7 @@ class ModelRouter:
         chain: list[str] = []
         last_error: str | None = None
 
-        for provider in self.candidates(request):
+        for provider in self.candidates(request, correlation=correlation):
             chain.append(provider.id)
             try:
                 response = await asyncio.wait_for(
@@ -183,7 +241,7 @@ class ModelRouter:
                 self._mark_fallback(response, chain)
                 if response.fallback_used:
                     response.fallback_error = last_error
-                self._account(response)
+                self._account(response, correlation=correlation)
                 self._audit(request, response, correlation=correlation)
                 return response
             except (asyncio.TimeoutError, ModelProviderError) as exc:
@@ -206,7 +264,7 @@ class ModelRouter:
                 # escondería que se esperó el deadline de cada provider anterior. La
                 # latencia que se audita es la de la decisión completa.
                 response.latency_ms = int((time.monotonic() - started) * 1000)
-                self._account(response)
+                self._account(response, correlation=correlation)
                 self._audit(request, response, correlation=correlation)
                 return response
             except Exception as exc:  # noqa: BLE001
@@ -237,8 +295,17 @@ class ModelRouter:
     # Contabilidad y auditoría
     # ------------------------------------------------------------------ #
 
-    def _account(self, response: ModelResponse) -> None:
-        self.spent_usd += max(0.0, response.cost_usd)
+    def _account(self, response: ModelResponse, *, correlation=None) -> None:
+        """Contabilidad doble: el total del proceso y el de esta correlación.
+
+        El coste real (`ModelResponse.cost_usd`), nunca una estimación: el
+        presupuesto debe medir lo que se pagó, no lo que se previó.
+        """
+        coste = max(0.0, response.cost_usd)
+        self.spent_usd += coste
+        self._spent_by_correlation[self._budget_key(correlation)] = (
+            self._spent_by_correlation.get(self._budget_key(correlation), 0.0) + coste
+        )
 
     def _audit(
         self,
