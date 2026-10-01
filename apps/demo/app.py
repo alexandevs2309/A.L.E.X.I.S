@@ -256,6 +256,60 @@ class OfficialRuntime:
             "success_criteria": list(mission.goal.success_criteria),
         }
 
+    def mission_detail(self, mission) -> dict:
+        """Lectura por recurso: el payload común más lo que prueba CORE-01 y CORE-02.
+
+        `goal_verified` NO se deduce de `state == "completed"`: sale de
+        `goal_is_confirmed()`, la misma autoridad que usa `settle()`. Si algún día un
+        estado quedara mal, este endpoint no puede afirmar más de lo que el sistema
+        demostró — que es justo lo que se quiere poder comprobar por HTTP.
+        """
+        from alexis.autonomy.goal_state import goal_is_confirmed
+
+        verification = getattr(mission, "goal_verification", None)
+        context = getattr(mission, "context", {}) or {}
+        return {
+            **self.payload(mission),
+            "goal_verified": bool(goal_is_confirmed(verification)),
+            "goal_verification": (
+                verification.to_dict() if verification is not None else None
+            ),
+            "goal_verification_reason": context.get("goal_verification_reason"),
+            "results": list(getattr(mission, "results", []) or []),
+            "plan": [s["id"] for s in context.get("plan_steps", [])],
+            "decisions": list((context.get("decisions") or {}).values()),
+            "pending_approval": context.get("pending_approval"),
+            "blocked_reason": context.get("blocked_reason"),
+            "updated_at": getattr(mission, "updated_at", None),
+        }
+
+    def find_mission(self, mission_id: str):
+        """Misión por identificador, o `None`. Sólo lectura: no ejecuta ni muta.
+
+        Dos niveles, por dos razones distintas:
+
+        - El objeto vivo (`running`) cuando existe: es la misma referencia que muta el
+          worker, así que refleja lo que está pasando AHORA. Una misión `running` puede
+          no tener todavía su fila actualizada, y el repo iría por detrás.
+        - La fila persistida cuando no está en memoria: cubre misiones de arranques
+          anteriores, que el proceso recuperó pero no mantiene todas en `running`.
+
+        No se escribe nada en ninguno de los dos caminos, y no se toca `state` global.
+        """
+        live = self.running.get(mission_id)
+        if live is not None:
+            return live
+        repo = self.mission_repo()
+        if repo is None:
+            return None
+        try:
+            return asyncio.run_coroutine_threadsafe(
+                repo.get(mission_id), self.loop
+            ).result(timeout=5)
+        except Exception as exc:  # noqa: BLE001 — leer el estado no puede tumbar la ruta
+            LOGGER.warning("GET /missions/%s: no se pudo leer de PostgreSQL: %s", mission_id, exc)
+            return None
+
 
 def build_official_runtime(
     *,
@@ -687,6 +741,17 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
             self.end_headers()
             self.wfile.write(body)
 
+        def _get_mission(self, mission_id: str):
+            """`GET /missions/{id}`. Lectura pura: no ejecuta, no encola, no muta."""
+            if not mission_id:
+                self._send_json({"error": "not found"}, 404)
+                return
+            mission = runtime.find_mission(mission_id)
+            if mission is None:
+                self._send_json({"error": "mission not found"}, 404)
+                return
+            self._send_json(runtime.mission_detail(mission))
+
         def _state_payload(self):
             mission = RUNNING.get(STATE.get("mission_id"))
             mission_payload = None
@@ -786,13 +851,19 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
 
         def _stream(self):
             """SSE sobre el EventBus OFICIAL: la misma instancia que usan el resto de
-            rutas del proceso. Nunca un bus nuevo por petición."""
+            rutas del proceso. Nunca un bus nuevo por petición.
+
+            La suscripción se crea ANTES de anunciar la respuesta. El `EventBus` no tiene
+            replay, así que el orden importa: si primero se mandan las cabeceras y después
+            se suscribe, todo evento publicado en esa ventana se pierde para siempre, y
+            el cliente ya creía que estaba escuchando. Suscribiendo primero, el 200
+            significa lo que dice: "ya puedes recibir"."""
+            sub = EVENTS.subscribe()
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
-            sub = EVENTS.subscribe()
             try:
                 while True:
                     try:
@@ -827,6 +898,11 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
                 self._stream()
             elif path == "/missions":
                 self._send_json([runtime.payload(m) for m in RUNNING.values()])
+            elif path.startswith("/missions/"):
+                # Lectura por recurso. `/state` NO sirve para esto: representa la última
+                # misión del proceso, no la que se pide, y se sobrescribe con cada
+                # misión nueva. Aquí se pregunta por un identificador concreto.
+                self._get_mission(path.split("/")[2])
             elif path == "/self":
                 self._send_json({
                     **SELF.snapshot(),
@@ -1011,6 +1087,95 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
     return OfficialHandler
 
 
+def _recover_missions(rt: OfficialRuntime) -> bool:
+    """Recupera de PostgreSQL las misiones abiertas y reanuda las que se estaban
+    ejecutando de verdad. Lógica movida tal cual desde el lanzador: no se cambia qué se
+    recupera ni qué se reanuda, sólo dónde vive.
+    """
+    repo = rt.mission_repo()
+    if not repo:
+        return False
+
+    async def _recover():
+        open_states = ("pending", "planning", "running", "verifying", "waiting_approval")
+        missions = await repo.list(limit=50)
+        open_missions = [m for m in missions if m.state.value in open_states]
+        if rt.scheduler is not None and rt.runner is not None:
+            reclaimed = await rt.scheduler.recover_stale(lease_seconds=rt.runner.lease_seconds)
+            if reclaimed:
+                print(f"Scheduler: {reclaimed} tareas con lease expirada recuperadas.")
+        active = [m for m in open_missions if m.state.value in ("planning", "running", "verifying")]
+        for m in open_missions:
+            rt.running[m.id] = m
+            if m.state.value != "waiting_approval":
+                if rt.worker is not None:
+                    await enqueue(rt.worker.mission_repo, m)
+                else:
+                    asyncio.ensure_future(rt.run_mission(m))
+        if active:
+            rt.state["mission_id"] = active[-1].id
+
+    try:
+        asyncio.run_coroutine_threadsafe(_recover(), rt.loop).result(timeout=10)
+        if rt.state["mission_id"] is not None:
+            print("Misiones abiertas recuperadas de PostgreSQL (reanudadas desde checkpoint).")
+        return True
+    except Exception as exc:  # noqa: BLE001 — recuperar es mejor que no arrancar
+        print(f"[warn] recuperación de misiones: {exc}")
+        return False
+
+
+def start_services(rt: OfficialRuntime) -> dict:
+    """Arranca los servicios del runtime oficial. Idéntico para producción y tests.
+
+    `build_runtime()` CONSTRUYE; esto ENCIENDE. Estaba partido: el arranque vivía
+    dentro de `main()`, que además abre el puerto y bloquea, así que no se podía
+    reutilizar. Un E2E tenía que replicar esas líneas a mano, con lo que el arranque
+    bajo prueba no era el de producción. Ahora hay un solo camino.
+
+    Qué arranca, y por qué aquí:
+
+    - **SelfModelSync**: el Self Model se actualiza consumiendo los eventos del bus
+      oficial.
+    - **Worker de la cola**: sin él, lo encolado se queda en `pending` —nadie lo
+      consume— y ninguna misión llega a ejecutarse.
+    - **Recuperación**: misiones abiertas de una ejecución anterior.
+
+    NO incluye la escucha de palmadas: eso es presentación del demo (voz y activación) y
+    depende de cosas que viven en el lanzador. Moverlo aquí arrastraría la demo dentro de
+    la aplicación oficial, que es justo lo que CORE-03 separó.
+
+    La lógica de cada servicio NO se toca: mismo orden (self-sync → worker →
+    recuperación), mismos mensajes, mismos timeouts. Devuelve lo que arrancó, para que
+    quien lo llame pueda comprobarlo y para que un test pueda afirmar sobre ello.
+    """
+    from alexis.self.sync import SelfModelSync
+
+    # Self Model: se actualiza consumiendo los eventos reales del bus oficial.
+    self_sync = SelfModelSync(
+        rt.self_model, rt.extras["resolve_mission"], aux=rt.extras["self_aux"]
+    )
+    self_sync.attach(rt.events, rt.loop)
+
+    # Cola de misiones: una a la vez en orden, con checkpoint resumible.
+    worker_started = False
+    if rt.worker is not None:
+        async def _worker_loop():
+            await rt.worker.loop()
+
+        asyncio.run_coroutine_threadsafe(_worker_loop(), rt.loop)
+        worker_started = True
+        print("[cola] worker de misiones activo (FIFO persistente en PostgreSQL)")
+
+    recovered = _recover_missions(rt)
+
+    return {
+        "self_sync": self_sync,
+        "worker_started": worker_started,
+        "recovered": recovered,
+    }
+
+
 def create_app(runtime: OfficialRuntime, presentation: Any = None) -> ThreadingHTTPServer:
     """Servidor HTTP listo para `serve_forever()` sobre la superficie oficial."""
     return ThreadingHTTPServer(("127.0.0.1", 0), create_handler(runtime, presentation))
@@ -1114,4 +1279,5 @@ __all__ = [
     "install_official_runtime",
     "peek_official_runtime",
     "set_official_runtime",
+    "start_services",
 ]

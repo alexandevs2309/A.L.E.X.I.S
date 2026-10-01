@@ -34,13 +34,12 @@ from apps.demo.app import (
     build_runtime as build_runtime_from_app,
     create_handler,
     init_storage,
+    start_services,
 )
 from apps.ui import PAGE
-from alexis.autonomy.queue import enqueue
 from alexis.contracts import AutonomyLevel, MissionEnvelope, MissionState
 from alexis.perception.activation import ACTIVATION_OBJECTIVE
 from alexis.perception.clap_listener import DEFAULT_TOPIC, ClapListener
-from alexis.self.sync import SelfModelSync
 from alexis.speech.tts import get_tts_provider, synthesize_with_fallback
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -252,40 +251,6 @@ def on_clap_event(rt: OfficialRuntime, event) -> None:
 ACTIVATION_COOLDOWN_S = 10.0
 
 
-def recover_missions(rt: OfficialRuntime) -> None:
-    """Recupera de PostgreSQL las misiones que quedaron abiertas y reanuda las que
-    estaban ejecutándose de verdad."""
-    repo = rt.mission_repo()
-    if not repo:
-        return
-
-    async def _recover():
-        open_states = ("pending", "planning", "running", "verifying", "waiting_approval")
-        missions = await repo.list(limit=50)
-        open_missions = [m for m in missions if m.state.value in open_states]
-        if rt.scheduler is not None and rt.runner is not None:
-            reclaimed = await rt.scheduler.recover_stale(lease_seconds=rt.runner.lease_seconds)
-            if reclaimed:
-                print(f"Scheduler: {reclaimed} tareas con lease expirada recuperadas.")
-        active = [m for m in open_missions if m.state.value in ("planning", "running", "verifying")]
-        for m in open_missions:
-            rt.running[m.id] = m
-            if m.state.value != "waiting_approval":
-                if rt.worker is not None:
-                    await enqueue(rt.worker.mission_repo, m)
-                else:
-                    asyncio.ensure_future(rt.run_mission(m))
-        if active:
-            rt.state["mission_id"] = active[-1].id
-
-    try:
-        asyncio.run_coroutine_threadsafe(_recover(), rt.loop).result(timeout=10)
-        if rt.state["mission_id"] is not None:
-            print("Misiones abiertas recuperadas de PostgreSQL (reanudadas desde checkpoint).")
-    except Exception as exc:  # noqa: BLE001 — recuperar es mejor que no arrancar
-        print(f"[warn] recuperación de misiones: {exc}")
-
-
 def build_runtime() -> OfficialRuntime:
     """Construye e INSTALA el runtime oficial de este proceso.
 
@@ -311,23 +276,14 @@ def build_runtime() -> OfficialRuntime:
 def main() -> None:
     rt = build_runtime()
 
-    # Self Model: se actualiza consumiendo los eventos reales del bus oficial.
-    self_sync = SelfModelSync(
-        rt.self_model, rt.extras["resolve_mission"], aux=rt.extras["self_aux"]
-    )
-    self_sync.attach(rt.events, rt.loop)
+    # Los servicios del runtime oficial se encienden por el MISMO camino que usa el
+    # E2E (`start_services`): el arranque bajo prueba tiene que ser el de producción.
+    start_services(rt)
 
-    # Cola de misiones: una a la vez en orden, con checkpoint resumible.
-    if rt.worker is not None:
-        async def _worker_loop():
-            await rt.worker.loop()
-
-        asyncio.run_coroutine_threadsafe(_worker_loop(), rt.loop)
-        print("[cola] worker de misiones activo (FIFO persistente en PostgreSQL)")
-
-    recover_missions(rt)
-
-    # Percepción: la palmada es una fuente de eventos más, no un camino de ejecución.
+    # Percepción del demo: la palmada es una fuente de eventos más, no un camino de
+    # ejecución. Vive aquí, y no en `start_services`, porque depende de la voz y de la
+    # activación —que son de este lanzador— y moverlo dentro de la aplicación oficial
+    # volvería a meter la demo en el runtime único (lo contrario de CORE-03).
     clap = ClapListener()
     clap_sub = rt.events.subscribe_async()
 
