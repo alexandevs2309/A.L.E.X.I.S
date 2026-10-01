@@ -44,7 +44,7 @@ class FakeProvider(ModelProvider):
         self._error = error
         self.calls = 0
 
-    async def complete(self, request):
+    async def complete(self, request, *, correlation=None):
         self.calls += 1
         if self._delay:
             await asyncio.sleep(self._delay)

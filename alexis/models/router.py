@@ -18,6 +18,8 @@ provider utilizable). No lanza excepciones por falta de provider: informa.
 import asyncio
 import time
 
+from typing import TYPE_CHECKING
+
 from alexis.models.provider import (
     ModelOutcome,
     ModelProvider,
@@ -26,6 +28,9 @@ from alexis.models.provider import (
     ModelResponse,
     ModelTask,
 )
+
+if TYPE_CHECKING:  # pragma: no cover — sólo para el anotador de complete()
+    from alexis.models.correlation import RoutingCorrelation
 
 #: Niveles de privacidad en orden creciente.
 _PRIVACY_RANK = {"normal": 0, "sensitive": 1, "secret": 2}
@@ -142,8 +147,21 @@ class ModelRouter:
     # Ejecución
     # ------------------------------------------------------------------ #
 
-    async def complete(self, request: ModelRequest) -> ModelResponse:
-        """Ejecuta la tarea cognitiva. Nunca lanza por falta de provider (P1)."""
+    async def complete(
+        self,
+        request: ModelRequest,
+        *,
+        correlation: "RoutingCorrelation | None" = None,
+    ) -> ModelResponse:
+        """Ejecuta la tarea cognitiva. Nunca lanza por falta de provider (P1).
+
+        `correlation` es opcional y keyword-only a propósito: los llamadores que no
+        saben nada de misiones siguen funcionando igual (`complete(request)`), y los
+        que sí pasan un contexto genérico de correlación. El Router no lo interpreta:
+        lo adjunta al evento `model.routed`. Para que eso sea seguro, la correlación
+        se aplica DENTRO de `_audit()`, antes de publicar; mutar el payload después
+        sería una carrera, porque la publicación es fire-and-forget.
+        """
         started = time.monotonic()
         chain: list[str] = []
         last_error: str | None = None
@@ -166,7 +184,7 @@ class ModelRouter:
                 if response.fallback_used:
                     response.fallback_error = last_error
                 self._account(response)
-                self._audit(request, response)
+                self._audit(request, response, correlation=correlation)
                 return response
             except (asyncio.TimeoutError, ModelProviderError) as exc:
                 last_error = f"{provider.id}: {type(exc).__name__}: {exc}"
@@ -189,7 +207,7 @@ class ModelRouter:
                 # latencia que se audita es la de la decisión completa.
                 response.latency_ms = int((time.monotonic() - started) * 1000)
                 self._account(response)
-                self._audit(request, response)
+                self._audit(request, response, correlation=correlation)
                 return response
             except Exception as exc:  # noqa: BLE001
                 last_error = f"{degraded.id}: {type(exc).__name__}: {exc}"
@@ -206,7 +224,7 @@ class ModelRouter:
             error=last_error or f"sin provider utilizable para task={request.task.value}",
             chain=list(chain),
         )
-        self._audit(request, response)
+        self._audit(request, response, correlation=correlation)
         return response
 
     def _mark_fallback(self, response: ModelResponse, chain: list[str]) -> None:
@@ -222,8 +240,21 @@ class ModelRouter:
     def _account(self, response: ModelResponse) -> None:
         self.spent_usd += max(0.0, response.cost_usd)
 
-    def _audit(self, request: ModelRequest, response: ModelResponse) -> None:
+    def _audit(
+        self,
+        request: ModelRequest,
+        response: ModelResponse,
+        *,
+        correlation: "RoutingCorrelation | None" = None,
+    ) -> None:
         payload = response.audit_event(request.task)
+        # CORE-05: la correlación se adjunta AQUÍ, dentro de la unidad que va a publicar.
+        # Hacerlo después sería una carrera: `_publish()` corre en su propia task y puede
+        # haber entregado el payload a las colas antes de que nadie lo toque. Además es
+        # el último punto donde el Router ve el evento, así que no necesita saber qué
+        # significa `mission_id`: sólo lo copia.
+        if correlation is not None:
+            payload["correlation"] = correlation.to_dict()
         self.routings.append(payload)
         bus = self.event_bus
         if bus is None:

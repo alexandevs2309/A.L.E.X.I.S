@@ -103,7 +103,7 @@ class _StubRouter:
         self.raises = raises
         self.requests = []
 
-    async def complete(self, request: ModelRequest):
+    async def complete(self, request: ModelRequest, *, correlation=None):
         self.requests.append(request)
         if self.raises is not None:
             raise self.raises
@@ -471,7 +471,7 @@ class _ContextSensitiveRouter:
     def __init__(self):
         self.requests = []
 
-    async def complete(self, request: ModelRequest):
+    async def complete(self, request: ModelRequest, *, correlation=None):
         self.requests.append(request)
         context = request.messages[-1]["content"]
         if "exists=False" in context or "no existe" in context:

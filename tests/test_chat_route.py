@@ -58,7 +58,7 @@ class _FakeLLMRouter:
     def providers(self):
         return [object()]
 
-    async def complete(self, request):
+    async def complete(self, request, *, correlation=None):
         from alexis.models import ModelResponse
 
         return ModelResponse(text=self._text)
@@ -187,7 +187,7 @@ async def test_model_cannot_downgrade_a_clear_task_verb():
         def providers(self):
             return [object()]
 
-        async def complete(self, request):
+        async def complete(self, request, *, correlation=None):
             return ModelResponse(text='{"kind":"greeting","objective":null,"confidence":0.95}')
 
     clf = IntentClassifier(_WeakModel())

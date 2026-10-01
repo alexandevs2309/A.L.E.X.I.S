@@ -315,7 +315,7 @@ class _FakeLLMRouter:
     def providers(self):
         return [object()]
 
-    async def complete(self, request):
+    async def complete(self, request, *, correlation=None):
         from alexis.models import ModelResponse
 
         return ModelResponse(text=self._text)
@@ -390,7 +390,7 @@ class _StubProvider:
         self.delay = delay
         self.text = text
 
-    async def complete(self, request):
+    async def complete(self, request, *, correlation=None):
         from alexis.models import ModelResponse
 
         if self.delay:

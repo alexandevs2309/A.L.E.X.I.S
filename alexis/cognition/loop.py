@@ -52,6 +52,7 @@ from alexis.contracts import (
 from alexis.learning.experience import Experience, LearningBoundary
 from alexis.learning.reflection import build_reflection
 from alexis.memory.contracts import MemoryQuery
+from alexis.models.correlation import for_mission
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
 from alexis.tools.filesystem import extract_workspace_path
 from alexis.world.model import WorldEntity
@@ -921,7 +922,9 @@ class CognitiveRuntime:
             deadline_ms=self.decision_deadline_ms,
         )
         try:
-            response = await self.model_router.complete(request)
+            response = await self.model_router.complete(
+                request, correlation=for_mission(mission, site="cognitive._ask_model")
+            )
         except Exception as exc:  # noqa: BLE001 — el modelo nunca tumba el runtime
             LOGGER.warning("cognitive: el modelo no pudo decidir (%s); elijo determinista", exc)
             return self._degraded(options[0], "none", f"model error: {exc}")

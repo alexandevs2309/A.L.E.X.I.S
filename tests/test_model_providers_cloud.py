@@ -221,7 +221,7 @@ def test_18_el_router_cae_al_siguiente_provider_si_uno_falla():
         supports = {ModelTask.REASON}
         priority = 0
 
-        async def complete(self, request):
+        async def complete(self, request, *, correlation=None):
             raise ModelProviderError("revienta")
 
     class _Bueno(ModelProvider):
@@ -229,7 +229,7 @@ def test_18_el_router_cae_al_siguiente_provider_si_uno_falla():
         supports = {ModelTask.REASON}
         priority = 10
 
-        async def complete(self, request):
+        async def complete(self, request, *, correlation=None):
             return ModelResponse(text="ok", provider="bueno", model="m",
                                  outcome=ModelOutcome.REAL)
 
@@ -256,7 +256,7 @@ def test_19_si_todo_falla_es_degraded_y_lo_declara():
         supports = {ModelTask.REASON}
         priority = 0
 
-        async def complete(self, request):
+        async def complete(self, request, *, correlation=None):
             raise ModelProviderError("boom")
 
     r = ModelRouter([_Malo(), EchoModel()])
@@ -280,7 +280,7 @@ def test_20_degraded_reporta_la_latencia_de_la_cadena_completa():
         supports = {ModelTask.REASON}
         priority = 0
 
-        async def complete(self, request):
+        async def complete(self, request, *, correlation=None):
             import asyncio as a
 
             await a.sleep(0.15)

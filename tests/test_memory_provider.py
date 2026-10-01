@@ -90,7 +90,7 @@ class _Router:
         self.step_id = step_id
         self.requests = []
 
-    async def complete(self, request: ModelRequest):
+    async def complete(self, request: ModelRequest, *, correlation=None):
         self.requests.append(request)
         prompt = request.messages[-1]["content"]
         if "notas.txt tiene 3 líneas" in prompt:

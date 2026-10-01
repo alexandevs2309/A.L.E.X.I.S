@@ -227,7 +227,7 @@ async def test_11_un_modelo_que_ve_un_comando_como_task_no_abre_mision():
             return ModelIntentClassifier(None).parse(utterance, brief, data)
 
     class _FakeRouter:
-        async def complete(self, request):
+        async def complete(self, request, *, correlation=None):
             return _FakeResponse()
 
     from alexis.cognition.intent_classifier import IntentClassifier

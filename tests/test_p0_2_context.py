@@ -187,7 +187,7 @@ async def test_07_la_decision_real_lleva_las_diez_fuentes_al_prompt():
         def providers(self):
             return [object()]
 
-        async def complete(self, request):
+        async def complete(self, request, *, correlation=None):
             capturado["prompt"] = request.messages[-1]["content"]
             return ModelResponse(text="{}", provider="p", model="m",
                                  outcome=ModelOutcome.DEGRADED)

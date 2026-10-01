@@ -291,7 +291,7 @@ def test_13_trazabilidad_en_model_meta():
         def providers(self):
             return [object()]
 
-        async def complete(self, request):
+        async def complete(self, request, *, correlation=None):
             return ModelResponse(
                 text='{"kind":"task","objective":"%s","success_criteria":[],"confidence":0.9}' % B5
             )

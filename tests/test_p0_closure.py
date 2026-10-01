@@ -57,7 +57,7 @@ class _RealLikeRouter:
     def providers(self):
         return [object()]
 
-    async def complete(self, request):
+    async def complete(self, request, *, correlation=None):
         from alexis.models import ModelResponse
         from alexis.models.provider import ModelOutcome
 

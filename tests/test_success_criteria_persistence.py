@@ -47,7 +47,7 @@ class _ModelWithCriteria:
     def providers(self):
         return [object()]
 
-    async def complete(self, request):
+    async def complete(self, request, *, correlation=None):
         return ModelResponse(text=MODEL_TASK_JSON)
 
 

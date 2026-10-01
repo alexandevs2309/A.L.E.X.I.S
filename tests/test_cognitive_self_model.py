@@ -108,7 +108,7 @@ class _Router:
     def __init__(self):
         self.requests = []
 
-    async def complete(self, request: ModelRequest):
+    async def complete(self, request: ModelRequest, *, correlation=None):
         self.requests.append(request)
         return ModelResponse(
             text="",

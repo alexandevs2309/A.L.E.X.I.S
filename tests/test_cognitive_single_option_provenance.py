@@ -52,7 +52,7 @@ class _Contador:
         self._data = data or {"option_id": "s1"}
         self._outcome = outcome
 
-    async def complete(self, request):
+    async def complete(self, request, *, correlation=None):
         self.llamadas += 1
         self.requests.append(request)
         from alexis.models.provider import ModelResponse as _R

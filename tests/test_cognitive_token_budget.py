@@ -34,7 +34,7 @@ class _RecordingRouter:
         self.data = data
         self.requests: list[ModelRequest] = []
 
-    async def complete(self, request: ModelRequest):
+    async def complete(self, request: ModelRequest, *, correlation=None):
         self.requests.append(request)
         return ModelResponse(
             text="{}",

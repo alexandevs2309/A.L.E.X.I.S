@@ -30,6 +30,7 @@ from alexis.cognition.contracts import (
     SelfBrief,
 )
 from alexis.cognition.criteria import normalize_criteria
+from alexis.models.correlation import pre_mission
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
 
 LOGGER = logging.getLogger("alexis.cognition.intent")
@@ -487,7 +488,12 @@ class IntentClassifier:
 
         request = self.model.build_request(text, brief)
         try:
-            response = await self.router.complete(request)
+            # CORE-05: la clasificación ocurre ANTES de que exista misión, así que la
+            # correlación es explícitamente pre-misión. Se dice, en vez de omitir el
+            # argumento: omitirlo sería indistinguible de "no me importó".
+            response = await self.router.complete(
+                request, correlation=pre_mission(site="intent_classifier._classify")
+            )
         except Exception as exc:  # noqa: BLE001 — el clasificador nunca tumba el Core
             LOGGER.warning("intent: router/complete falló: %s", exc)
             return self._fallback(text, brief, reason=f"router error: {exc}", outcome=None)

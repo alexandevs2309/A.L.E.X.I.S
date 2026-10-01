@@ -1169,10 +1169,24 @@ def start_services(rt: OfficialRuntime) -> dict:
 
     recovered = _recover_missions(rt)
 
+    # CORE-05: el sink que persiste `model.routed` en `audit_log`. Se adjunta al bus
+    # OFICIAL (no crea uno propio), y va después del resto para no alterar el orden de
+    # arranque ya probado por CORE-04.
+    audit_sink = None
+    audit_repo = rt.storage.get("audit")
+    if audit_repo is not None:
+        from alexis.models.audit_sink import AuditSink
+
+        audit_sink = AuditSink(audit_repo, event_repo=rt.storage.get("event")).attach(
+            rt.events, rt.loop
+        )
+        print("[audit] sink de model.routed activo (audit_log)")
+
     return {
         "self_sync": self_sync,
         "worker_started": worker_started,
         "recovered": recovered,
+        "audit_sink": audit_sink,
     }
 
 

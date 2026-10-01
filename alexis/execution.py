@@ -6,6 +6,7 @@ import webbrowser
 from alexis.contracts import ExecutionResult, Observation
 from alexis.cognition.response import ResponseComposer, read_composed, render_for_voice
 from alexis.models import ModelRequest, ModelRouter, ModelTask
+from alexis.models.correlation import for_mission
 from alexis.models.config import ModelConfig
 from alexis.perception.activation import activation_reply, is_activation_objective
 from alexis.security.sandbox import SandboxError, SandboxRunner
@@ -145,7 +146,9 @@ class SandboxExecutor:
             if not self.model_router.providers():
                 return ""
             try:
-                response = await self.model_router.complete(request)
+                response = await self.model_router.complete(
+                    request, correlation=for_mission(mission, site="execution._spoken_reply")
+                )
             except Exception:  # noqa: BLE001 — la voz nunca debe fallar por el modelo
                 return ""
             return self._finish(self._valid_text(response), composed)

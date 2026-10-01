@@ -28,6 +28,7 @@ from typing import Any
 
 from alexis.cognition.contracts import SelfBrief
 from alexis.contracts import Plan, PlanStep, RiskLevel
+from alexis.models.correlation import for_mission
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
 from alexis.tools.filesystem import extract_workspace_path
 
@@ -407,7 +408,9 @@ class ModelPlanner:
             deadline_ms=self.deadline_ms,
         )
         try:
-            response = await self.router.complete(request)
+            response = await self.router.complete(
+                request, correlation=for_mission(mission, site="planner_model.create_plan")
+            )
         except Exception as exc:  # noqa: BLE001 — el modelo nunca deja a la misión sin plan
             LOGGER.warning("planner: el modelo falló (%s); fallback determinista", exc)
             return PlanProposal(reasons=[f"modelo no disponible: {exc}"], meta={"cognition_outcome": "unavailable"})
