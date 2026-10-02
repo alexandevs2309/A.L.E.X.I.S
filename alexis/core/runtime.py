@@ -313,6 +313,15 @@ class AlexisRuntime:
                 return
             await self._reject_plan(mission, candidate, source="context")
             mission.context.pop("plan_steps", None)
+            # CORE-08B: si el plan base se descarta, el overlay que lo sustituía deja de
+            # tener sentido — sus `replaces_step_ids` apuntan a pasos que ya no existen, y
+            # `pending_steps()` los seguiría inyectando. Un overlay sin base sería ejecutar
+            # una estrategia generada contra un plan que ya no está. Se descartan juntos.
+            if mission.context.pop("dynamic_replan", None) is not None:
+                await self.events.publish(
+                    "plan.dynamic_replan_discarded",
+                    {"mission_id": mission.id, "reason": "el plan base ya no valida"},
+                )
 
         if self.plan_model is not None:
             plan, provenance = await self._plan_with_model(mission)

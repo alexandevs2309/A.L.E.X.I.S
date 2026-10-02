@@ -57,7 +57,24 @@ from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
 from alexis.tools.filesystem import extract_workspace_path
 from alexis.world.model import WorldEntity
 
+# CORE-08B: el replan dinámico necesita al `ModelPlanner` para pedir una estrategia nueva.
+# El import va arriba y no dentro del método porque es un ciclo real de dependencias: el
+# runtime ya importa este módulo, y el planner NO importa el runtime.
+from alexis.cognition.planner import plan_from_dict, plan_to_dict  # noqa: E402
+from alexis.cognition.planner_model import ModelPlanner  # noqa: E402
+
 LOGGER = logging.getLogger("alexis.cognition.runtime")
+
+#: CORE-08B. Un único registro por misión en `mission.context`. Su EXISTENCIA sella el
+#: intento (regla 5): aunque se rechazara, impide una segunda llamada al modelo. Por eso se
+#: escribe siempre, no sólo cuando el plan es bueno. Sin este sello, un modelo que fallara o
+#: propusiera basura dejaría la misión sin marca y volvería a intentarlo en el siguiente replan.
+DYNAMIC_REPLAN_KEY = "dynamic_replan"
+DYNAMIC_REPLAN_VERSION = 1
+#: Etiqueta de procedencia de los pasos dinámicos. Distinta de "model" a propósito: un paso
+#: de replan dinámico y uno del plan inicial son proposing distinto aunque el capability sea
+#: el mismo, y confundirlos en una auditoría borra el recorrido.
+DYNAMIC_REPLAN_AUTHOR = "model_dynamic_replan"
 
 _DECIDER_SYSTEM = (
     "Eres el runtime cognitivo de ALEXIS. Elige UNA de las opciones que te doy. "
@@ -245,6 +262,7 @@ class CognitiveRuntime:
         self_model=None,
         world=None,
           plan_validator=None,
+          plan_model: "ModelPlanner | None" = None,
           goal_verifier: GoalVerifier | None = None,
           #: P0 requisito 2: catálogo real de capabilities. Sin él el contexto se arma
           #: con lo que declara el Self Model, que es una opinión, no el catálogo.
@@ -270,6 +288,9 @@ class CognitiveRuntime:
         self.self_model = self_model
         self.world = world
         self.plan_validator = plan_validator
+        #: CORE-08B: `ModelPlanner` a reutilizar para el replan dinámico. Opcional a propósito:
+        #: si no se inyecta, el replan construye el suyo con el deadline de decisión del Core.
+        self.plan_model = plan_model
         self.goal_verifier = goal_verifier
         self.max_iterations = max_iterations
         self.max_replans = max_replans
@@ -549,8 +570,25 @@ class CognitiveRuntime:
         self.save_world(mission)
 
     def pending_steps(self, mission: Mission, plan: Plan | None, knowledge: KnowledgeState) -> list[PlanStep]:
-        """Pasos que ni se completaron ni fallaron: los que aún se pueden intentar."""
+        """Pasos que ni se completaron ni fallaron: los que aún se pueden intentar.
+
+        CORE-08B: si hay un replan dinámico ACEPTADO, sus pasos se ofrecen EN LUGAR de los que
+        enmascara (`replaces_step_ids`). El plan original no se modifica: `plan.steps` sigue
+        intacto y `mission.context["plan_steps"]` sigue siendo el original, que es lo que
+        permite auditar qué propuso el Core y qué lo sustituyó.
+
+        El overlay entra por aquí y no por `plan` porque el runtime fija `plan` una sola vez al
+        entrar al bucle (`runtime._run_cognitive`): mutarlo no se vería hasta el reinicio, y
+        los pasos se quedarían proposes dos veces o ninguna.
+        """
         steps = list(plan.steps) if plan is not None else []
+        overlay = self._overlay(mission)
+        if overlay:
+            masked = set(overlay.get("replaces_step_ids") or [])
+            # `plan_from_dict` deserializa la LISTA completa y devuelve un `Plan`: llamarla por
+            # cada paso la haría iterar las claves del dict.
+            dynamic = plan_from_dict(list(overlay.get("steps") or []), mission.id).steps
+            steps = [s for s in steps if s.id not in masked] + dynamic
         return [
             step
             for step in steps
@@ -598,6 +636,25 @@ class CognitiveRuntime:
             chosen = options[0]
             chosen.model_meta = {"fallback_reason": "sin ModelRouter: decisión determinista"}
             return chosen
+        # CORE-08B: el replan dinámico se consulta SÓLO cuando se agotaron las alternativas
+        # deterministas. Se comprueba aquí, antes de la rama de "una sola opción", porque en
+        # ese estado `options()` devuelve exactamente un blocker y `decision_required` es
+        # False: sin esta rama, la condición siguiente lo devolvería sin preguntar a nadie.
+        # El orden importa y es la regla 7: si queda una alternativa determinista usable, no
+        # se llama al modelo. Pagar un PLAN para obtener algo que ya se tenía sería gastar
+        # presupuesto CORE-06 y 46-60s de un modelo local a cambio de nada.
+        if (
+            knowledge.needs_replan
+            and knowledge.replans < self.max_replans
+            and not _mission_context(mission).get(DYNAMIC_REPLAN_KEY)
+            and self._deterministic_exhausted(mission, knowledge, pending_steps)
+            and self._has_real_provider()
+        ):
+            dynamic = await self._dynamic_replan(mission, knowledge, pending_steps)
+            if dynamic is not None:
+                return dynamic
+            # Sellado sin overlay: se vuelve al camino determinista de siempre (blocker o
+            # el propio `options()`), sin haber ejecutado nada del modelo.
         if len(options) == 1 and not options[0].decision_required:
             chosen = options[0]
             chosen.model_meta = {
@@ -722,23 +779,17 @@ class CognitiveRuntime:
             return [self._blocker_decision(knowledge, "la verificación no pasó")]
 
         if knowledge.needs_replan and knowledge.replans < self.max_replans:
-            blocked_by_world = self.world_blocked_ids(mission, pending_steps)
-            # P0 requisito 12 / §5.7: "Evitar repetir indefinidamente la misma acción con
-            # los mismos argumentos". Si el replan propose un paso ya intentado con los
-            # MISMOS argumentos, eso no es un replan: es un bucle. Se filtra, y si no queda
+            # P0 requisito 12 / §5.7: "Evitar repetir indefinidamente la misma acción con los
+            # mismos argumentos". Si el replan propone un paso ya intentado con los MISMOS
+            # argumentos, eso no es un replan: es un bucle. Se filtra, y si no queda
             # P0 §12: aquí SÍ se aplica el filtro, y ya se puede sin romper trabajo
             # legítimo. La procedencia es la generación en la que se ofrece el paso: la
             # original (0) nunca se bloquea, un replan (>=1) sí puede.
+            # CORE-08B: el cálculo se extrajo a `_usable_replan_steps()` sin cambiar el
+            # resultado, para que `decide_next_action()` pueda consultarlo antes de decidir
+            # (sigue siendo SÍNCRONO: no cabe una llamada al modelo aquí dentro).
             generation = knowledge.replans + 1
-            usable, rejections = [], []
-            for step in pending_steps:
-                if step.id in blocked_by_world:
-                    continue
-                reason = self.blocked_reason(knowledge, step, generation)
-                if reason:
-                    rejections.append((step, reason))
-                    continue
-                usable.append(step)
+            usable, rejections = self._usable_replan_steps(mission, knowledge, pending_steps, generation)
             for step, reason in rejections:
                 LOGGER.info(
                     "replan: descartada la repetición de '%s' (firma %s): %s",
@@ -790,6 +841,241 @@ class CognitiveRuntime:
                 ),
             )
         ]
+
+    def _deterministic_exhausted(
+        self,
+        mission: Mission,
+        knowledge: KnowledgeState,
+        pending_steps: list[PlanStep],
+    ) -> bool:
+        """¿Se quedaron sin alternativas las opciones deterministas?
+
+        Pregunta por el replan (`needs_replan`), que es cuando el Core ya decrees que su
+        estrategia se agotó. Usa el MISMO filtro que `options()`, vía `_usable_replan_steps()`:
+        si aquí una alternativa pareciera Usable y `options()` no la ofreciera, el replan
+        dinámico se dispararía con trabajo que el Core sí sabe hacer, que es peor que no
+        tenerlo.
+        """
+        if not knowledge.needs_replan or knowledge.replans >= self.max_replans:
+            return False
+        generation = knowledge.replans + 1
+        usable, _ = self._usable_replan_steps(mission, knowledge, pending_steps, generation)
+        return not usable
+
+    def _has_real_provider(self) -> bool:
+        """¿Hay algún provider REAL para pedir una estrategia?
+
+        Se consulta al router, no al modelo: un provider DEGRADED devolvería una respuesta
+        sin razonar, y `ModelPlanner` la rechaza por `outcome is not REAL`, así que se
+        ahorraría la llamada. Sin esta comprobación, cada replan agotado pagaría una ida al
+        provider para conseguir el mismo rechazo.
+        """
+        providers = getattr(self.model_router, "providers", None)
+        if not callable(providers):
+            return False
+        try:
+            return any(not p.degraded and p.available for p in providers())
+        except Exception:  # noqa: BLE001 — no saberlo es no poder contar con él
+            return False
+
+    def _overlay(self, mission) -> dict | None:
+        """El overlay de replan dinámico, si existe y fue aceptado. `None` si no.
+
+        La existencia del REGISTRO (no de los pasos) es lo que sella el intento: aunque se
+        rechazara, `accepted=False` y `steps=[]` cortan la segunda llamada. Por eso el
+        registro se escribe siempre.
+        """
+        record = _mission_context(mission).get(DYNAMIC_REPLAN_KEY)
+        if not record or not record.get("accepted"):
+            return None
+        return record if record.get("steps") else None
+
+    async def _dynamic_replan(
+        self,
+        mission: Mission,
+        knowledge: KnowledgeState,
+        pending_steps: list[PlanStep],
+    ) -> Decision | None:
+        """Pide una estrategia ALTERNATIVA al modelo. Nunca ejecuta, nunca autoriza.
+
+        Éste es el hueco que CORE-08B cierra: cuando el filtro de repetición se queda sin
+        alternativas, el Core llegaba a la conclusión de que no había nada que hacer y
+        bloqueaba. Con un modelo disponible, "no hay alternativa determinista" NO es "no hay
+        alternativa": es sólo que las deterministas se acabaron.
+
+        La cadena es la misma del plan inicial, sin atajos:
+
+            ModelPlanner (ModelTask.PLAN) → PlanValidator → overlay → pending_steps
+            → validate_step → Gate → executor
+
+        El modelo propone; el `PlanValidator` descarta; `PolicyEngine`/`AutonomyGate`
+        autorizan. Lo único nuevo es de dónde sale la propuesta: el fallo.
+
+        **El intento se sella siempre**, en el `finally`. Si se sellara sólo al aceptar, un
+        modelo que fallara dejaría la misión sin marca y el siguiente replan volvería a
+        llamarlo: los cuatro caminos de fallo (excepción, JSON inválido, plan inválido,
+        plan sin novedad) tienen que dejar la misma marca que el éxito.
+        """
+        # `max_replans` NO se consume aquí (decisión CORE-08B I-3): este replan tiene su
+        # propio tope, el de "una vez por misión", y las dos cosas son independientes.
+        generation = max(1, int(getattr(knowledge, "replans", 0) or 0) + 1)
+        reasons: list[str] = []
+        steps: list[PlanStep] = []
+        provenance: dict = {}
+        blocked_signatures: list[str] = []
+        replaces_step_ids: list[str] = []
+        try:
+            # Se reutiliza el `ModelPlanner` configurado si el runtime lo inyecta, para que el
+            # replan respete SU deadline y SUS `max_tokens` en vez de los del constructor. Si no
+            # hay ninguno, se usa el deadline de decisión del Core, que es la misma clase de
+            # límite: inventar un deadline nuevo aquí sería exactamente subir el timeout.
+            planner = self.plan_model or ModelPlanner(
+                self.model_router, catalog=self.catalog, deadline_ms=self.decision_deadline_ms
+            )
+            proposal = await planner.create_plan(
+                mission,
+                brief=self.self_brief(knowledge),
+                knowledge=knowledge,
+                world=getattr(self, "world", None),
+                failure=self._failure_context(knowledge, pending_steps),
+                # El modelo ve los pasos que el Core aún considera, no el plan entero: lo que
+                # ya se ejecutó no le sirve para decidir qué hacer ahora.
+                plan=Plan(mission.id, list(pending_steps)),
+                site="cognitive._dynamic_replan",
+                proposed_by=DYNAMIC_REPLAN_AUTHOR,
+                remap_ids=True,
+            )
+            provenance = dict(proposal.meta or {})
+            if not proposal.ok or proposal.plan is None:
+                reasons = list(proposal.reasons) or ["el modelo no propuso una estrategia"]
+            else:
+                reasons = list(self.plan_validator.validate(mission, proposal.plan)) if self.plan_validator else []
+                steps, rejected, novelty_reasons = self._screen_overlay_steps(knowledge, proposal.plan, generation)
+                reasons.extend(rejected)
+                reasons.extend(novelty_reasons)
+                if not reasons:
+                    replaces_step_ids = [s.id for s in pending_steps]
+        except Exception as exc:  # noqa: BLE001 — el modelo nunca tumba la misión
+            LOGGER.warning("dynamic replan: el modelo falló (%s); fallback determinista", exc)
+            reasons = [f"modelo no disponible: {exc}"]
+        finally:
+            accepted = bool(steps) and not reasons
+            _mission_context(mission)[DYNAMIC_REPLAN_KEY] = {
+                "version": DYNAMIC_REPLAN_VERSION,
+                "origin": DYNAMIC_REPLAN_AUTHOR,
+                "attempts": 1,
+                "accepted": accepted,
+                "created_iteration": int(getattr(knowledge, "iterations", 0) or 0),
+                "replaces_step_ids": replaces_step_ids if accepted else [],
+                "steps": plan_to_dict(Plan(mission.id, steps)) if accepted else [],
+                "provenance": provenance,
+                "reasons": reasons,
+                "blocked_signatures": blocked_signatures,
+            }
+        if not accepted:
+            return None
+        # La estrategia se SUSTITUYÓ, así que la petición de replan está cumplida. Sin esto el
+        # bucle volvería a ofrecer REPLAN en cada iteración sobre un plan que ya cambió, y
+        # acabaría gastando `max_replans` en replanificaciones que no cambian nada.
+        # NO se usa `note_replan()` a propósito: ésa incrementa `replans`, y el replan dinámico
+        # tiene su propio contador (regla 6). Se limpia la bandera sin consumir el del Core.
+        knowledge.needs_replan = False
+        # El overlay NO se aplica aquí: se aplica en la SIGUIENTE iteración, cuando
+        # `pending_steps()` lo lea. Aplicarlo ya significaría ejecutar en el mismo turno en que
+        # se generaron sus pasos, sin pasar por la revalidación del ciclo siguiente.
+        return self._step_decision(steps[0])
+
+    def _screen_overlay_steps(
+        self,
+        knowledge: KnowledgeState,
+        plan: Plan,
+        generation: int,
+    ) -> tuple[list[PlanStep], list[str], list[str]]:
+        """Filtra los pasos propuestos por el modelo con el MISMO criterio del Core.
+
+        Un paso se conserva si no es una repetición sin novedad —el filtro de `blocked_reason`,
+        sin excepciones— y si está disponible. Devuelve `(pasos, razones_por_paso, razones_de_noveldad)`
+        para que el rechazo diga QUÉ se descartó y no sólo "no me gustó".
+        """
+        kept: list[PlanStep] = []
+        reasons: list[str] = []
+        novelty: list[str] = []
+        for step in plan.steps or []:
+            reason = self.blocked_reason(knowledge, step, generation)
+            if reason:
+                blocked = _action_signature(step)
+                novelty.append(f"el paso '{step.id}' repite una acción que ya falló ({blocked}): {reason}")
+                continue
+            kept.append(step)
+        if not kept:
+            novelty.append("el modelo no propuso ninguna acción distinta de la que ya falló")
+        return kept, reasons, novelty
+
+    def _failure_context(self, knowledge: KnowledgeState, pending_steps: list[PlanStep]) -> dict:
+        """Qué falló, en forma que el planner pueda poner delante del modelo como dato.
+
+        Sin esto el replan dinámico es una lotería: el modelo no ve por qué se cayó y
+        propone la misma acción con otro nombre.
+        """
+        last = None
+        for attempt in reversed(list(knowledge.action_attempts or [])):
+            if not attempt.get("success"):
+                last = attempt
+                break
+        step = None
+        for candidate in pending_steps:
+            if last is not None and candidate.id == last.get("step_id"):
+                step = candidate
+                break
+        return {
+            "step_id": (step.id if step is not None else (last or {}).get("step_id")) or "",
+            "action": (step.action if step is not None else (last or {}).get("action")) or "",
+            "capability": (step.capability if step is not None else (last or {}).get("capability")) or "",
+            "failure_kind": getattr(knowledge, "last_failure_kind", ""),
+            "verdict": getattr(knowledge, "last_verdict", ""),
+            "diagnosis": getattr(knowledge, "diagnosis", ""),
+            "error": getattr(knowledge, "last_error", ""),
+            "failed_steps": list(getattr(knowledge, "failed_steps", []) or []),
+            "action_attempts": [
+                f"{a.get('step_id')}→{'ok' if a.get('success') else 'falló'}: {a.get('error') or ''}"
+                for a in list(knowledge.action_attempts or [])[-10:]
+            ],
+            "hypotheses": list(getattr(knowledge, "hypotheses", []) or [])[-6:],
+            "uncertainties": list(getattr(knowledge, "uncertainties", []) or [])[-6:],
+            "evidence": list(getattr(knowledge, "known", []) or [])[-6:],
+        }
+
+    def _usable_replan_steps(
+        self,
+        mission: Mission,
+        knowledge: KnowledgeState,
+        pending_steps: list[PlanStep],
+        generation: int,
+    ) -> tuple[list[PlanStep], list[tuple[PlanStep, str]]]:
+        """Pasos que un replan puede ofrecer: ni inviables ni repeticiones sin novedad.
+
+        Extraído de `options()` sin cambiar su resultado. Vive fuera porque
+        `decide_next_action()` necesita la MISMA respuesta para una pregunta distinta:
+        ¿queda alguna alternativa determinista? Si la respuesta es "no", es cuando el
+        replan dinámico tiene algo que aportar. Dos lugares calculando esto por su cuenta
+        acabarían divergiendo, y el que divergiera sería el que decide si se llama al
+        modelo.
+
+        El filtro de repetición es el de P0 §12, sin excepciones: mismo criterio aquí que en
+        `options()`.
+        """
+        blocked_by_world = self.world_blocked_ids(mission, pending_steps)
+        usable: list[PlanStep] = []
+        rejections: list[tuple[PlanStep, str]] = []
+        for step in pending_steps:
+            if step.id in blocked_by_world:
+                continue
+            reason = self.blocked_reason(knowledge, step, generation)
+            if reason:
+                rejections.append((step, reason))
+                continue
+            usable.append(step)
+        return usable, rejections
 
     def _step_decision(self, step: PlanStep) -> Decision:
         action = NextAction.RESEARCH if step.action == "research" else NextAction.EXECUTE_TOOL
@@ -1839,6 +2125,22 @@ def _is_self_record(claim, capability: str) -> bool:
     if source.startswith(prefix):
         return not capability or source[len(prefix):] == capability
     return False
+
+
+def _mission_context(mission) -> dict:
+    """El dict de contexto de la misión, creado si no existe.
+
+    Existe por una razón concreta: `getattr(mission, "context", {}) or {}` NO sirve para
+    escribir. Un dict vacío es falsy, así que la expresión devuelve un dict NUEVO y el
+    registro se guarda en un objeto que se pierde al terminar la línea. El overlay parecía
+    escribirse y no sobrevivía a nada. Para LEER sí valía; para escribir hay que tener la
+    referencia real.
+    """
+    context = getattr(mission, "context", None)
+    if context is None:
+        context = {}
+        mission.context = context
+    return context
 
 
 def _scoped_evidence_fingerprint(knowledge, scope: str, capability: str = "") -> str:
