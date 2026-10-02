@@ -211,6 +211,11 @@ async def test_nonexistent_capability_is_rejected_and_never_executed():
                 "action": "research",
                 "capability": "git.magic_super_read",
                 "depends_on": [],
+                # CORE-08B.1: `risk` es obligatorio en el schema. Este fixture lo omite a
+                # propósito para que la ÚNICA razón del rechazo sea la capability inventada;
+                # si faltara `risk`, el plan se rechazaría antes de llegar al validador y el
+                # test mediría otra cosa.
+                "risk": "low",
             }
         ]
     }
@@ -380,6 +385,9 @@ async def test_invalid_arguments_stop_the_plan_before_the_executor():
                 "capability": "fs.read",
                 "depends_on": [],
                 "args": {"path": "../../etc/passwd"},
+                # CORE-08B.1: sin esto el plan se rechazaría por no declarar riesgo y este test
+                # dejaría de medir lo que dice medir: la ruta fuera del perímetro.
+                "risk": "low",
             }
         ]
     }

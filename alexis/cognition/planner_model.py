@@ -562,7 +562,20 @@ class ModelPlanner:
                 reasons.append(f"el paso {index} no es un objeto")
                 continue
             step_id = str(raw.get("id") or f"step-{index + 1}").strip().lower()
-            risk_value = str(raw.get("risk") or "low").strip().lower()
+            # CORE-08B.1: el riesgo NO se deduce. Antes `raw.get("risk") or "low"` convertía
+            # la ausencia en LOW, y como `_plan_schema` no exigía `risk`, un modelo que lo
+            # omitiera declaraba LOW en cualquier capability. Medido con un provider real: las
+            # tres respuestas omitieron `risk`, y un `fs.write` (MEDIUM) llegó al validador
+            # como LOW y fue rechazado por "riesgo declarado insuficiente". El rechazo era
+            # correcto, pero la causa era que ALEXIS se inventaba el dato en vez de exigirlo.
+            # Ahora la ausencia es un motivo explícito por el que el plan no es válido.
+            if "risk" not in raw or not str(raw.get("risk") or "").strip():
+                reasons.append(
+                    f"el paso {index} no declara 'risk': un modelo no puede decidir el riesgo "
+                    f"de una capability, y asumir LOW es mentir sobre el efecto de la acción"
+                )
+                continue
+            risk_value = str(raw.get("risk") or "").strip().lower()
             depends_on = [str(d) for d in (raw.get("depends_on") or [])]
             if remap_ids:
                 # CORE-08B: los pasos de un replan dinámico llevan ids propios (`dr1`, `dr2`…)
@@ -598,7 +611,12 @@ class ModelPlanner:
                 reasons.append(f"id de paso duplicado: {step.id}")
             seen.add(step.id)
         if reasons:
+            # Un plan con un solo paso ilegible no se "arregla" proposing los demás: se rechaza
+            # entero. Devolverlo a medias daría a ejecutar una parte del plan sobre datos que el
+            # modelo noSUPPORTÓ, que es peor que no proponer nada.
             return PlanProposal(reasons=reasons, meta=meta)
+        if not steps:
+            return PlanProposal(reasons=["ningún paso del plan proposals es utilizable"], meta=meta)
         return PlanProposal(plan=Plan(mission.id, steps), reasons=[], meta=meta)
 
 
@@ -624,7 +642,10 @@ def _plan_schema(max_steps: int) -> dict:
                         "expected": {"type": "string"},
                         "rationale": {"type": "string"},
                     },
-                    "required": ["id", "action", "capability", "description"],
+                    # CORE-08B.1: `risk` es obligatorio. El schema que se LE PIDE al modelo
+                    # tiene que reflejar lo que el validador va a exigir; si no, el modelo
+                    # omitirá lo que no le piden y ALEXIS tendrá que inventarlo después.
+                    "required": ["id", "action", "capability", "description", "risk"],
                 },
             }
         },
