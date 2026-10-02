@@ -1,0 +1,69 @@
+# ALEXIS — despliegue en VPS (lo pesado).
+#
+# Qué corre en el VPS: Postgres (pgvector) + Ollama (inferencia) [+ GPU opcional].
+# Tu PC se conecta por túneles SSH hacia los MISMO puertos locales (5433/11434),
+# así la config actual del PC (secrets/models.env, DB default) no cambia.
+#
+# Seguridad por defecto:
+#   - postgres y ollama se publican SOLO en 127.0.0.1 del VPS (no expuestos).
+#   - El acceso desde tu PC es exclusivamente vía túnel SSH cifrado.
+#   - POSTGRES_PASSWORD se exige en .env (sintaxis `:?`), nunca hardcodeado.
+#
+# Modo GPU (opcional): docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: alexis
+      POSTGRES_USER: alexis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio (definelo en deploy/vps/.env)}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - alexis-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alexis -d alexis"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_KEEP_ALIVE: "-1" # no descargar el modelo tras desuso (evita recargas de 20s)
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # One-shot: crea el esquema de la DB (extension vector + schema) y termina.
+  migrate:
+    image: python:3.12-slim
+    # El código se copia al arrancar desde /opt/alexis (setup.sh hace el rsync).
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ALEXIS_DATABASE_URL: postgresql://alexis:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD es obligatorio (definelo en deploy/vps/.env)}@postgres:5432/alexis
+    volumes:
+      - "${ALEXIS_ROOT:-/opt/alexis}:/app"
+      - migrate-pip:/root/.cache/pip
+    working_dir: /app
+    command: >
+      bash -c 'pip install -q "psycopg[binary]" "psycopg_pool" "numpy>=1.24,<3" 2>/dev/null && \
+      python3 -c "import asyncio, os; from alexis.storage.db import Database; \
+      asyncio.run(Database(os.environ[\"ALEXIS_DATABASE_URL\"]).migrate()); print(\"MIGRATE-OK\")"'
+
+volumes:
+  alexis-pgdata:
+  ollama-data:
+  migrate-pip:

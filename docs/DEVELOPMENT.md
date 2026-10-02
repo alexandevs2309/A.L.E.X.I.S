@@ -80,13 +80,38 @@ C3 es el punto más delicado: la salida del LLM es **dato, no instrucción**. Na
 
 Solo tras B y C completos: v0.5 percepción/voz (STT/TTS/visión/pantallas), v0.6 browser/investigación/grafo, v0.7 IoT (MQTT/Home Assistant), v0.8 aprendizaje (skill factory, experimentos, benchmark, fine-tuning), v1.0 Experience Engine integral.
 
+## 3 bis. Ramas y pull requests
+
+`main` está protegida en GitHub: los cambios entran por pull request y no se puede hacer
+force-push ni borrar la rama. Verifícalo con:
+
+```bash
+gh api repos/alexandevs2309/A.L.E.X.I.S/branches/main/protection
+```
+
+La protección **no** se aplica a los administradores, así que un push con token de admin
+sigue pasando. Eso es intencionado: el repositorio es de una sola persona y GitHub no
+permite aprobar el propio pull request, así que exigir una revisión dejaría el repo
+sin forma de hacer merge. Si algún día hay más gente, cierra la salida con
+`enforce_admins: true` en esa misma configuración.
+
+Regla práctica: el trabajo se hace en una rama y se abre un PR, aunque lo revise la misma
+persona que lo escribió. El PR es lo que hace visible el diff; un push directo a `main` es
+lo que permite que dos máquinas escriban la misma línea sin que nadie lo note.
+
+### Nota sobre el historial
+El commit `0cb0e27` aparece en `git log` como si fuera solo del detector de secretos, pero
+también contiene la reconciliación de la documentación de P0: un `--amend` se llevó el
+commit anterior por error. El árbol de trabajo es correcto; solo el mensaje quedó
+desalineado, y no se reescribe historia ya publicada.
+
 ## 4. Flujo de trabajo por capacidad
 
 1. Escribir/actualizar el contrato en `alexis/contracts.py`.
 2. Definir la interfaz (ABC o Protocol) sin implementación.
 3. Implementación mínima que cumple la regla de las 3 preguntas.
 4. Test que demuestre la operación (no el mock).
-5. Registrar elegibilidad: la misión termina en COMPLETED y cada paso deja evidencia.
+5. Registrar elegibilidad: cada paso deja evidencia y la misión llega a COMPLETED sólo con el objetivo verificado.
 6. Auditoría: `mission_id, task_id, actor, tool, args hash, autorización, resultado, verificación, rollback`.
 
 ## 5. Convenciones del repositorio
@@ -99,7 +124,7 @@ Solo tras B y C completos: v0.5 percepción/voz (STT/TTS/visión/pantallas), v0.
 
 ## 6. Decisión de fin de fase
 
-Una fase se cierra cuando el hito produce una **demo vertical**: una misión real que empieza, ejecuta con herramentas reales bajo política y evidencia, falla controlado cuando toca, se audita y termina en COMPLETED. Si "funciona" sin evidencia o sin política, la fase no está cerrada.
+Una fase se cierra cuando el hito produce una **demo vertical**: una misión real que empieza, ejecuta con herramentas reales bajo política y evidencia, falla controlado cuando toca, se audita y termina en COMPLETED, y **COMPLETED sólo es posible con el objetivo verificado** por el `GoalVerifier` (`alexis/cognition/goal_verification.py`): la invariante está en `Mission.__setattr__` y `settle()` es la única autoridad. Si "funciona" sin evidencia, sin política o sin verificación del objetivo, la fase no está cerrada.
 
 ## 7. Variables de entorno y secretos
 
@@ -153,8 +178,34 @@ Detecta prefijos de proveedor (`sk_…`, `sk-ant-…`, `ghp_…`, `github_pat_�
 posición (`change-me`, `REPLACE_ME`…). **Nunca imprime el valor detectado**: sólo ruta,
 línea y patrón.
 
-También está instalado como hook `pre-commit` (`.pre-commit-config.yaml`). `make check`
-ejecuta el gate completo: `secrets-check` + `env-check` + `test`.
+También está disponible como hook `pre-commit` (`.pre-commit-config.yaml`).
+
+#### El check de secretos y los secretos reales
+
+`secrets/*.env` está en `.gitignore`, pero el detector **sí escanea ese directorio**: una
+credencial en claro en disco es un riesgo exista o no el repo, y así lo fija
+`tests/test_security_secrets.py::test_real_env_file_is_scanned`. De ahí la tentación
+de relajar el detector y el problema que causa:
+
+| | Qué mira | Cuándo se ejecuta | Resultado en una máquina con secretos reales |
+|---|---|---|---|
+| `make secrets-check` / `python3 scripts/check_secrets.py` | el árbol entero | a mano, en CI | **falla**, y está bien que falle: informa de lo que hay en disco |
+| hook `pre-commit` | solo los ficheros que se commitean | en cada commit | pasa: tus secretos no se commitean, así que no se miran |
+
+Por eso el hook usa `pass_filenames: true`. Con `always_run: true` escaneaba el repo entero,
+fallaba siempre en la máquina del desarrollador y **nadie lo instalaba**: la regla R1 quedaba
+declarada en un YAML y sin ejecutar. Instalación:
+
+```bash
+pip install pre-commit && pre-commit install
+```
+
+Nunca relajes el detector para silenciar un falso positivo. El sitio correcto es el fixture:
+un DSN de test lleva `change-me`, que ya está en la lista de marcadores, no una palabra
+cualquiera. Y ojo: relajar la regla de contraseñas de DSN hace que `hunter2`, `admin` o
+`mypassword` pasen sin reportarse.
+
+`make check` ejecuta el gate completo: `secrets-check` + `env-check` + `test`.
 
 ### 7.4 Token de la API (R4)
 - `ALEXIS_API_TOKEN` vacío ⇒ en `development` la API arranca **sin auth** y deja un

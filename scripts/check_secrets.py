@@ -65,30 +65,25 @@ DSN_PATTERN = re.compile(
 PLACEHOLDER_MARKERS = (
     "change-me", "changeme", "your-", "your_", "replace_me", "reemplazar", "placeholder",
     "example", "dummy", "fake", "sample", "xxxx", "todo", "none", "null", "<", ">", "${",
-    "env:", "localhost", "127.0.0.1", "test-token", "dev-token", "clave", "password",
+    "env:", "localhost", "127.0.0.1", "test-token", "dev-token",
 )
+
+# `secrets/` NO está en SKIP_DIRS a propósito: sus ficheros reales se escanean aunque git
+# los ignore, porque una credencial en claro en disco es un riesgo exista o no el repo.
+# Eso hace que el check falle en la máquina que tiene secretos reales; ver
+# docs/DEVELOPMENT.md §"El check de secretos y los secretos reales".
 
 SKIP_DIRS = {
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", "dist",
     "build", ".cache", ".mypy_cache", ".ruff_cache", "pgdata",
 }
+
 SKIP_SUFFIXES = {".example", ".pyc", ".pyo", ".png", ".jpg", ".jpeg", ".gif", ".glb", ".bin"}
 
 
 def _is_placeholder(value: str) -> bool:
     lowered = value.lower()
     return any(marker in lowered for marker in PLACEHOLDER_MARKERS)
-
-
-def _looks_like_real_password(password: str) -> bool:
-    """Una contraseña de DSN sólo es sospechosa si *parece* una credencial.
-
-    Sin este filtro, los DSN de ejemplo de los tests (`postgresql://u:p@…`,
-    `…:clave@…`) se marcarían como fugas y el detector dejaría de ser útil.
-    """
-    if not password or _is_placeholder(password):
-        return False
-    return len(password) >= 8 and not _looks_like_placeholder_token(password)
 
 
 def _looks_like_placeholder_token(value: str) -> bool:
@@ -108,7 +103,7 @@ def scan_text(text: str) -> list[tuple[int, str]]:
         for name, pattern in SIGNATURE_PATTERNS.items():
             if name == "connection string con password":
                 match = DSN_PATTERN.search(line)
-                if match and _looks_like_real_password(match.group(1)):
+                if match and not _is_placeholder(match.group(1)):
                     findings.append((lineno, name))
                 continue
             if pattern.search(line):
