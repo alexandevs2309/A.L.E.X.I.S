@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+import re
+
 from alexis.contracts import Mission
 from alexis.world.model import TEST
 
@@ -181,6 +183,62 @@ class GoalVerification:
         )
 
 
+#: CORE-09. Verbos que, en un criterio sobre un fichero, expresan EXISTIR y no "fue escrito".
+#: La distinción importa: "existe" se puede comprobar contra lo observado; "fue escrito" es una
+#: afirmación sobre el PASADO que la observación de un `fs.stat` no demuestra, y por eso no se
+#: acepta como equivalente. Un criterio que sólo dice "existe" sí se comprueba.
+_EXISTS_VERBS = frozenset({"existe", "existen", "existente", "esta", "está", "hay", "creado", "creada"})
+
+#: CORE-09. Una ruta con extensión dentro de un criterio en lenguaje natural.
+_NAMED_PATH = re.compile(r"[\w\-./]+\.[A-Za-z0-9]{1,6}")
+
+
+def infer_file_predicate(criterion: str) -> tuple[str, list[str]] | None:
+    """ predicado implícito de un criterio en lenguaje natural, o `None`.
+
+    CORE-09. `parse_predicate()` sólo acepta la forma explícita (`file_exists:notas.txt`), y un
+    objetivo escrito en lenguaje natural —"el archivo informe.txt existe en el workspace"— no la
+    tiene. Medido en la prueba real de CORE-08: con evidencia real completa (`fs.write` con
+    `exists=true` observado por `verification.filesystem`), el criterio quedaba
+    `insufficient_evidence` y la misión nunca cerraba. El verificador era correcto: no le
+    habían dado nada que comprobar.
+
+    Esto NO relaja la verificación: sólo traduce "hay una ruta y se afirma que existe" al
+    predicado que ya existía. Sigue exigiendo observación real de una herramienta
+    (`source` empieza por `tool:`), y sigue rechazando si el fichero no existe, si la evidencia
+    es de otro path, o si no hay evidencia.
+
+    Deliberadamente NO se infiere nada más:
+    - si el criterio menciona "escrito"/"creado"/"modificado", NO se traduce a `file_exists`
+      (ver `_EXISTS_VERBS`), porque afirmar que algo FUE escrito exige evidencia de escritura,
+      no sólo que ahora exista;
+    - si no hay ruta reconocible, se devuelve `None` y el criterio queda
+      `insufficient_evidence`, como antes.
+    """
+    text = (criterion or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    # Un predicado explícito gana siempre: si está escrito, no hay nada que inferir.
+    if any(f"{name}:" in lowered for name in PREDICATES):
+        return None
+    # Exige un verbo de existencia. Sin él, "no existe" o "falta informe.txt" no se traducirían.
+    if not any(re.search(rf"\b{verb}\b", lowered) for verb in _EXISTS_VERBS):
+        return None
+    match = _NAMED_PATH.search(text)
+    if not match:
+        return None
+    path = match.group(0).strip().strip("\"'.,;:()[]")
+    if not path or path in (".", "..") or path.startswith("/"):
+        # Una ruta absoluta no se infiere: el objetivo la nombraría con su predicado.
+        return None
+    # `no existe`/`falta` significan lo contrario: si se infiriera `file_exists` se invertiría
+    # el sentido del criterio.
+    if re.search(r"\bno (?:existe|existen|hay|está|esta)\b", lowered) or re.search(r"\bfalta\b", lowered):
+        return None
+    return "file_exists", [path]
+
+
 def parse_predicate(criterion: str) -> tuple[str, list[str]] | None:
     """Extrae un predicado conocido del texto del criterio.
 
@@ -251,7 +309,24 @@ class GoalVerifier:
 
     def _evaluate_criterion(self, criterion: str) -> CriterionEvaluation:
         claims = self._claims_about(criterion)
-        parsed = parse_predicate(criterion)
+        # CORE-09: primero el predicado explícito; si no hay, se intenta el implícito. El
+        # implícito devuelve `None` cuando no es inequívoco, y entonces el criterio queda
+        # `insufficient_evidence` exactamente como antes: no se reemplaza un caso por otro.
+        parsed = parse_predicate(criterion) or infer_file_predicate(criterion)
+        inferred = parsed is not None and parse_predicate(criterion) is None
+        if inferred:
+            claims = list(claims) + [
+                CriterionEvidence(
+                    evidence_id="",
+                    source="criterio",
+                    grade=GRADE_EVIDENCE,
+                    detail=(
+                        "el criterio nombra una ruta y afirma que existe pero no declara "
+                        f"predicado explícito; se comprobó como file_exists:{parsed[1][0]}"
+                    ),
+                    trusted=True,
+                )
+            ]
 
         if parsed is None:
             return CriterionEvaluation(
@@ -386,6 +461,30 @@ class GoalVerifier:
             return self._no_observation(criterion, name, path, claims)
 
         exists = bool(observed.attributes.get("exists"))
+        # CORE-09: existencia afirmada por una capability que MUTA no es prueba de que el
+        # fichero exista. `fs.write` con `ok: true` dice "escribí", que es compatible con haber
+        # escrito en otro sitio o con que otro lo borrara después. Sólo una capability que
+        # OBSERVA (`fs.stat`, `fs.read`, `verification.filesystem`) miró el fichero de verdad.
+        # Sin esto, un criterio implícito se daba por cumplido con la evidencia del propio
+        # paso que lo cumpliría:asking- PlanValidator一样, un circuito cerrado.
+        if exists and expected_exists and not self._is_independent_observation(observed):
+            return CriterionEvaluation(
+                criterion=criterion,
+                status=CriterionStatus.INSUFFICIENT_EVIDENCE,
+                reason=(
+                    f"la existencia de {path} sólo la afirmó {observed.source}, que escribe en "
+                    f"lugar de mirar el fichero: hace falta una observación independiente "
+                    f"(fs.stat, fs.read o verification.filesystem) para dar el criterio por cumplido"
+                ),
+                predicate=name,
+                evidence=[CriterionEvidence(
+                    evidence_id=observed.id,
+                    source=observed.source,
+                    grade=GRADE_EVIDENCE,
+                    detail=f"afirmación de escritura, no de existencia observada: {observed.source}",
+                    trusted=True,
+                ), *claims],
+            )
         evidence = CriterionEvidence(
             evidence_id=observed.id,
             source=observed.source,
@@ -479,6 +578,23 @@ class GoalVerifier:
     # ------------------------------------------------------------------ #
     # Fuentes de evidencia
     # ------------------------------------------------------------------ #
+
+    def _is_independent_observation(self, observed) -> bool:
+        """¿La entidad la produjo una capability que MIRA el fichero, o una que lo cambia?
+
+        No es una lista escrita a mano: se lee del CapabilityCatalog, que ya declara
+        `side_effects` por capability. Si el catálogo no está disponible se acepta el hecho,
+        porque entonces no hay forma de distinguir y bloquear sería inventar una duda.
+        """
+        source = str(getattr(observed, "source", "") or "")
+        capability = source.split("tool:", 1)[1] if "tool:" in source else source
+        try:
+            from alexis.capabilities import build_catalog
+
+            spec = build_catalog().get(capability)
+        except Exception:  # noqa: BLE001 — sin catálogo no se bloquea por falta de información
+            return True
+        return not bool(getattr(spec, "side_effects", False))
 
     def _observed_entity(self, path: str):
         """La entidad del mundo que una HERRAMIENTA observó, no la declarada.
