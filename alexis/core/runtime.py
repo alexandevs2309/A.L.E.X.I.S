@@ -68,6 +68,11 @@ class AlexisRuntime:
         self.world = world
         self.plan_model = plan_model
         self.plan_validator = plan_validator
+        #: CORE-08A-1. Por qué el `ModelPlanner` está activo o no. Sin esto, "planificó por
+        #: reglas" es indistinguible de "el modelo estaba mal configurado": dos fallos
+        #: distintos que se ven igual desde fuera.
+        self.plan_planner_mode = "unset"
+        self.plan_planner_reason = ""
         self.latest_verification = None
 
     async def _commit(self, mission: Mission, topic=None, payload=None):
@@ -367,7 +372,16 @@ class AlexisRuntime:
         if not reasons:
             if self.plan_validator is None:
                 return plan, None
-            return plan, {"proposed_by": "rule_based", "source": source, "accepted": True}
+            return plan, {
+                "proposed_by": "rule_based",
+                "source": source,
+                "accepted": True,
+                # CORE-08A-1: si había un ModelPlanner y no se usó, el motivo por el que no
+                # se usó es la mitad del diagnóstico. Sin esta línea, un plan por reglas en
+                # un sistema con modelo disponible y un sistema sin modelo se ven iguales.
+                **({"model_planner": {"mode": self.plan_planner_mode, "reason": self.plan_planner_reason}}
+                   if self.plan_model is None else {}),
+            }
         await self._reject_plan(mission, plan, source=source)
         mission.context["plan_invalid"] = {
             "source": source,
@@ -376,8 +390,73 @@ class AlexisRuntime:
         }
         return None, {"proposed_by": "rule_based", "source": source, "accepted": False, "reasons": reasons}
 
+    def _plan_catalog_reason(self) -> str:
+        """Por qué el validador no puede comprobar capabilities, o `""` si sí puede.
+
+        Sólo se consulta en la ruta del `ModelPlanner`. El validador por defecto del
+        runtime sigue siendo `PlanValidator()` (`require_catalog=False`) porque
+        construye Missions de prueba sin catálogo y su comportamiento no debe cambiar:
+        este hueco no es de un runtime cualquiera, es del que ACEPTA texto de un modelo
+        como plan ejecutable.
+        """
+        if self.plan_validator is None:
+            return "no hay validador de planes: el plan de un modelo no se puede comprobar"
+        # El catálogo se exige AQUÍ, y no por el `require_catalog` del validador: ese flag es
+        # del validador (compatibilidad con quien valida args), y esta ruta tiene una exigencia
+        # propia y más fuerte. Confiar en el flag dejaría pasar un plan de modelo con un
+        # `PlanValidator()` a secas, que es precisamente el agujero que este runtime no
+        # puede permitirse: su salida se ejecuta.
+        if getattr(self.plan_validator, "catalog", None) is None:
+            return (
+                "no hay catálogo de capabilities: no se puede comprobar que el plan use "
+                "capacidades reales (un catálogo ausente NO significa 'todo disponible')"
+            )
+        checker = getattr(self.plan_validator, "_catalog_unusable", None)
+        if callable(checker):
+            return checker() or ""
+        return ""
+
+    async def _plan_without_catalog(self, mission: Mission, reason: str):
+        """Sin catálogo no se llama al modelo: se registra el motivo y se cae a reglas.
+
+        Mismo contrato que un plan del modelo inválido: `plan.invalid` con su motivo,
+        `plan_provenance` con `accepted=False`, y el `RuleBasedPlanner` como suelo.
+        """
+        provenance = {
+            "proposed_by": "model",
+            "accepted": False,
+            "cognition_outcome": "skipped",
+            "reasons": [reason],
+            "fallback": "rule_based_planner",
+        }
+        record = {
+            "source": "model",
+            "accepted": False,
+            "reasons": [reason],
+            "steps": [],
+            "cognition_outcome": "skipped",
+        }
+        mission.context.setdefault("plan_rejected", []).append(record)
+        await self.events.publish("plan.invalid", {"mission_id": mission.id, **record})
+        if self.event_repo is not None:
+            await self.event_repo.append("plan.invalid", {"mission_id": mission.id, **record}, mission.id)
+        fallback, fallback_provenance = await self._plan_with_rules(mission, source="rule_based_fallback")
+        provenance["fallback_validation"] = fallback_provenance
+        provenance["fallback_steps"] = [s.id for s in (fallback.steps if fallback else [])]
+        return fallback, provenance
+
     async def _plan_with_model(self, mission: Mission):
         """ModelPlanner → PlanValidator → (fallback) RuleBasedPlanner."""
+        # CORE-08A-3: un plan propuesto por un modelo sólo puede aceptarse si el validador
+        # puede comprobar sus capabilities. Sin catálogo, las reglas de existencia y de
+        # disponibilidad están desactivadas por completo y una capability inventada se
+        # aceptaría: el validador devolvería "válido" sin haber mirado nada. Se comprueba
+        # ANTES de llamar al modelo, no después: así no se gasta una llamada (de hasta
+        # 46-60s con un modelo local) para descartar su resultado, y la provenance dice
+        # con honestidad que no llegó a haber plan.
+        reason = self._plan_catalog_reason()
+        if reason:
+            return await self._plan_without_catalog(mission, reason)
         cognitive = self.cognitive
         brief = cognitive.self_brief() if cognitive is not None else None
         knowledge = cognitive.knowledge_for(mission) if cognitive is not None else None

@@ -95,12 +95,43 @@ class PlanValidator:
     se decide si la propuesta tiene sentido y es ejecutable en este mundo.
     """
 
-    def __init__(self, catalog=None, brief: SelfBrief | None = None, *, max_steps: int = 8, policy=None):
+    def __init__(self, catalog=None, brief: SelfBrief | None = None, *, max_steps: int = 8, policy=None,
+                 require_catalog: bool = False):
         self.catalog = catalog
         self.brief = brief
         self.max_steps = max_steps
         self.envelope = None
         self.policy = policy
+        #: CORE-08A-3. Exigir catálogo es opt-in porque el validador sin catálogo aparece en
+        #: tests y componentes aislados que validan ARGS (no capabilities) y ahí no debe
+        #: cambiar nada. Pero en un runtime que ACEPTA planes de un modelo, la ausencia de
+        #: catálogo no es inocua: las comprobaciones de existencia y disponibilidad se
+        #: saltan por completo (`catalog is None` y `available()` vacío son ambos falso), y
+        #: entonces una capability inventada pasa el filtro. Eso es exactamente el fallo que
+        #: este flag hace explícito en vez de silencioso.
+        self.require_catalog = require_catalog
+
+    def _catalog_unusable(self) -> str | None:
+        """Motivo por el que este validador NO puede comprobar capabilities, o `None`.
+
+        "No tengo catálogo" y "todo está disponible" son cosas distintas. Sin catálogo, un
+        validador que devuelve `[]` está afirmando que el plan es válido cuando en realidad
+        no ha mirado nada. Con `require_catalog` eso se convierte en un motivo explícito,
+        que el runtime convierte en fallback determinista.
+        """
+        if not self.require_catalog:
+            return None
+        if self.catalog is None:
+            return (
+                "no hay catálogo de capabilities: no se puede comprobar que el plan use "
+                "capacidades reales (un catálogo ausente NO significa 'todo disponible')"
+            )
+        if not self.available():
+            return (
+                "el catálogo no tiene ninguna capability habilitada: no se puede validar "
+                "ningún plan (un catálogo vacío NO significa 'todo disponible')"
+            )
+        return None
 
     def available(self) -> set:
         if self.brief is not None and self.brief.available_capabilities:
@@ -113,6 +144,9 @@ class PlanValidator:
         reasons: list[str] = []
         steps = list(plan.steps or [])
         self.envelope = mission.envelope
+        unusable = self._catalog_unusable()
+        if unusable:
+            return [unusable]
         if not steps:
             return ["plan vacío: el modelo no propuso ningún paso"]
         if len(steps) > self.max_steps:
@@ -140,6 +174,9 @@ class PlanValidator:
         segunda lista de reglas.
         """
         self.envelope = mission.envelope
+        unusable = self._catalog_unusable()
+        if unusable:
+            return [unusable]
         available = self.available() if available is None else available
         declared = set(getattr(mission.envelope, "capabilities", []) or []) if declared is None else declared
         forbidden = set(getattr(mission.envelope, "forbidden_actions", []) or []) if forbidden is None else forbidden
@@ -302,6 +339,29 @@ class PlanValidator:
         return reasons
 
 
+def _provenance(response) -> dict[str, Any]:
+    """Provenance COMPLETA de la respuesta del router, la que CORE-05 ya sabe dar.
+
+    Antes esto se reescribía a mano con cuatro campos (`provider`, `model`, `latency_ms`,
+    `cognition_outcome`) mientras `ModelResponse.audit_event()` calculaba doce. Reconstruir
+    aquí un subconjunto perdía justo lo que sólo el router sabe resolver: qué modelo se
+    pidió frente al que acabó respondiendo, si hubo cadena de fallback y cuánto costó. Sin
+    eso, auditar por qué un plan del modelo salió como salió exige reconstruirlo a mano.
+
+    `audit_event()` no incluye tokens: se leen de la respuesta, porque el consumo de tokens
+    es parte de lo que un plan cuesta y limita.
+
+    Se llama al método en vez de copiar sus campos para que, si CORE-05 lo amplía, la
+    provenance del plan lo recoja sin tocar aquí.
+    """
+    meta = dict(response.audit_event(ModelTask.PLAN))
+    outcome = getattr(response, "outcome", None)
+    meta["cognition_outcome"] = getattr(outcome, "value", None) or "none"
+    meta["tokens_in"] = int(getattr(response, "tokens_in", 0) or 0)
+    meta["tokens_out"] = int(getattr(response, "tokens_out", 0) or 0)
+    return meta
+
+
 def _find_cycle(graph: dict) -> list[str] | None:
     visiting, done, stack = set(), set(), []
 
@@ -415,12 +475,7 @@ class ModelPlanner:
             LOGGER.warning("planner: el modelo falló (%s); fallback determinista", exc)
             return PlanProposal(reasons=[f"modelo no disponible: {exc}"], meta={"cognition_outcome": "unavailable"})
 
-        meta = {
-            "provider": getattr(response, "provider", None),
-            "model": getattr(response, "model", None),
-            "latency_ms": getattr(response, "latency_ms", None),
-            "cognition_outcome": response.outcome.value,
-        }
+        meta = _provenance(response)
         if response.outcome is not ModelOutcome.REAL:
             reason = (
                 "respuesta DEGRADED: no hubo razonamiento real"

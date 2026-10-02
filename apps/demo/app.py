@@ -311,6 +311,42 @@ class OfficialRuntime:
             return None
 
 
+def _plan_eligible(router, envelope) -> tuple[bool, str]:
+    """¿Tiene sentido pedirle una estrategia al modelo ahora mismo?
+
+    CORE-08A-1. Esto NO decide si el plan será válido: eso es trabajo del `PlanValidator`,
+    que sigue siendo la autoridad determinista. Sólo decide si hay a quién preguntar y si
+    es affordable. Que haya un provider registrado NO basta: un provider puede estar
+    DEGRADED, o ser real y estar agotado.
+
+    No se hace aquí ninguna llamada de red. Preguntar al modelo y que su respuesta acabe en
+    el mismo fallback puede costar 46-60s con un modelo local, y ese precio no se paga para
+    descubrir algo que ya se sabe mirando el router.
+
+    Tres modos (`ALEXIS_MODEL_PLANNER`):
+      `0`       → OFF absoluto; ni se consulta esta función.
+      `1`       → ON explícito, aunque no haya provider real (para depurar).
+      otro/auto → se consulta esta función.
+
+    El motivo que devuelve acaba en `plan_provenance`, para que "planificó por reglas" sea
+    una decisión reconstruible y no un silencio.
+    """
+    reales = [p for p in router.providers() if not p.degraded and p.available]
+    if not reales:
+        return False, "no hay ningún provider REAL disponible (DEGRADED/UNAVAILABLE)"
+    # Presupuesto con la misma lectura que hace el router (CORE-06): `max_cost_usd == 0`
+    # significa sin límite. Se consulta con la clave vacía porque en el arranque aún no hay
+    # misión; el presupuesto de una misión se evalúa más tarde, en `_plan_with_model`.
+    gastado = router.spent_usd_for("")
+    limites = [x for x in (getattr(router, "budget_usd", 0), getattr(envelope, "max_cost_usd", 0)) if x > 0]
+    if limites and gastado >= min(limites):
+        return False, (
+            f"sin presupuesto para planificar (gastado {gastado:.4f} USD, "
+            f"límite {min(limites):.4f})"
+        )
+    return True, f"provider REAL elegible: {', '.join(p.id for p in reales)}"
+
+
 def build_official_runtime(
     *,
     loop: asyncio.AbstractEventLoop,
@@ -503,18 +539,42 @@ def build_official_runtime(
             return result
         return await RUNTIME.executor.execute(mission, step, tool_name=tool_name)
 
-    RUNTIME.plan_validator = PlanValidator(catalog=CAPABILITIES, policy=RUNTIME.policy)
-    _planner_flag = model_planner_env if model_planner_env is not None else os.environ.get("ALEXIS_MODEL_PLANNER", "0")
-    if _planner_flag == "1":
-        RUNTIME.plan_model = ModelPlanner(
+    def _build_model_planner():
+        """Un único sitio donde se decide CÓMO se construye el planner.
+
+        Los tres modos comparten construcción; lo que cambia es si se llega a construirlo.
+        """
+        return ModelPlanner(
             MODEL_ROUTER,
             catalog=CAPABILITIES,
             max_tokens=MODEL_CONFIG.max_tokens,
             deadline_ms=MODEL_CONFIG.deadline_ms,
         )
-        print("[cognitive] ModelPlanner activo (ALEXIS_MODEL_PLANNER=1): el modelo propone, el validador decide")
+
+    RUNTIME.plan_validator = PlanValidator(
+        catalog=CAPABILITIES, policy=RUNTIME.policy, require_catalog=True
+    )
+    _planner_flag = model_planner_env if model_planner_env is not None else os.environ.get("ALEXIS_MODEL_PLANNER", "auto")
+    _planner_reason = ""
+    if _planner_flag == "0":
+        RUNTIME.plan_planner_mode = "off"
+        _planner_reason = "ALEXIS_MODEL_PLANNER=0: ModelPlanner desactivado explícitamente"
+    elif _planner_flag == "1":
+        RUNTIME.plan_model = _build_model_planner()
+        RUNTIME.plan_planner_mode = "on"
+        _planner_reason = "ALEXIS_MODEL_PLANNER=1: ModelPlanner activado explícitamente"
     else:
-        print("[cognitive] plan por reglas (ALEXIS_MODEL_PLANNER != 1); el ModelPlanner está disponible")
+        # Sin `envelope`: en el arranque no hay misión, y el presupuesto de una misión se
+        # evalúa en `_plan_with_model`, ya con ella. Aquí sólo es comprobable el global.
+        _eligible, _planner_reason = _plan_eligible(MODEL_ROUTER, None)
+        if _eligible:
+            RUNTIME.plan_model = _build_model_planner()
+            RUNTIME.plan_planner_mode = "auto"
+        else:
+            RUNTIME.plan_planner_mode = "auto-fallback"
+    RUNTIME.plan_planner_reason = _planner_reason
+    print(f"[cognitive] ModelPlanner={RUNTIME.plan_planner_mode} ({_planner_reason}); "
+          f"plan por reglas disponible como suelo")
 
     RUNTIME.cognitive = CognitiveRuntime(
         policy=RUNTIME.policy,
