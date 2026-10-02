@@ -593,6 +593,12 @@ def build_official_runtime(
         catalog=CAPABILITIES,
         goal_verifier=GoalVerifier(world=WORLD),
         plan_validator=RUNTIME.plan_validator,
+        # CORE-08B: el MISMO planner que la aplicación ya construyó y activó según
+        # `ALEXIS_MODEL_PLANNER`. Sin esto, el replan dinámico construía uno propio con el
+        # deadline de DECISIÓN, ignorando el `max_tokens`/`deadline_ms` del planner de
+        # producción: dos configuraciones distintas para el mismo trabajo. Compartir la
+        # instancia también hace que su provenance sea comparable con la del plan inicial.
+        plan_model=RUNTIME.plan_model,
         decision_max_tokens=MODEL_CONFIG.max_tokens,
         decision_deadline_ms=MODEL_CONFIG.deadline_ms,
     )

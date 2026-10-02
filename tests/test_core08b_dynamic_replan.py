@@ -865,3 +865,74 @@ async def test_27_external_un_modelo_real_propone_una_alternativa():
         assert overlay["steps"][0]["capability"]
     else:
         assert overlay["reasons"], "un rechazo siempre explica por qué"
+
+
+# ======================================================================
+# Cableado: el planner de la aplicación es el que usa el replan dinámico
+# ======================================================================
+
+
+@pytest.mark.asyncio
+async def test_28_el_replan_usa_el_planner_configurado_y_no_crea_otro():
+    """Si la aplicación ya construyó un `ModelPlanner`, ése es el que se usa.
+
+    Construir otro aquí significaría dos configuraciones para el mismo trabajo: el planner de
+    producción conoce el `max_tokens` y el `deadline_ms` decididos en el arranque, y uno nuevo
+    usaría los del constructor. Además, dos instancias hacen que la provenance del replan no
+    sea comparable con la del plan inicial.
+    """
+    from alexis.cognition.planner_model import ModelPlanner
+
+    mission = _mission()
+    router = _StubRouter(_plan_response(ALTERNATIVE))
+    configured = ModelPlanner(router, catalog=build_catalog(), max_tokens=777, deadline_ms=4321)
+    cognitive = _cognitive(router)
+    cognitive.plan_model = configured
+    knowledge = _exhausted(KnowledgeState(), _step("investigar"))
+    original = _step("investigar")
+
+    await _attempt(cognitive, mission, knowledge, _plan(original), [original])
+
+    assert cognitive.plan_model is configured, "el runtime no debe sustituir el planner"
+    sent = _plan_calls(router)[0]
+    assert sent.max_tokens == 777, "el PLAN debe heredar el presupuesto del planner configurado"
+    assert sent.deadline_ms == 4321, "el PLAN debe heredar el deadline configurado"
+
+
+@pytest.mark.asyncio
+async def test_29_sin_planner_configurado_se_construye_uno_con_el_deadline_de_decision():
+    """Sin instancia inyectada se construye una, pero NO con el deadline del constructor.
+
+    `ModelPlanner` nace con `deadline_ms=90000`. Usar ése sería subirle el timeout al replan
+    respecto a las decisiones, que comparten el límite del Core.
+    """
+    mission = _mission()
+    router = _StubRouter(_plan_response(ALTERNATIVE))
+    cognitive = _cognitive(router)
+    cognitive.plan_model = None
+    cognitive.decision_deadline_ms = 12345
+    knowledge = _exhausted(KnowledgeState(), _step("investigar"))
+    original = _step("investigar")
+
+    await _attempt(cognitive, mission, knowledge, _plan(original), [original])
+
+    assert _plan_calls(router)[0].deadline_ms == 12345
+
+
+@pytest.mark.asyncio
+async def test_30_la_provenance_no_depende_de_que_planner_se_use():
+    """Da igual cuál sea la instancia: la provenance sale de la respuesta, no del planner."""
+    from alexis.cognition.planner_model import ModelPlanner
+
+    mission = _mission()
+    router = _StubRouter(_plan_response(ALTERNATIVE))
+    cognitive = _cognitive(router)
+    cognitive.plan_model = ModelPlanner(router, catalog=build_catalog(), max_tokens=99)
+    knowledge = _exhausted(KnowledgeState(), _step("investigar"))
+    original = _step("investigar")
+
+    await _attempt(cognitive, mission, knowledge, _plan(original), [original])
+
+    provenance = mission.context[DYNAMIC_REPLAN_KEY]["provenance"]
+    assert provenance["cost_usd"] == 0.0002
+    assert provenance["tokens_in"] == 311
