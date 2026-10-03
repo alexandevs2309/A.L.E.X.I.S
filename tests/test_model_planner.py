@@ -80,6 +80,9 @@ def _good_plan_json():
                 "depends_on": [],
                 "risk": "low",
                 "expected": "saber si existe",
+                "objective": "obtener el estado real del archivo",
+                "success_criteria": ["se observa si el archivo existe"],
+                "requires_approval": false,
             },
             {
                 "id": "leer",
@@ -88,6 +91,10 @@ def _good_plan_json():
                 "capability": "fs.read",
                 "depends_on": ["observar"],
                 "risk": "low",
+                "objective": "leer el contenido del archivo",
+                "success_criteria": ["se obtiene una observación del contenido"],
+                "expected": "contenido observable del archivo",
+                "requires_approval": false,
             },
         ]
     }
