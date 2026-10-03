@@ -582,6 +582,12 @@ class CognitiveRuntime:
         los pasos se quedarían proposes dos veces o ninguna.
         """
         steps = list(plan.steps) if plan is not None else []
+        # CORE-10: lo que la recuperación confirmó en el mundo cuenta como hecho, aunque el
+        # KnowledgeState restaurado no lo supiera. Sin esto, un paso que sí se ejecutó antes
+        # del corte se volvería a ofrecer, y repetir un `fs.write` es escribir dos veces.
+        context = getattr(mission, "context", None) or {}
+        settled = set(context.get("recovered_completed_steps") or [])
+        unsettled = set(context.get("recovered_failed_steps") or [])
         overlay = self._overlay(mission)
         if overlay:
             masked = set(overlay.get("replaces_step_ids") or [])
@@ -592,7 +598,10 @@ class CognitiveRuntime:
         return [
             step
             for step in steps
-            if step.id not in knowledge.completed_steps and step.id not in knowledge.failed_steps
+            if step.id not in knowledge.completed_steps
+            and step.id not in knowledge.failed_steps
+            and step.id not in settled
+            and step.id not in unsettled
         ]
 
     # ------------------------------------------------------------------ #

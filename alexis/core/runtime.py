@@ -13,6 +13,214 @@ log = logging.getLogger(__name__)
 
 
 class AlexisRuntime:
+    # ------------------------------------------------------------------ #
+    # CORE-10 — Autonomous Recovery
+    #
+    # La regla que gobierna todo lo que hay debajo: CHECKPOINT ≠ VERDAD.
+    #
+    # Un checkpoint dice "esto creíamos que había ocurrido"; lo que ocurrió de verdad lo dice
+    # el mundo, y sólo se pregunta ejecutando una observación real. Por eso la recuperación
+    # tiene tres pasos y no dos: RESTORE → INSPECT WORLD → DECIDE. Quitar el del medio la
+    # convierte en un replay con pasos, que para `fs.write` es escribir dos veces y para
+    # `fs.remove` es borrar algo que quizá alguien ya reemplazó.
+    #
+    # Este código NO reimplementa el World Model, ni la evidencia, ni el plan, ni la policy:
+    # observa con las herramientas que ya existen, se apoya en `CapabilitySpec.side_effects`
+    # para saber qué es repetible, y devuelve una decisión que el Core ejecuta por su cuenta.
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _probe_path_of(step):
+        """El `path` de un paso, si lo tiene: es lo que se observará para confirmar la acción.
+
+        No se inventa un predicado. Se toma el objetivo real de la herramienta, de modo que la
+        inspección sea la misma que haría la acción si se repitiera, y no una pregunta aparte
+        que pudiera dar una respuesta distinta.
+        """
+        args = dict(getattr(step, "args", {}) or {})
+        path = args.get("path")
+        return path if isinstance(path, str) and path.strip() else None
+
+    def _recovery_manager(self):
+        """El `RecoveryManager` con el catálogo real, para preguntar por los side effects.
+
+        Se construye por uso y no en el `__init__` porque el catálogo ya está inyectado en
+        otra pieza; tomarlo de donde esté evita dos fuentes de verdad para "qué sabe hacer
+        ALEXIS".
+        """
+        from alexis.autonomy.recovery import RecoveryManager
+
+        catalog = getattr(self.cognitive, "catalog", None) if self.cognitive is not None else None
+        if catalog is None:
+            try:
+                from alexis.capabilities import build_catalog
+
+                catalog = build_catalog()
+            except Exception:  # noqa: BLE001 — sin catálogo se asume efecto (fail-safe)
+                catalog = None
+        return RecoveryManager(catalog=catalog)
+
+    async def _inspect_path(self, mission: Mission, path: str):
+        """Mira el mundo real con la herramienta real. Devuelve `None` si no se pudo mirar.
+
+        `None` no es "no existe": es "no sé", y recovery lo trata como `UNKNOWN`. Esa
+        distinción evita que un fallo de inspección se convierta en un "no ocurrió" que
+        provoke una repetición.
+        """
+        if self.executor is None:
+            return None
+        from alexis.contracts import PlanStep
+
+        probe = PlanStep(
+            id="__recovery_probe__",
+            description="inspección de recuperación",
+            action="research",
+            risk=RiskLevel.LOW,
+            agent="critic",
+            capability="fs.stat",
+            args={"path": path},
+        )
+        try:
+            result = await self.executor.execute(mission, probe, tool_name="fs.stat")
+        except Exception as exc:  # noqa: BLE001 — no poder mirar no es "no existe"
+            log.warning("recovery: no pude inspeccionar %s (%s)", path, exc)
+            return None
+        if not result.success or not isinstance(result.output, dict):
+            return {"exists": False, "error": str(result.error or "")}
+        return {"exists": bool(result.output.get("exists")), "output": result.output}
+
+    async def _recover_mission(self, mission: Mission) -> bool:
+        """RESTORE → INSPECT WORLD → DECIDE. Devuelve si la misión puede continuar.
+
+        El orden ES el diseño. Y la precedencia de la decisión también: primero lo que
+        protege (preguntar), después lo que evita trabajo inútil (completar), y sólo al final
+        lo optimista (reanudar). Invertirlo dejaría pasar una acción destructiva sin confirmar.
+        """
+        from alexis.autonomy.recovery import (
+            ActionStatus,
+            LastKnownAction,
+            RecoveryDecision,
+            RecoveryState,
+        )
+
+        manager = self._recovery_manager()
+        # §11: una misión que quedó esperando aprobación NO se reanuda por su cuenta. Recovery
+        # no concede excepciones: si había una aprobación pendiente antes del corte, sigue
+        # pendiente. Continuar aquí ejecutaría algo que una persona todavía no autorizó.
+        if mission.state is MissionState.WAITING_APPROVAL:
+            mission.context.setdefault("recovery_hold", {})["reason"] = (
+                "la misión estaba esperando aprobación antes del corte: no se reanuda sola"
+            )
+            await self._commit(mission, "recovery.hold", {
+                "mission_id": mission.id,
+                "reason": mission.context["recovery_hold"]["reason"],
+            })
+            return False
+        state = RecoveryState.from_dict(mission.context.get("recovery")) or RecoveryState(
+            mission_id=mission.id, created_at=time.time()
+        )
+        state.attempt += 1
+        state.reason = "reanudación tras corte: el proceso anterior no registró el final"
+        state.updated_at = time.time()
+
+        action = LastKnownAction.from_dict(
+            mission.context.get("inflight_action") or mission.context.get("last_action")
+        )
+
+        # --- INSPECCIÓN: el mundo, no el checkpoint ------------------------- #
+        observation = None
+        if action is not None and action.probe_path:
+            observation = await self._inspect_path(mission, action.probe_path)
+        state.observed = {"probe_path": action.probe_path if action else None,
+                          "observation": observation}
+
+        # --- QUÉ SE PUEDE AFIRMAR ------------------------------------------- #
+        if action is None:
+            state.decision_reason = "no quedó ninguna acción a medias; nada que contrastar"
+            state.action_status, state.unconfirmed = {}, []
+        else:
+            status = manager.assess(action, observation)
+            state.action_status = {action.step_id: status.value}
+            # Aquí van TODAS las acciones sin confirmar,effects o no. Cuáles bloquean lo
+            # decide `decide()`, que es quien tiene el mapa `step_id -> capability`: filtrar
+            # aquí duplicaría el criterio en dos sitios y basta con que uno se quede viejo
+            # para que una lectura se vuelva a ciegas.
+            state.unconfirmed = [
+                action.step_id
+                for step_id, value in state.action_status.items()
+                if value in (ActionStatus.UNKNOWN.value, ActionStatus.PARTIAL.value,
+                             ActionStatus.CONFLICTED.value)
+            ]
+
+        manager.bind_capabilities({action.step_id: action.capability} if action else {})
+
+        # --- DECISIÓN --------------------------------------------------------- #
+        goal_ok = False
+        if self.cognitive is not None and self.cognitive.goal_verifier is not None:
+            goal_ok = bool(getattr(self.cognitive.goal_verifier.verify(mission), "verified", False))
+
+        plan_valid = mission.plan is not None
+        if plan_valid and self.plan_validator is not None:
+            plan_valid = not self.plan_validator.validate(mission, mission.plan)
+
+        decision = manager.decide(state, goal_satisfied=goal_ok, plan_still_valid=plan_valid)
+
+        # --- AUDIT + PERSISTENCIA --------------------------------------------- #
+        mission.context["recovery"] = state.to_dict()
+        await self._commit(mission, f"recovery.{decision.value}", {
+            "mission_id": mission.id,
+            "decision": decision.value,
+            "reason": state.decision_reason,
+            "attempt": state.attempt,
+            "action_status": state.action_status,
+            "observed": state.observed,
+        })
+        await self.events.publish(f"recovery.{decision.value}", {
+            "mission_id": mission.id,
+            "reason": state.decision_reason,
+            "action_status": state.action_status,
+        })
+
+        if decision is RecoveryDecision.ABORT:
+            mission.state = MissionState.BLOCKED
+            mission.context["recovery_aborted"] = state.decision_reason
+            await self._commit(mission)
+            return False
+
+        if decision is RecoveryDecision.ASK_USER:
+            # No se ejecuta nada automáticamente: esa acción sin confirmar es justo lo que
+            # tiene que decidir una persona.
+            mission.state = MissionState.WAITING_APPROVAL
+            mission.context["recovery_ask"] = {
+                "reason": state.decision_reason,
+                "steps": list(state.unconfirmed),
+                "capability": action.capability if action else None,
+            }
+            await self._commit(mission)
+            return False
+
+        if decision is RecoveryDecision.COMPLETE:
+            return True
+
+        # RESUME / REPLAN: lo confirmado no se repite.
+        if action is not None:
+            status = state.action_status.get(action.step_id)
+            if status == ActionStatus.EXECUTED.value:
+                # Se traduce "el mundo lo vio hecho" al idioma que el Core entiende, para que
+                # `pending_steps()` no vuelva a ofrecerlo.
+                recovered = mission.context.setdefault("recovered_completed_steps", [])
+                if action.step_id not in recovered:
+                    recovered.append(action.step_id)
+            elif status == ActionStatus.FAILED.value:
+                mission.context.setdefault("recovered_failed_steps", []).append(action.step_id)
+
+        if decision is RecoveryDecision.REPLAN:
+            # El plan guardado ya no vale contra el mundo. Se descarta y `_ensure_plan`
+            # lo regenera; ese plan nuevo volverá a pasar por PlanValidator, Policy y Gate.
+            mission.plan = None
+            mission.context.pop("plan_steps", None)
+
+        return True
     """Top-level orchestrator. Integrations are injected behind interfaces.
 
     Dos caminos, mismo runtime:
@@ -282,6 +490,44 @@ class AlexisRuntime:
             if outcome:
                 return outcome
         return str((getattr(mission, "context", {}) or {}).get("cognition_outcome") or "none")
+
+    async def _record_inflight_action(self, mission: Mission, step) -> None:
+        """Escribe la acción EN VOLO antes de ejecutarla (CORE-10).
+
+        Ésta es la pieza que hace que un corte sea reconstruible. Sin ella, si el proceso
+        muere entre la intención y la ejecución, al volver no hay ningún rastro de que ALEXIS
+        iba a hacer nada: el paso simplemente no está y parece que nunca se intentó.
+
+        Con ella, el corte deja una marca explícita de "esto se intentó, resultado
+        desconocido". Que es distinto de "no se intentó", y es la diferencia entre reintentar
+        y preguntar.
+        """
+        from alexis.autonomy.recovery import LastKnownAction
+
+        try:
+            mission.context["inflight_action"] = LastKnownAction(
+                step_id=str(step.id),
+                capability=str(getattr(step, "capability", "") or ""),
+                action=str(getattr(step, "action", "") or ""),
+                args=dict(getattr(step, "args", {}) or {}),
+                plan_generation=1,
+                recorded_status="unknown",
+                probe_path=self._probe_path_of(step),
+                recorded_at=time.time(),
+            ).to_dict()
+        except Exception as exc:  # noqa: BLE001 — un checkpoint fallido no puede parar la misión
+            log.warning("recovery: no pude registrar la acción en vuelo (%s)", exc)
+
+    async def _settle_inflight_action(self, mission: Mission, step) -> None:
+        """Cierra la marca de acción en vuelo cuando el paso terminó de verdad."""
+        inflight = mission.context.get("inflight_action")
+        if not inflight:
+            return
+        inflight = dict(inflight)
+        inflight["recorded_status"] = "executed"
+        inflight["settled_at"] = time.time()
+        mission.context["last_action"] = inflight
+        mission.context.pop("inflight_action", None)
 
     async def _ensure_plan(self, mission: Mission):
         """Deja en `mission.plan` un plan válido, venga de donde venga.
@@ -608,6 +854,21 @@ class AlexisRuntime:
                      "world_entities": restored},
                 )
                 await self.events.publish("mission.recovered", resume.to_dict())
+                # CORE-10: restaurar el estado NO es decidir. Antes de continuar hay que
+                # MIRAR el mundo y contrastarlo con lo que se creía, porque una acción pudo
+                # ejecutarse justo antes de que el proceso muriera. Si esto devuelve False, la
+                # misión quedó en WAITING_APPROVAL o BLOCKED y NO se ejecuta nada a ciegas.
+                if not await self._recover_mission(mission):
+                    await self._close(mission, mission.state)
+                    return mission
+                # La inspección puede haber invalidated el plan: se vuelve a asegurar.
+                plan = mission.plan or await self._ensure_plan(mission)
+                if plan is None:
+                    mission.state = MissionState.FAILED
+                    await self._commit(mission, "mission.recovery_unplannable",
+                                      {"mission_id": mission.id})
+                    await self._close(mission, mission.state)
+                    return mission
             return await self._run_cognitive(mission, plan, start)
 
         for index, step in enumerate(plan.steps):
@@ -663,6 +924,10 @@ class AlexisRuntime:
                 return mission
 
             await self.events.publish("mission.step_started", step.id)
+            # CORE-10: antes de ejecutar, no después. Si el proceso muere entre aquí y el
+            # resultado, el corte queda marcado como acción intentada de resultado
+            # desconocido, que es lo que permite NO repetirla a ciegas al volver.
+            await self._record_inflight_action(mission, step)
             if self.task_runner is not None:
                 result, task = await self.task_runner.run_step(mission, step, self.executor.execute)
                 if task.status.value == "failed":
@@ -716,6 +981,7 @@ class AlexisRuntime:
 
             if self.task_runner is not None:
                 await self.task_runner.save_checkpoint(mission, index)
+                await self._settle_inflight_action(mission, step)
 
         mission.state = MissionState.VERIFYING
         verification = await self.verifier.verify(mission, plan)
