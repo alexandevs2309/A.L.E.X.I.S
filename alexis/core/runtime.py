@@ -254,6 +254,7 @@ class AlexisRuntime:
         world=None,
         plan_model=None,
         plan_validator=None,
+        learning_repo=None,
     ):
         self.planner = planner
         self.policy = policy
@@ -276,6 +277,10 @@ class AlexisRuntime:
         self.world = world
         self.plan_model = plan_model
         self.plan_validator = plan_validator
+        #: CORE-11: persistencia del ciclo de aprendizaje. Opcional para que los tests y las
+        #: composiciones sin base sigan funcionando; cuando está, las skills sobreviven al
+        #: reinicio, que es la diferencia entre un registro y un sistema que aprende.
+        self.learning_repo = learning_repo
         #: CORE-08A-1. Por qué el `ModelPlanner` está activo o no. Sin esto, "planificó por
         #: reglas" es indistinguible de "el modelo estaba mal configurado": dos fallos
         #: distintos que se ven igual desde fuera.
@@ -1006,6 +1011,182 @@ class AlexisRuntime:
             return self.goal_verifier.verify(mission)
         return None
 
+    async def _advance_learning(self, mission: Mission) -> None:
+        """CORE-11 — EXPERIENCE → OUTCOME → REFLECTION → LESSON → CANDIDATE → SKILL v1.
+
+        Encadenado al epílogo de una misión VERIFICADA. Se ejecuta después de que la misión
+        está resuelta y con `try/except` porque aprender nunca debe tumbar una misión que ya
+        terminó bien: un fallo de aprendizaje se registra y se sigue.
+
+        Lo que NO hace, y es lo importante: no valida skills por su cuenta. Llama al
+        `SkillValidator`, que es determinista y pregunta al catálogo y a la policy. Y una
+        lección nunca cambia envelope ni policy — lo que se guarda es CONOCIMIENTO, no
+        autoridad.
+        """
+        from alexis.learning.lesson import (
+            Lesson,
+            Outcome,
+            build_lesson_from_outcome,
+            classify_outcome,
+        )
+        from alexis.learning.skill import (
+            SkillRegistry,
+            SkillValidator,
+            skill_from_lesson,
+        )
+
+        try:
+            experience = (getattr(mission, "context", {}) or {}).get("experience") or {}
+            verified = (getattr(mission, "context", {}) or {}).get("verified_learning") or {}
+            if not experience:
+                return
+
+            outcome = classify_outcome(
+                goal_verified=bool(experience.get("goal_verified")),
+                mission_state=str(getattr(mission.state, "value", "") or ""),
+                blocked_reason=str((getattr(mission, "context", {}) or {}).get("blocked_reason") or ""),
+                recovery_aborted=str((getattr(mission, "context", {}) or {}).get("recovery_aborted") or ""),
+                failures=list(experience.get("failures") or []) or [
+                    r for r in list(mission.results or []) if not r.get("success")
+                ],
+            )
+
+            lesson = build_lesson_from_outcome(
+                experience_id=str(experience.get("mission_id") or mission.id),
+                statement=str(verified.get("lesson") or "").strip()
+                or f"la estrategia de la misión terminó con outcome={outcome.value}",
+                outcome=outcome,
+                evidence=list(experience.get("evidence_refs") or []),
+                scope=_lesson_scope(mission),
+                applicability=_lesson_applicability(mission),
+                contraindications=_lesson_contraindications(mission, outcome),
+                prerequisites=list((getattr(mission.envelope, "capabilities", []) or []))[:3],
+            )
+            if not lesson.statement:
+                return
+
+            if self.learning_repo is not None:
+                await self.learning_repo.save_lesson(lesson)
+            mission.context["lesson"] = lesson.to_dict()
+            await self.events.publish("learning.lesson_created", {
+                "mission_id": mission.id, "lesson_id": lesson.lesson_id,
+                "outcome": outcome.value, "confidence": lesson.confidence,
+                "basis": lesson.confidence_basis, "scope": lesson.scope,
+            })
+
+            # Sólo un outcome verificado y con evidencia genera candidata. Un PARTIAL enseña
+            # por qué falló, no cómo hacer las cosas bien.
+            if not outcome.is_verified_success or not lesson.is_backed:
+                return
+
+            candidate = skill_from_lesson(lesson)
+            if candidate is None:
+                return
+            candidate.required_capabilities = _capabilities_used(mission) or [
+                c for c in (getattr(mission.envelope, "capabilities", []) or [])
+            ]
+            candidate.procedure = _procedure_from_mission(mission)
+            # El riesgo se toma del PEOR paso de la procedure, no del envelope. Declarar
+            # `medium` porque el envelope lo permite sería estimar por lo que ALEXIS PODRÍA
+            # hacer en vez de por lo que esta estrategia HACE, que es lo que se valida.
+            candidate.risk = max(
+                (str(s.get("risk") or "low") for s in candidate.procedure),
+                key=lambda r: ("low", "medium", "high", "critical").index(r)
+                if r in ("low", "medium", "high", "critical") else 0,
+                default="low",
+            ) if any(s.get("side_effects") for s in candidate.procedure) else "low"
+
+            registry = self.skill_registry()
+            validator = SkillValidator(catalog=self._capability_catalog(), policy=self.policy)
+            if self.learning_repo is not None:
+                await self.learning_repo.save_candidate(candidate)
+            await self.events.publish("learning.skill_candidate_created", {
+                "mission_id": mission.id, "candidate_id": candidate.candidate_id,
+                "name": candidate.name,
+            })
+
+            version = validator.promote(
+                candidate,
+                envelope=mission.envelope,
+                existing=registry.all(),
+            )
+            if version is None:
+                await self.events.publish("learning.skill_rejected", {
+                    "mission_id": mission.id, "candidate_id": candidate.candidate_id,
+                    "reasons": candidate.provenance.get("rejection_reasons") or [],
+                })
+                return
+
+            registry.add(version)
+            if self.learning_repo is not None:
+                await self.learning_repo.save_skill_version(version)
+            mission.context["skill_version"] = version.to_dict()
+            await self.events.publish("learning.skill_validated", {
+                "mission_id": mission.id, "skill_id": version.skill_id,
+                "version": version.version, "name": version.name,
+            })
+            await self.events.publish("learning.skill_version_created", {
+                "mission_id": mission.id, "skill_id": version.skill_id,
+                "version": version.version,
+            })
+        except Exception as exc:  # noqa: BLE001 — aprender no puede tumbar una misión cerrada
+            log.warning("learning: el ciclo de aprendizaje falló (%s)", exc)
+
+    def skill_registry(self):
+        """El registro de skills, construido una vez y reutilizado.
+
+        Se guarda en la instancia porque las versiones deben acumular: una segunda misión que
+        descubra la misma skill debe ver la que ya existe, no empezar de cero.
+        """
+        registry = getattr(self, "_skill_registry", None)
+        if registry is None:
+            from alexis.learning.skill import SkillRegistry
+
+            registry = SkillRegistry()
+            self._skill_registry = registry
+        return registry
+
+    def _capability_catalog(self):
+        catalog = getattr(self.cognitive, "catalog", None) if self.cognitive is not None else None
+        if catalog is None:
+            try:
+                from alexis.capabilities import build_catalog
+
+                catalog = build_catalog()
+            except Exception:  # noqa: BLE001
+                catalog = None
+        return catalog
+
+    async def record_skill_performance(
+        self, mission: Mission, *, skill_id: str, version: int, duration_s: float = 0.0,
+    ) -> None:
+        """CORE-11 §17 — cómo fue una vez que se usó una skill.
+
+        Se registra DESPUÉS de la misión, y no degrada nada por sí sola: con menos de tres
+        ejecuciones no se puede distinguir "esta skill es mala" de "tuve mala suerte".
+        """
+        from alexis.learning.skill import SkillPerformance
+
+        record = SkillPerformance(
+            skill_id=skill_id,
+            version=version,
+            mission_id=mission.id,
+            outcome=str(getattr(mission.state, "value", "") or ""),
+            verified=bool(getattr(getattr(mission, "goal_verification", None), "verified", False)),
+            duration_s=duration_s,
+            failures=sum(1 for r in (mission.results or []) if not r.get("success")),
+            replans=int(((getattr(mission, "context", {}) or {}).get("knowledge") or {}).get("replans") or 0),
+            recovered=bool(((getattr(mission, "context", {}) or {}).get("recovery"))),
+            confidence=1.0 if (mission.results and all(r.get("success") for r in mission.results)) else 0.4,
+        )
+        self.skill_registry().record_performance(record)
+        if self.learning_repo is not None:
+            await self.learning_repo.save_performance(record)
+        await self.events.publish("learning.skill_performance_recorded", {
+            "mission_id": mission.id, "skill_id": skill_id, "version": version,
+            "outcome": record.outcome, "verified": record.verified,
+        })
+
     async def _finalize(self, mission: Mission, verification, goal_verified: bool = False):
         """Epílogo común a los dos caminos: learning, persistencia, auditoría, eventos.
 
@@ -1015,6 +1196,11 @@ class AlexisRuntime:
         """
         if verification.passed and goal_verified and self.learning is not None:
             await self.learning.record_experience(mission, verification)
+            # CORE-11: el ciclo completo. De una experiencia VERIFICADA sale una lección, y de
+            # una lección con alcance y evidencia sale una candidata que se valida contra el
+            # catálogo y la policy REALES. Si algo falla aquí, la misión ya está cerrada: no
+            # se propaga, porque aprender no es un paso de la misión.
+            await self._advance_learning(mission)
 
         if self.verification_repo is not None:
             await self.verification_repo.insert(
@@ -1181,3 +1367,86 @@ class AlexisRuntime:
 
             if self.task_runner is not None:
                 await self.task_runner.save_checkpoint(mission, len(knowledge.completed_steps))
+
+def _lesson_scope(mission: Mission) -> str:
+    """Ámbito de la lección, deducido de las capabilities que la misión usó.
+
+    Es la clave por la que se buscan después. Se deriva del dominio real —qué capabilities
+    hizo falta— y no del texto del objetivo, porque dos misiones con el mismo objetivo pueden
+    necesitar capacidades distintas, y el texto no lo dice.
+    """
+    caps = _capabilities_used(mission)
+    if not caps:
+        return ""
+    roots = sorted({c.split(".", 1)[0] for c in caps})
+    return "/".join(roots) + "/derived"
+
+
+def _lesson_applicability(mission: Mission) -> str:
+    """Cuándo aplica la lección: la combinación de objetivo y capacidades.
+
+    Es lo que la búsqueda compara después. Se escribe con la misma fuente que `scope` para que
+    una lección nunca afirme un alcance distinto del que sus capacidades justifican.
+    """
+    caps = _capabilities_used(mission)
+    return f"{str(getattr(mission.goal, 'objective', '') or '')[:120]} :: {', '.join(caps)}".strip(" ::")
+
+
+def _lesson_contraindications(mission: Mission, outcome) -> list[str]:
+    """Cuándo NO aplicar la lección.
+
+    Se rellena con las condiciones que hacen que esta estrategia no valga: es la parte que
+    impide que una lección se aplique donde no toca. Se construye siempre, incluso vacía, para
+    que la ausencia se vea como ausencia y no como olvido.
+    """
+    notes = ["no aplicar fuera del envelope de la misión"]
+    if outcome.value == "partial":
+        notes.append("el objetivo quedó a medias: no demuestra que la estrategia funcione")
+    if any(not r.get("success") for r in (mission.results or [])):
+        notes.append("hubo pasos fallidos: revisar antes de repetir la estrategia")
+    if not (getattr(mission.envelope, "auto_approve", None) or []):
+        notes.append("sin auto_approve: cualquier acción que lo necesite requiere aprobación")
+    return notes
+
+
+def _capabilities_used(mission: Mission) -> list[str]:
+    """Las capabilities que la misión usó de verdad, según sus decisiones registradas."""
+    used = {
+        str((entry or {}).get("capability") or "")
+        for entry in ((getattr(mission, "context", {}) or {}).get("decisions") or {}).values()
+    }
+    return sorted(c for c in used if c)
+
+
+def _procedure_from_mission(mission: Mission) -> list[dict]:
+    """La estrategia que la misión siguió, en forma ejecutable.
+
+    Se construye desde el plan REAL que se ejecutó, no desde una descripción: una skill cuyo
+    procedure no coincide con lo que ALEXIS sabe hacer es una skill que fallaría la primera vez
+    que se use.
+    """
+    plan = getattr(mission, "plan", None)
+    if plan is None:
+        return []
+    from alexis.capabilities import build_catalog
+
+    try:
+        catalog = build_catalog()
+    except Exception:  # noqa: BLE001
+        catalog = None
+    steps: list[dict] = []
+    for step in plan.steps or []:
+        capability = str(getattr(step, "capability", "") or "")
+        side_effects = False
+        if catalog is not None and capability and catalog.has(capability):
+            side_effects = bool(getattr(catalog.get(capability), "side_effects", False))
+        steps.append({
+            "id": str(getattr(step, "id", "")),
+            "action": str(getattr(step, "action", "")),
+            "capability": capability,
+            "risk": str(getattr(getattr(step, "risk", None), "value", "low") or "low"),
+            "args": dict(getattr(step, "args", {}) or {}),
+            "requires_approval": bool(getattr(step, "requires_approval", False)),
+            "side_effects": side_effects,
+        })
+    return steps

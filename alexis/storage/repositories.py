@@ -572,3 +572,167 @@ def _entity_from_row(row) -> object:
         "conflicts": row.get("conflicts") or [],
         "value_counts": row.get("value_counts") or {},
     })
+
+
+class LearningRepository:
+    """Persistencia del ciclo de aprendizaje (CORE-11).
+
+    Reutiliza la misma capa y la misma conexión que el resto del storage: no hay una segunda
+    base de datos para el aprendizaje, porque dos almacenes que guardan el mismo conocimiento
+    acaban discrepando y entonces ninguno es verdad.
+
+    `skill_versions` NO tiene `update` a propósito. Una versión publicada es inmutable; una
+    mejora es una versión nueva. Si se pudiera sobrescribir, una ejecución antigua dejaría de
+    poder reconstruirse contra la skill que realmente se usó, que es justo para lo que sirve un
+    registro de experiencia.
+    """
+
+    def __init__(self, db: Database):
+        self.db = db
+
+    # ------------------------------------------------------------------ #
+    # Lecciones
+    # ------------------------------------------------------------------ #
+
+    async def save_lesson(self, lesson) -> bool:
+        """Guarda la lección. `False` si ya existía: una lección es idempotente por id."""
+        await self.db.execute(
+            """
+            INSERT INTO lessons (lesson_id, statement, scope, source_experience, outcome,
+                                 confidence, payload)
+            VALUES (%(lesson_id)s, %(statement)s, %(scope)s, %(source_experience)s, %(outcome)s,
+                    %(confidence)s, %(payload)s::jsonb)
+            ON CONFLICT (lesson_id) DO NOTHING
+            """,
+            {
+                "lesson_id": lesson.lesson_id,
+                "statement": lesson.statement,
+                "scope": lesson.scope or "",
+                "source_experience": lesson.source_experience or "",
+                "outcome": lesson.outcome,
+                "confidence": float(lesson.confidence or 0.0),
+                "payload": json.dumps(lesson.to_dict(), ensure_ascii=False, default=str),
+            },
+        )
+        return True
+
+    async def lessons(self, *, limit: int = 200, scope: str | None = None) -> list[dict]:
+        if scope:
+            rows = await self.db.fetch(
+                "SELECT payload FROM lessons WHERE scope = %(scope)s ORDER BY created_at DESC LIMIT %(limit)s",
+                {"scope": scope, "limit": limit},
+            )
+        else:
+            rows = await self.db.fetch(
+                "SELECT payload FROM lessons ORDER BY created_at DESC LIMIT %(limit)s",
+                {"limit": limit},
+            )
+        return [json.loads(row["payload"]) for row in rows]
+
+    # ------------------------------------------------------------------ #
+    # Candidatas
+    # ------------------------------------------------------------------ #
+
+    async def save_candidate(self, candidate) -> bool:
+        await self.db.execute(
+            """
+            INSERT INTO skill_candidates (candidate_id, name, status, payload)
+            VALUES (%(candidate_id)s, %(name)s, %(status)s, %(payload)s::jsonb)
+            ON CONFLICT (candidate_id) DO UPDATE SET status = EXCLUDED.status
+            """,
+            {
+                "candidate_id": candidate.candidate_id,
+                "name": candidate.name,
+                "status": candidate.status,
+                "payload": json.dumps(candidate.to_dict(), ensure_ascii=False, default=str),
+            },
+        )
+        return True
+
+    async def candidates(self, *, status: str | None = None, limit: int = 200) -> list[dict]:
+        if status:
+            rows = await self.db.fetch(
+                "SELECT payload FROM skill_candidates WHERE status = %(status)s ORDER BY created_at DESC LIMIT %(limit)s",
+                {"status": status, "limit": limit},
+            )
+        else:
+            rows = await self.db.fetch(
+                "SELECT payload FROM skill_candidates ORDER BY created_at DESC LIMIT %(limit)s",
+                {"limit": limit},
+            )
+        return [json.loads(row["payload"]) for row in rows]
+
+    # ------------------------------------------------------------------ #
+    # Versiones (inmutables)
+    # ------------------------------------------------------------------ #
+
+    async def save_skill_version(self, version) -> bool:
+        await self.db.execute(
+            """
+            INSERT INTO skill_versions (skill_id, version, name, status, payload)
+            VALUES (%(skill_id)s, %(version)s, %(name)s, %(status)s, %(payload)s::jsonb)
+            ON CONFLICT (skill_id, version) DO NOTHING
+            """,
+            {
+                "skill_id": version.skill_id,
+                "version": version.version,
+                "name": version.name,
+                "status": version.status,
+                "payload": json.dumps(version.to_dict(), ensure_ascii=False, default=str),
+            },
+        )
+        return True
+
+    async def skill_versions(self, *, status: str | None = None, limit: int = 200) -> list[dict]:
+        """Las skills utilizables. Superseded sigue saliendo: se puede auditar qué se usó."""
+        if status:
+            rows = await self.db.fetch(
+                "SELECT payload FROM skill_versions WHERE status = %(status)s ORDER BY created_at DESC LIMIT %(limit)s",
+                {"status": status, "limit": limit},
+            )
+        else:
+            rows = await self.db.fetch(
+                "SELECT payload FROM skill_versions ORDER BY created_at DESC LIMIT %(limit)s",
+                {"limit": limit},
+            )
+        return [json.loads(row["payload"]) for row in rows]
+
+    # ------------------------------------------------------------------ #
+    # Rendimiento
+    # ------------------------------------------------------------------ #
+
+    async def save_performance(self, record) -> bool:
+        await self.db.execute(
+            """
+            INSERT INTO skill_performance (skill_id, version, mission_id, verified, payload)
+            VALUES (%(skill_id)s, %(version)s, %(mission_id)s, %(verified)s, %(payload)s::jsonb)
+            """,
+            {
+                "skill_id": record.skill_id,
+                "version": record.version,
+                "mission_id": record.mission_id,
+                "verified": bool(record.verified),
+                "payload": json.dumps(record.to_dict(), ensure_ascii=False, default=str),
+            },
+        )
+        return True
+
+    async def performance(self, *, skill_id: str, version: int | None = None, limit: int = 500) -> list[dict]:
+        if version is not None:
+            rows = await self.db.fetch(
+                """
+                SELECT payload FROM skill_performance
+                WHERE skill_id = %(skill_id)s AND version = %(version)s
+                ORDER BY created_at DESC LIMIT %(limit)s
+                """,
+                {"skill_id": skill_id, "version": version, "limit": limit},
+            )
+        else:
+            rows = await self.db.fetch(
+                """
+                SELECT payload FROM skill_performance
+                WHERE skill_id = %(skill_id)s ORDER BY created_at DESC LIMIT %(limit)s
+                """,
+                {"skill_id": skill_id, "limit": limit},
+            )
+        return [json.loads(row["payload"]) for row in rows]

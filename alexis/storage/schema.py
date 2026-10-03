@@ -115,6 +115,59 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
   CREATE INDEX IF NOT EXISTS ix_checkpoints_mission ON checkpoints(mission_id, step_index);
 
+-- CORE-11: el aprendizaje tiene que sobrevivir a un reinicio. Sin esto, una lección es texto
+-- en RAM y una skill es un fichero que nadie ejecuta. Las cuatro tablas están separadas por
+-- su ciclo de vida, no por conveniencia: una lección nace de una experiencia, una candidata de
+-- una lección, una versión de una candidata validada, y el rendimiento de un uso. Borrar una
+-- candidata no debe borrar la lección que la originó.
+CREATE TABLE IF NOT EXISTS lessons (
+    id BIGSERIAL PRIMARY KEY,
+    lesson_id TEXT NOT NULL UNIQUE,
+    statement TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT '',
+    source_experience TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT 'unknown',
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+  CREATE INDEX IF NOT EXISTS ix_lessons_scope ON lessons(scope, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS skill_candidates (
+    id BIGSERIAL PRIMARY KEY,
+    candidate_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+  CREATE INDEX IF NOT EXISTS ix_skill_candidates_name ON skill_candidates(name, status);
+
+-- Una versión publicada es INMUTABLE: la app no expone un UPDATE, y por eso una ejecución
+-- antigua siempre se puede reconstruir contra la skill que realmente se usó.
+CREATE TABLE IF NOT EXISTS skill_versions (
+    id BIGSERIAL PRIMARY KEY,
+    skill_id TEXT NOT NULL,
+    version INT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'validated',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (skill_id, version)
+);
+  CREATE INDEX IF NOT EXISTS ix_skill_versions_status ON skill_versions(status, name);
+
+CREATE TABLE IF NOT EXISTS skill_performance (
+    id BIGSERIAL PRIMARY KEY,
+    skill_id TEXT NOT NULL,
+    version INT NOT NULL,
+    mission_id TEXT NOT NULL,
+    verified BOOLEAN NOT NULL DEFAULT FALSE,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+  CREATE INDEX IF NOT EXISTS ix_skill_performance_skill ON skill_performance(skill_id, version);
+
   -- P0 §4.3 — World Model persistente. Sustituye a `mission.context["world"]` como almacén
   -- de autoridad; esa proyección sigue existiendo, pero ya no es la fuente.
   --

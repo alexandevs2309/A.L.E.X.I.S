@@ -153,6 +153,7 @@ def init_storage(loop: asyncio.AbstractEventLoop) -> dict:
         from alexis.storage.repositories import (
             AuditRepository,
             CheckpointRepository,
+            LearningRepository,
             EventRepository,
             ExecutionRepository,
             MissionRepository,
@@ -182,8 +183,11 @@ def init_storage(loop: asyncio.AbstractEventLoop) -> dict:
         storage["observation"] = ObservationRepository(db)
         storage["checkpoint"] = CheckpointRepository(db)
         storage["world"] = WorldRepository(db)
+        # CORE-11: el aprendizaje persiste en la MISMA base, no en una segunda. Una skill que
+        # sólo vive en RAM no es una skill: es un texto que se pierde al reiniciar.
+        storage["learning"] = LearningRepository(db)
         print("Persistencia PostgreSQL activa (missions, tasks, executions, checkpoints, "
-              "verifications, observations, audit, world).")
+              "verifications, observations, audit, world, learning).")
     except Exception as exc:  # noqa: BLE001 — sin base se arranca igual, pero se avisa
         print(f"[warn] persistencia no disponible: {exc}")
     return storage
@@ -487,6 +491,7 @@ def build_official_runtime(
         verification_repo=storage.get("verification"),
         task_runner=None,
         observation_repo=storage.get("observation"),
+        learning_repo=storage.get("learning"),
         gate=AutonomyGate(),
     )
 

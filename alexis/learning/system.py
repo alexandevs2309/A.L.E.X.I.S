@@ -7,8 +7,14 @@ leen, pero la fuente de verdad es `records`.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import replace
 
-from alexis.learning.experience import Experience, LearningBoundary, VerifiedExperience
+from alexis.learning.experience import (
+    Experience,
+    ExperienceStore,
+    LearningBoundary,
+    VerifiedExperience,
+)
 from alexis.learning.reflection import build_reflection
 from alexis.cognition.state import KnowledgeState, Verdict
 
@@ -29,6 +35,11 @@ class ExperienceLearner(LearningSystem):
         self.experiences: list[dict] = []
         self.records: list[VerifiedExperience] = []
         self.boundary = LearningBoundary()
+        #: CORE-11: sin esto la experiencia se perdía. `record_experience` la construía, pero
+        #: nadie la escribía en `mission.context`, así que `ExperienceStore.load()` — que es
+        #: lo que la recupera tras un reinicio — no encontraba nada que leer. La clase existía,
+        #: la llamada no.
+        self.store = ExperienceStore()
 
     async def record_experience(self, mission, verification):
         goal_verified = bool(getattr(verification, "verified", False))
@@ -43,6 +54,31 @@ class ExperienceLearner(LearningSystem):
             reflection=reflection.to_dict(),
         )
         verified = self.boundary.evaluate(experience, reflection)
+# CORE-11: los `evidence_refs` viajan vacíos. La `LearningBoundary` puede afirmar sin
+        # ellos, pero una `Experience` sin evidencia no puede sostener una `Lesson` que sí la
+        # tenga: el aprendizaje se cortaba justo después de verificarse. Se rellenan desde los
+        # claims REALES de la misión, los mismos que respaldan la verificación.
+        #
+        # `Experience` es un dataclass CONGELADO (una experiencia es un hecho, no se edita a
+        # posteriori), así que se reconstruye con `replace` en vez de asignar el campo.
+        if not experience.evidence_refs:
+            refs = sorted({
+                str(evidence_id)
+                for claim in list(getattr(knowledge, "claims", []) or [])
+                for evidence_id in (getattr(claim, "evidence_ids", []) or [])
+            })[:8]
+            if not refs:
+                # Sin `evidence_ids` explícitos, el identificador del propio claim es la
+                # referencia mínima defendible: existe y es trazable.
+                refs = sorted({
+                    str(getattr(claim, "id", "") or "")
+                    for claim in list(getattr(knowledge, "claims", []) or [])
+                    if getattr(claim, "id", "")
+                })[:8]
+            experience = replace(experience, evidence_refs=refs)
+        # Se adjunta al contexto ANTES de publicarla, para que sobreviva al reinicio. El
+        # `verified` es un dataclass congelado: se adjunta la reflexión que ya lleva dentro.
+        ExperienceStore.attach(mission, experience, verified)
         self.records.append(verified)
         self.experiences.append(
             {
@@ -56,6 +92,7 @@ class ExperienceLearner(LearningSystem):
                 "lesson": verified.lesson,
             }
         )
+        await self.store.publish(verified)
         return verified
 
     def lessons(self) -> list[str]:
