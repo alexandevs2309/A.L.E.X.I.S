@@ -574,6 +574,19 @@ class ModelPlanner:
                 step_id = f"dr{index + 1}"
                 depends_on = [f"dr{depends_on.index(d) + 1}" if d in depends_on else d
                               for d in depends_on]
+            step_objective = str(raw.get("objective") or "").strip()
+            step_criteria = [
+                str(value).strip()
+                for value in (raw.get("success_criteria") or [])
+                if str(value).strip()
+            ]
+            step_expected = str(raw.get("expected") or "").strip()
+            if not step_objective:
+                reasons.append(f"el paso '{step_id}' no declara objective")
+            if not step_criteria:
+                reasons.append(f"el paso '{step_id}' no declara success_criteria")
+            if not step_expected:
+                reasons.append(f"el paso '{step_id}' no declara expected observation")
             steps.append(
                 PlanStep(
                     id=step_id,
@@ -588,8 +601,10 @@ class ModelPlanner:
                     verification=raw.get("verification") if isinstance(raw.get("verification"), str) else None,
                     proposed_by=proposed_by,
                     rationale=raw.get("rationale") if isinstance(raw.get("rationale"), str) else None,
+                    objective=step_objective or None,
+                    success_criteria=step_criteria,
                     args=raw.get("args") if isinstance(raw.get("args"), dict) else {},
-                    expected=raw.get("expected") if isinstance(raw.get("expected"), str) else None,
+                    expected=step_expected or None,
                 )
             )
         seen: set[str] = set()
@@ -623,8 +638,13 @@ def _plan_schema(max_steps: int) -> dict:
                         "args": {"type": "object"},
                         "expected": {"type": "string"},
                         "rationale": {"type": "string"},
+                        "objective": {"type": "string"},
+                        "success_criteria": {"type": "array", "minItems": 1, "items": {"type": "string"}},
                     },
-                    "required": ["id", "action", "capability", "description"],
+                    "required": [
+                        "id", "action", "capability", "description",
+                        "objective", "success_criteria", "expected", "risk", "requires_approval"
+                    ],
                 },
             }
         },
