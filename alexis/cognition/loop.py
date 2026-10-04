@@ -60,7 +60,11 @@ from alexis.world.model import WorldEntity
 # CORE-08B: el replan dinámico necesita al `ModelPlanner` para pedir una estrategia nueva.
 # El import va arriba y no dentro del método porque es un ciclo real de dependencias: el
 # runtime ya importa este módulo, y el planner NO importa el runtime.
-from alexis.cognition.planner import plan_from_dict, plan_to_dict  # noqa: E402
+from alexis.cognition.planner import (
+    fill_step_contract,
+    plan_from_dict,
+    plan_to_dict,
+)  # noqa: E402
 from alexis.cognition.planner_model import ModelPlanner  # noqa: E402
 
 LOGGER = logging.getLogger("alexis.cognition.runtime")
@@ -1437,7 +1441,7 @@ class CognitiveRuntime:
                 before,
             )
 
-        step = self._plan_step_for(decision, pending_steps)
+        step = self._plan_step_for(decision, pending_steps, mission=mission)
         step_reasons = self.validate_step(mission, step)
         if step_reasons:
             knowledge.add_uncertainty(
@@ -1558,7 +1562,13 @@ class CognitiveRuntime:
             return ExecutionResult(success=False, error="no hay executor inyectado")
         return await self.executor.execute(mission, step, tool_name=decision.tool)
 
-    def _plan_step_for(self, decision: Decision, pending_steps: list[PlanStep]) -> PlanStep:
+    def _plan_step_for(
+        self,
+        decision: Decision,
+        pending_steps: list[PlanStep],
+        *,
+        mission: Mission | None = None,
+    ) -> PlanStep:
         for step in pending_steps:
             if step.id != decision.step_id:
                 continue
@@ -1578,9 +1588,11 @@ class CognitiveRuntime:
                     rationale=decision.rationale,
                     args=dict(step.args or {}),
                     expected=step.expected,
+                    objective=step.objective,
+                    success_criteria=list(step.success_criteria or []),
                 )
             return step
-        return PlanStep(
+        step = PlanStep(
             id=decision.step_id or "cognitive-step",
             description=decision.description or decision.rationale,
             action="research" if decision.action is NextAction.RESEARCH else "execute",
@@ -1590,6 +1602,10 @@ class CognitiveRuntime:
             rationale=decision.rationale,
             args=dict(decision.args or {}),
         )
+        # Req 7: un paso derivado durante un replan también lleva su contrato por-paso.
+        if mission is not None:
+            fill_step_contract(mission, step)
+        return step
 
     def validate_step(self, mission: Mission, step: PlanStep) -> list[str]:
         """Misma autoridad de validación que el runtime, aplicada al paso que va a

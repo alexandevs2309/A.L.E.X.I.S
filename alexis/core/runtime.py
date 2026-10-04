@@ -3,13 +3,29 @@ import time
 
 from alexis.autonomy.goal_state import settle
 from alexis.contracts import Mission, MissionState, RiskLevel, Verification
-from alexis.cognition.planner import plan_from_dict, plan_to_dict
+from alexis.cognition.planner import (
+    PLANNED_FALLBACK_TEMPLATE,
+    plan_from_dict,
+    plan_to_dict,
+)
 from alexis.cognition.planner_model import PlanValidator
 from alexis.cognition.state import NextAction
 from alexis.learning.experience import EXPERIENCE_SOURCE
 from alexis.meta.cognition import MetaCognition
 
 log = logging.getLogger(__name__)
+
+
+def _plan_strategy(plan) -> str:
+    """Estrategia del plan por reglas para la traza (Req 6).
+
+    `objective_driven` cuando el plan se generó para el objetivo concreto;
+    `fallback_template` cuando es la plantilla universal declarada como único fallback.
+    """
+    if plan is None or not plan.steps:
+        return "unknown"
+    marker = getattr(plan.steps[0], "proposed_by", None)
+    return "fallback_template" if marker == PLANNED_FALLBACK_TEMPLATE else "objective_driven"
 
 
 class AlexisRuntime:
@@ -649,6 +665,9 @@ class AlexisRuntime:
                 return plan, None
             return plan, {
                 "proposed_by": "rule_based",
+                # Requisito 6: distinguir en la traza la estrategia generada para el
+                # objetivo de la plantilla universal declarada como sólo fallback.
+                "strategy": _plan_strategy(plan),
                 "source": source,
                 "accepted": True,
                 # CORE-08A-1: si había un ModelPlanner y no se usó, el motivo por el que no

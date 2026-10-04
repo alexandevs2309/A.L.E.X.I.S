@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from alexis.cognition.contracts import SelfBrief
+from alexis.cognition.planner import fill_step_contract
 from alexis.contracts import Plan, PlanStep, RiskLevel
 from alexis.models.correlation import for_mission
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
@@ -617,6 +618,11 @@ class ModelPlanner:
             return PlanProposal(reasons=reasons, meta=meta)
         if not steps:
             return PlanProposal(reasons=["ningún paso del plan proposals es utilizable"], meta=meta)
+        # Req 7: los campos por-paso se derivan de forma determinista, NUNCA se copian de
+        # lo que el modelo diga. El parse no lee `objective`/`success_criteria` del modelo:
+        # un modelo no puede ampliar autoridad ni afirmar cómo (ni si) se verifica un paso.
+        for step in steps:
+            fill_step_contract(mission, step)
         return PlanProposal(plan=Plan(mission.id, steps), reasons=[], meta=meta)
 
 
