@@ -317,8 +317,8 @@ async def test_full_chain_plan_args_are_what_executes(tmp_path):
         capabilities=["cognition.understand", "research.filesystem", "fs.read", "fs.stat", "tts.speak"],
     )
     plan = await Planner().create_plan(mission)
-    plan.steps[1].args = {"path": "notas.txt"}
-    plan.steps[1].proposed_by = "model"
+    plan.steps[0].args = {"path": "notas.txt"}
+    plan.steps[0].proposed_by = "model"
     mission.plan = plan
 
     registry = ToolRegistry()

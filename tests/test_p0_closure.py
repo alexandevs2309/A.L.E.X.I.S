@@ -278,18 +278,28 @@ class TestFaseBSeleccionDinamica:
 
     @pytest.mark.asyncio
     async def test_b10_el_planner_usa_el_selector_y_no_un_diccionario(self):
-        """El paso `execute` toma su capability de la selección, no de un `dict.get`."""
+        """Req 6: la capability del plan sale de la selección contra el catálogo real, no de
+        un `dict.get`; y el plan es OBJETIVO-DIRIGIDO (no la secuencia universal)."""
         from alexis.cognition.planner import Planner
 
         planner = Planner()
         capabilities = {}
+        ids = {}
         for objetivo in ("lee el informe", "escribe un archivo nuevo", "borra el temporal"):
             mission = _mission(objetivo)
             plan = await planner.create_plan(mission)
-            capabilities[objetivo] = [s.capability for s in plan.steps if s.id == "execute"][0]
-        assert capabilities["lee el informe"] == "fs.read"
-        assert capabilities["escribe un archivo nuevo"] == "fs.write"
-        assert capabilities["borra el temporal"] == "fs.remove"
+            capabilities[objetivo] = [s.capability for s in plan.steps]
+            ids[objetivo] = [s.id for s in plan.steps]
+        # Cada objetivo produce su DAG con la capability que le corresponde.
+        assert "fs.read" in capabilities["lee el informe"]
+        assert "fs.write" in capabilities["escribe un archivo nuevo"]
+        assert "fs.remove" in capabilities["borra el temporal"]
+        # La escritura y el borrado NO leen para actuar: el efecto se ejecuta directo.
+        assert "fs.read" not in capabilities["escribe un archivo nuevo"]
+        assert "fs.read" not in capabilities["borra el temporal"]
+        # Regresión bloqueada: la secuencia universal ya no es el plan de un objetivo.
+        for objetivo in ("lee el informe", "escribe un archivo nuevo", "borra el temporal"):
+            assert ids[objetivo] != ["understand", "research", "execute", "verify"]
 
 
 def _probe_step():

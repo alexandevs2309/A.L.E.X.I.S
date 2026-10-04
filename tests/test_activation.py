@@ -61,7 +61,8 @@ class TestPlannerWakePlan:
         envelope = MissionEnvelope(objective="leeme el archivo README.txt", autonomy=AutonomyLevel.SUPERVISED)
         mission = MissionEngine().create("leeme el archivo README.txt", envelope)
         plan = await Planner().create_plan(mission)
-        assert [s.action for s in plan.steps] == ["analyze", "research", "execute", "verify"]
+        assert [s.action for s in plan.steps] == ["research"]
+        assert [s.id for s in plan.steps] == ["research"]
 
 
 class TestExecutorRespond:

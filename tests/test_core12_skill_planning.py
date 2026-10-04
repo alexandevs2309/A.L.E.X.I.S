@@ -60,8 +60,6 @@ ACTIONS = ["understand", "analyze", "research", "execute", "verify", "modify", "
 CAPS = build_catalog()
 FULL_CAPS = [spec.id for spec in CAPS.specs() if spec.status == "available"]
 
-PLANTILLA = ["understand", "research", "execute", "verify"]
-
 
 def _mission(objective="crea el archivo informe.txt", criteria=None, caps=None):
     return MissionEngine().create(
@@ -149,20 +147,23 @@ def _seed_skill(
 
 
 # ======================================================================
-# Sin skills, el plan sigue siendo la plantilla
+# Sin skills, el plan sigue siendo el suelo por reglas
 # ======================================================================
 
 
 @pytest.mark.asyncio
-async def test_01_sin_skills_usa_la_plantilla(tmp_path):
-    """Sin ninguna skill el comportamiento de siempre: la plantilla por reglas."""
+async def test_01_sin_skills_usa_el_plan_por_reglas(tmp_path):
+    """Sin ninguna skill el comportamiento de siempre: el suelo por reglas (Req 6:
+    la forma del plan depende del objetivo; el objetivo de escritura genera
+    `execute` → `verify`)."""
     rt = _runtime(tmp_path)
     mission = _mission()
     await rt._ensure_plan(mission)
 
     provenance = mission.context["plan_provenance"]
     assert provenance["proposed_by"] == "rule_based"
-    assert [s.id for s in mission.plan.steps] == PLANTILLA
+    assert provenance.get("strategy") == "objective_driven"
+    assert [s.id for s in mission.plan.steps] == ["execute", "verify"]
 
 
 # ======================================================================
@@ -239,9 +240,9 @@ async def test_04_skill_que_necesita_capability_ausente_no_aplica(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_05_plan_de_skill_que_no_valida_cae_a_la_plantilla(tmp_path):
+async def test_05_plan_de_skill_que_no_valida_cae_al_planner_por_reglas(tmp_path):
     """Una skill con una capability fuera del catálogo no cuela su plan: se valida
-    igual que la plantilla, y al fallar, cae a la plantilla."""
+    igual que cualquier plan, y al fallar, cae al suelo por reglas (objetivo)."""
     rt = _runtime(tmp_path)
     rt.plan_validator = PlanValidator(catalog=CAPS)
     # `fs.hack` no existe en el catálogo real: el plan propuesto por la skill no pasa.
@@ -252,7 +253,7 @@ async def test_05_plan_de_skill_que_no_valida_cae_a_la_plantilla(tmp_path):
 
     provenance = mission.context["plan_provenance"]
     assert provenance["proposed_by"] == "rule_based", provenance
-    assert [s.id for s in mission.plan.steps] == PLANTILLA
+    assert [s.id for s in mission.plan.steps] == ["execute", "verify"]
 
 
 # ======================================================================

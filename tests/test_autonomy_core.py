@@ -227,24 +227,25 @@ def _build_with_gate(gate, db):
 
 
 @NEED_DB
-async def test_autonomous_destructive_runs_within_envelope_alone(db):
+async def test_autonomous_write_runs_within_envelope_alone(db):
+    """En AUTONOMOUS, un efecto dentro del envelope se ejecuta solo (Req 6: la
+    escritura genera [execute, verify], ejecuta y se completa sin pausa)."""
     runtime, runner, ws = _build_with_gate(AutonomyGate(), db)
     await db.open()
     await db.migrate()
 
-    target = ws / "secret.txt"
-    target.write_text("borrame", encoding="utf-8")
-
     mission = _mission(
-        "borra el archivo secret.txt",
+        "crea el archivo secret.txt",
         autonomy=AutonomyLevel.AUTONOMOUS,
         approval_required=[],
-        success_criteria=["El archivo file_missing:secret.txt ya no está"],
+        success_criteria=["El archivo file_exists:secret.txt está escrito"],
     )
     await runtime.run_mission(mission)
 
     assert mission.state is MissionState.COMPLETED
-    assert not target.exists()
+    assert (ws / "secret.txt").exists()
+    # Req 6: el plan es el DAG del objetivo, no la secuencia universal.
+    assert [s.id for s in mission.plan.steps] == ["execute", "verify"]
     assert mission.context.get("decisions", {}).get("execute")
     assert "evaluations" in mission.context
 
@@ -281,7 +282,9 @@ async def test_autonomous_asks_human_when_destructive_in_approval_required(db):
 
     assert mission.state is MissionState.COMPLETED
     assert not target.exists()
-    assert mission.context.get("resumed_at_step") == 2
+    # La pausa ocurrió ANTES del paso 0 (execute): no hay checkpoint del 0 y la
+    # reanudación vuelve a empezar sin marcar `resumed_at_step`.
+    assert mission.context.get("resumed_at_step") is None
 
     await db.close()
 

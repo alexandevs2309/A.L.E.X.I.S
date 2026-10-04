@@ -102,14 +102,16 @@ async def test_read_mission_real_tasks_and_completion(db):
     assert all(r["success"] for r in mission.results)
 
     tasks = await runner.task_repo.list(mission_id=mission.id)
-    assert len(tasks) == 4
+    # Req 6: leer es observar → un único paso `research`, sin cadena universal.
+    assert len(tasks) == 1
     assert all(t.status is TaskState.COMPLETED for t in tasks)
+    assert tasks[0].args.get("step") == "research"
 
     executions = await runner.execution_repo.list(tasks[0].id)
     assert executions and executions[0]["ok"] is True
 
     checkpoint = await runner.checkpoint_repo.latest(mission.id)
-    assert checkpoint is not None and checkpoint["step_index"] == 3
+    assert checkpoint is not None and checkpoint["step_index"] == 0
 
     verification = await VerificationRepository(db).list(mission.id)
     assert verification and verification[0]["passed"] is True
@@ -142,8 +144,9 @@ async def test_write_intent_runs_auto_and_creates(db):
 
     tasks = await runner.task_repo.list(mission_id=mission.id)
     steps = [t.args.get("step") for t in tasks]
-    assert steps == ["understand", "research", "execute", "verify"]
-    assert len(mission.results) == 4
+    # Req 6: escribir es efecto + verificación independiente, sin lectura previa.
+    assert steps == ["execute", "verify"]
+    assert len(mission.results) == 2
 
     verification = await VerificationRepository(db).list(mission.id)
     assert verification and verification[-1]["passed"] is True
@@ -177,7 +180,9 @@ async def test_destructive_intent_requires_approval_then_removes(db):
     assert pending.get("step") == "execute"
     assert target.exists()
 
-    # El humano aprueba y la misión reanuda desde el checkpoint.
+    # El humano aprueba y la misión reanuda con la aprobación concedida. Como la
+    # aprobación pausó ANTES de ejecutar el paso 0, no hay checkpoint del paso 0:
+    # la reanudación vuelve a empezar y `resumed_at_step` no se registra.
     mission.context["approved_step_ids"] = ["execute"]
     mission.context.pop("pending_approval", None)
     mission.results.clear()
@@ -186,7 +191,7 @@ async def test_destructive_intent_requires_approval_then_removes(db):
 
     assert mission.state is MissionState.COMPLETED
     assert not target.exists()
-    assert mission.context.get("resumed_at_step") == 2
+    assert "resumed_at_step" not in mission.context
 
     verification = await VerificationRepository(db).list(mission.id)
     assert verification and verification[-1]["passed"] is True
@@ -252,28 +257,30 @@ async def test_checkpoint_resumes_not_restarts(db):
     await db.migrate()
 
     mission = MissionEngine().create(
-        "leeme el archivo reporte.txt",
+        "crea un archivo nuevo.txt",
         MissionEnvelope(
-            "leeme el archivo reporte.txt",
+            "crea un archivo nuevo.txt",
             autonomy=AutonomyLevel.SUPERVISED,
             allowed_actions=["read", "research", "execute", "verify"],
         ),
         # P0 §5.5: el objetivo se demuestra con el hecho observado, no con los pasos ok.
-        success_criteria=["El archivo file_exists:reporte.txt está escrito"],
+        success_criteria=["El archivo file_exists:nuevo.txt está escrito"],
     )
-    # simular un checkpoint previo en el paso 2 (solo understand+research hechos)
-    mission.results = [{"step": "understand", "success": True, "task": "understand"}, {"step": "research", "success": True, "task": "research"}]
+    # Req 6: escribir genera `execute` → `verify`. Simular el paso 0 (execute) ya hecho,
+    # con su efecto real en disco y su checkpoint. La reanudación sólo debe crear `verify`.
+    (ws / "nuevo.txt").write_text("ALEXIS checkpoint\n", encoding="utf-8")
+    mission.results = [{"step": "execute", "success": True, "task": "execute"}]
     await runtime.mission_repo.upsert(mission)
-    await runner.save_checkpoint(mission, 1)
+    await runner.save_checkpoint(mission, 0)
 
     await runtime.run_mission(mission)
     assert mission.state is MissionState.COMPLETED
-    assert mission.context.get("resumed_at_step") == 2
-    # solo los pasos >= 2 crearon tareas nuevas
+    assert mission.context.get("resumed_at_step") == 1
+    # solo pasos >= 1 crearon tareas nuevas en esta reanudación.
     tasks = await runner.task_repo.list(mission_id=mission.id)
     created_ids = {t.args.get("step") for t in tasks}
-    assert "execute" in created_ids and "verify" in created_ids
-    assert len(mission.results) == 4
+    assert created_ids == {"verify"}
+    assert len(mission.results) == 2
 
     await db.close()
 

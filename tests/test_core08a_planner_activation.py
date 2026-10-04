@@ -550,5 +550,5 @@ def test_23_plan_invalido_sigue_cayendo_al_rule_based_planner():
     # ejecuta es el del RuleBasedPlanner, que es el suelo y usa capabilities reales.
     assert executor.calls, "el RuleBasedPlanner debe seguir ejecutando: es el suelo"
     assert [c for c in executor.calls if c == "hack"] == []
-    assert all(c in {"understand", "research", "execute", "verify"} for c in executor.calls)
+    assert all(c in {"understand", "research", "execute", "verify", "analyze"} for c in executor.calls)
     assert result.plan.steps, "el RuleBasedPlanner sigue siendo el suelo"

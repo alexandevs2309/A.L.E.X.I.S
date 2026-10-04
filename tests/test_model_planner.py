@@ -706,7 +706,7 @@ def test_legacy_plan_dict_without_new_fields_still_loads():
 
 
 @pytest.mark.asyncio
-async def test_legacy_runtime_without_plan_model_keeps_the_fixed_template():
+async def test_legacy_runtime_without_plan_model_genera_el_plan_por_objetivo():
     runtime = AlexisRuntime(
         planner=Planner(),
         policy=PolicyEngine(),
@@ -719,7 +719,10 @@ async def test_legacy_runtime_without_plan_model_keeps_the_fixed_template():
     )
     mission = _mission()
     result = await runtime.run_mission(mission)
-    assert [s.id for s in result.plan.steps] == ["understand", "research", "execute", "verify"]
+    # Req 6: sin modelo, el suelo por reglas genera el DAG del objetivo de análisis
+    # (reunir evidencia + analizar), no la secuencia universal.
+    assert [s.id for s in result.plan.steps] == ["research", "analyze"]
+    assert [s.capability for s in result.plan.steps] == ["fs.read", "cognition.analyze"]
     assert "plan_provenance" not in result.context
 
 

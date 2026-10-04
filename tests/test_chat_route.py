@@ -84,11 +84,15 @@ class TestPlannerChat:
 
     async def test_file_read_is_not_chat(self):
         plan = await Planner().create_plan(await _mission("lee README.txt"))
-        assert [s.action for s in plan.steps] == ["analyze", "research", "execute", "verify"]
+        assert [s.id for s in plan.steps] == ["research"]
+        assert [s.action for s in plan.steps] == ["research"]
+        assert plan.steps[0].capability in ("fs.read", "research.filesystem")
 
     async def test_write_is_not_chat(self):
         plan = await Planner().create_plan(await _mission("crea un archivo notas.txt"))
-        assert [s.action for s in plan.steps] == ["analyze", "research", "execute", "verify"]
+        assert [s.action for s in plan.steps] == ["execute", "verify"]
+        assert plan.steps[0].capability == "fs.write"
+        assert plan.steps[0].requires_approval is False
 
 
 class TestExecutorChat:

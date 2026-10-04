@@ -191,7 +191,8 @@ async def test_vertical_completa_completed_con_todo_real(tmp_path):
     assert str(entity.source).startswith("tool:"), f"fuente no observada por tool: {entity.source}"
     assert entity.attributes.get("exists") is True
     assert "size" in entity.attributes
-    ejecutadas = [r for r in (result.results or []) if r.get("step") == "execute"]
+    # Req 6: leer es observar → el paso real del plan es `research` (no hay execute).
+    ejecutadas = [r for r in (result.results or []) if r.get("step") == "research"]
     assert ejecutadas and ejecutadas[0].get("success") is True, "fs.read real debe ejecutarse"
 
     # 4. No simulated success: toda evidencia acreditada viene de una tool, nunca

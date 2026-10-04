@@ -67,7 +67,8 @@ async def test_runtime_ends_unverified_and_persists_that_across_restart(db, test
     recovered = await MissionRepository(db2).get(mission.id)
     assert recovered is not None
     assert recovered.state is MissionState.NEEDS_VERIFICATION
-    assert any(r.get("step") == "verify" and r.get("success") for r in recovered.results)
+    # Req 6: "Persistir y recuperar" es lectura → un único paso `research` observador.
+    assert any(r.get("step") == "research" and r.get("success") for r in recovered.results)
 
     verifications = await VerificationRepository(db2).list(mission.id)
     events = await EventRepository(db2).list(mission.id)
@@ -86,9 +87,9 @@ async def test_runtime_persists_waiting_approval(db, test_dsn):
     runtime = _runtime(db)[1]
 
     mission = MissionEngine().create(
-        "Requerirá aprobación",
+        "borra el archivo temporal.txt",
         MissionEnvelope(
-            "Requerirá aprobación",
+            "borra el archivo temporal.txt",
             autonomy=AutonomyLevel.SUPERVISED,
             allowed_actions=["read", "research"],
         ),
@@ -106,4 +107,6 @@ async def test_runtime_persists_waiting_approval(db, test_dsn):
     assert recovered is not None
     assert recovered.state is MissionState.WAITING_APPROVAL
     assert recovered.context["pending_approval"]["action"] == "execute"
-    assert recovered.context["pending_approval"]["risk"] == "medium"
+    # Req 6: el riesgo del efecto sale del catálogo REAL (fs.remove = critical), no de
+    # un valor fijo de plantilla.
+    assert recovered.context["pending_approval"]["risk"] == "critical"
