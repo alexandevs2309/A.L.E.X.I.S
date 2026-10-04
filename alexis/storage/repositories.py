@@ -3,6 +3,7 @@ import json
 from alexis.contracts import Checkpoint, Execution, Mission, Task, TaskState
 from alexis.storage.db import Database
 from alexis.storage.serialization import (
+    _decoded,
     mission_from_row,
     mission_to_row,
     task_from_row,
@@ -627,7 +628,7 @@ class LearningRepository:
                 "SELECT payload FROM lessons ORDER BY created_at DESC LIMIT %(limit)s",
                 {"limit": limit},
             )
-        return [json.loads(row["payload"]) for row in rows]
+        return [_decoded(row["payload"]) for row in rows]
 
     # ------------------------------------------------------------------ #
     # Candidatas
@@ -660,7 +661,7 @@ class LearningRepository:
                 "SELECT payload FROM skill_candidates ORDER BY created_at DESC LIMIT %(limit)s",
                 {"limit": limit},
             )
-        return [json.loads(row["payload"]) for row in rows]
+        return [_decoded(row["payload"]) for row in rows]
 
     # ------------------------------------------------------------------ #
     # Versiones (inmutables)
@@ -695,7 +696,7 @@ class LearningRepository:
                 "SELECT payload FROM skill_versions ORDER BY created_at DESC LIMIT %(limit)s",
                 {"limit": limit},
             )
-        return [json.loads(row["payload"]) for row in rows]
+        return [_decoded(row["payload"]) for row in rows]
 
     # ------------------------------------------------------------------ #
     # Rendimiento
@@ -735,4 +736,20 @@ class LearningRepository:
                 """,
                 {"skill_id": skill_id, "limit": limit},
             )
-        return [json.loads(row["payload"]) for row in rows]
+        return [_decoded(row["payload"]) for row in rows]
+
+    async def all_performance(self, *, limit: int = 2000) -> list[dict]:
+        """Todo el rendimiento registrado, para rehidratar el registro al arrancar.
+
+        A diferencia de `performance`, no exige `skill_id`: la rehidratación no sabe aún qué
+        skills hay hasta que carga las versiones, y el rendimiento se evalúa igual en frío que
+        en caliente (una sola ejecución no juzga nunca a una skill).
+        """
+        rows = await self.db.fetch(
+            """
+            SELECT payload FROM skill_performance
+            ORDER BY created_at DESC LIMIT %(limit)s
+            """,
+            {"limit": limit},
+        )
+        return [_decoded(row["payload"]) for row in rows]

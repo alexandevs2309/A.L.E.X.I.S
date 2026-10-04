@@ -633,6 +633,7 @@ class AlexisRuntime:
         estrategia. No es una excepción: la skill plan se valida igual que la plantilla,
         y si no valida, cae a la plantilla y de ahí al rechazo de siempre.
         """
+        await self.hydrate_learning()
         plan, skill_source = self._plan_with_skill(mission, source=source)
         if plan is not None:
             reasons = self._plan_reasons(mission, plan)
@@ -1100,6 +1101,8 @@ class AlexisRuntime:
         )
 
         try:
+            await self.hydrate_learning()
+
             experience = (getattr(mission, "context", {}) or {}).get("experience") or {}
             verified = (getattr(mission, "context", {}) or {}).get("verified_learning") or {}
             if not experience:
@@ -1210,6 +1213,58 @@ class AlexisRuntime:
             self._skill_registry = registry
         return registry
 
+    async def hydrate_learning(self) -> None:
+        """Cierre CORE-11/12 — lo aprendido vuelve a estar ONLINE al arrancar.
+
+        Se guarda en el mismo `learning_repo` que el ciclo; se carga de ahí. Un reinicio sin
+        esto nacería con el registro VACÍO y la reutilización empezaría de cero, que es la
+        diferencia entre un registro y un sistema que aprende: ayer no sirve para hoy.
+
+        Se ejecuta una vez por instancia (flag), y un fallo de carga no puede tumbar ni
+        planificar ni aprender: el registro es una caché optimista, y "no pude recordar" se
+        registra y se sigue con lo que haya.
+        """
+        if getattr(self, "_learning_hydrated", False):
+            return
+        self._learning_hydrated = True
+        repo = self.learning_repo
+        if repo is None:
+            return
+        try:
+            from alexis.learning.skill import SkillPerformance, SkillStatus, SkillVersion
+
+            registry = self.skill_registry()
+            added = 0
+            for raw in await repo.skill_versions(limit=1000):
+                version = SkillVersion.from_dict(raw)
+                if version is None or version.status not in (
+                    SkillStatus.VALIDATED.value,
+                    SkillStatus.SUPERSEDED.value,
+                ):
+                    continue
+                # Idempotencia en memoria: si el ciclo activo ya la publicó, no se duplica.
+                if any(
+                    v.skill_id == version.skill_id and v.version == version.version
+                    for v in registry.versions
+                ):
+                    continue
+                registry.add(version)
+                added += 1
+
+            recorded = 0
+            for raw in await repo.all_performance(limit=2000):
+                record = SkillPerformance.from_dict(raw)
+                if record is None:
+                    continue
+                registry.record_performance(record)
+                recorded += 1
+            log.info(
+                "learning: hidratadas %d skill(s) y %d ejecución(es) desde persistencia",
+                added, recorded,
+            )
+        except Exception as exc:  # noqa: BLE001 — recordar mal no puede tumbar el arranque
+            log.warning("learning: no se pudieron hidratar las skills (%s)", exc)
+
     def _capability_catalog(self):
         catalog = getattr(self.cognitive, "catalog", None) if self.cognitive is not None else None
         if catalog is None:
@@ -1230,6 +1285,8 @@ class AlexisRuntime:
         ejecuciones no se puede distinguir "esta skill es mala" de "tuve mala suerte".
         """
         from alexis.learning.skill import SkillPerformance
+
+        await self.hydrate_learning()
 
         record = SkillPerformance(
             skill_id=skill_id,

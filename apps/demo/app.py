@@ -1249,6 +1249,17 @@ def start_services(rt: OfficialRuntime) -> dict:
         except Exception as exc:  # noqa: BLE001 — no poder recordar no puede tumbar el arranque
             print(f"[warn] no se pudo recuperar el estado aprendido del Self Model: {exc}")
 
+    # Cierre CORE-11/12: las skills y su rendimiento también vuelven al arranque. El Self
+    # Model se recuperó arriba; esto recupera el REGISTRO que permite reutilizarlas, porque
+    # una skill que sólo vive en RAM no es una skill: es un texto que se pierde al reiniciar.
+    if rt.storage.get("learning") is not None:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                rt.runtime.hydrate_learning(), rt.loop
+            ).result(timeout=10)
+        except Exception as exc:  # noqa: BLE001 — recordar mal no puede tumbar el arranque
+            print(f"[warn] no se pudo recuperar las skills del registro: {exc}")
+
     # Self Model: se actualiza consumiendo los eventos reales del bus oficial.
     self_sync = SelfModelSync(
         rt.self_model, rt.extras["resolve_mission"], aux=rt.extras["self_aux"],
