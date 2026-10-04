@@ -13,14 +13,16 @@ Qué aporta y por qué no es redundante:
 
 Dos invariantes de CORE-04 que estos tests protegen de forma observable:
 
-1. `success_criteria` llega al cliente **con el predicado dentro** (`file_exists:...`),
-   no como `[]`. Si alguien revirtiera a la ruta legacy, el mismo assertion falla — es
-   el detector de esa regresión por la puerta de entrada.
+1. `success_criteria` llega al cliente **con el predicado dentro**
+   (`content_observed:...`), no como `[]`. Si alguien revirtiera a la ruta legacy, el
+   mismo assertion falla — es el detector de esa regresión por la puerta de entrada.
+   P0 §11: para un objetivo de análisis el predicado es `content_observed`, no
+   `file_exists`: no basta con que el fichero esté en disco, tiene que haber sido leído.
 2. `/missions/{id}` no depende de `STATE["mission_id"]`, que es una ranura global
    sobrescrita por cada misión creada y por tanto no identifica nada.
 
 Hermeticidad: sin credenciales de modelo el clasificador cae a reglas y produce el
-MISMO `file_exists:notas.txt` (verificado en CORE-02), así que estos tests no dependen de
+MISMO `content_observed:notas.txt` (verificado en CORE-02), así que estos tests no dependen de
 ningún proveedor, ni de un puerto fijo (puerto efímero), ni del workspace real
 (tmp por módulo).
 """
@@ -48,7 +50,7 @@ POLL_TIMEOUT_S = 90.0
 STREAM_TIMEOUT_S = 30.0
 
 B5 = "Analiza el archivo notas.txt y dime qué contiene"
-B5_CRITERION = "file_exists:notas.txt"
+B5_CRITERION = "content_observed:notas.txt"
 
 
 # ---------------------------------------------------------------------- #
@@ -320,6 +322,12 @@ def test_chat_evidencia_es_de_una_tool_real(servidor):
 
     Es la diferencia entre que el objetivo esté comprobado y que el sistema lo afirme.
     Un claim del modelo no pasa aquí: tiene que haber una tool real.
+
+    P0 §11 lo hace más fuerte: para un objetivo de análisis no basta con que una tool
+    confirmara que el fichero existe. La evidencia tiene que ser de una LECTURA
+    (`fs.read`), porque `fs.stat` observa existencia y `fs.write` se limita a afirmar que
+    escribió. Sin este assert, un `completed` basado en "el archivo está ahí" pasaría
+    esta prueba sin que nadie hubiera leído el fichero.
     """
     _, reply = _post(servidor, "/chat", {"text": B5})
     cuerpo = _await_state(servidor, reply["mission_id"], {"completed"})
@@ -331,7 +339,7 @@ def test_chat_evidencia_es_de_una_tool_real(servidor):
     assert evaluaciones, "una verificación sin evaluaciones no demuestra nada"
     for evaluacion in evaluaciones:
         assert evaluacion["status"] == "satisfied", evaluacion
-        assert evaluacion.get("predicate") == "file_exists"
+        assert evaluacion.get("predicate") == "content_observed"
 
     fiables = [
         e
@@ -341,6 +349,17 @@ def test_chat_evidencia_es_de_una_tool_real(servidor):
     ]
     assert fiables, (
         "un satisfied sin evidencia fiable de una tool no puede sostener un completed"
+    )
+
+    # Y la evidencia tiene que ser una LECTURA, no una mera comprobación de existencia.
+    lecturas = [
+        e for e in fiables
+        if "fs.read" in str(e.get("source", "")) or "leyó" in str(e.get("detail", ""))
+    ]
+    assert lecturas, (
+        "el objetivo pedía el contenido del fichero: la evidencia tiene que probar "
+        f"que se leyó, no sólo que existe. Evidencia recibida: "
+        f"{[e.get('source') for e in fiables]}"
     )
 
 
@@ -362,7 +381,7 @@ def test_missions_crea_persiste_y_se_lee_por_id(servidor, oficial):
     )
     assert status == 200, creada
     mission_id = creada["id"]
-    assert creada["success_criteria"] == ["file_exists:informe.md"]
+    assert creada["success_criteria"] == ["content_observed:informe.md"]
     assert creada.get("criteria_status", {}).get("verifiable") == 1
 
     cuerpo = _await_state(servidor, mission_id, {"completed"})
@@ -523,8 +542,8 @@ def test_lectura_no_depende_de_state_global(servidor):
 
     assert cuerpo_a["id"] == a["id"]
     assert cuerpo_b["id"] == b["id"]
-    assert cuerpo_a["success_criteria"] == ["file_exists:notas.txt"]
-    assert cuerpo_b["success_criteria"] == ["file_exists:informe.md"]
+    assert cuerpo_a["success_criteria"] == ["content_observed:notas.txt"]
+    assert cuerpo_b["success_criteria"] == ["content_observed:informe.md"]
     # Y no se han cruzado: el objetivo de A es el de A, y el de B el de B.
     assert "notas.txt" in cuerpo_a["objective"]
     assert "informe.md" in cuerpo_b["objective"]

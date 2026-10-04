@@ -377,7 +377,7 @@ def test_h_missions_usa_el_missionengine_oficial_y_conserva_criterios(oficial):
 
     objective = "Analiza el archivo notas.txt y dime qué contiene"
     criteria, status = normalize_criteria(objective, objective, None)
-    assert criteria == ["file_exists:notas.txt"], "contrato CORE-02 reutilizado, no reimplementado"
+    assert criteria == ["content_observed:notas.txt"], "contrato CORE-02 reutilizado, no reimplementado"
 
     envelope = MissionEnvelope(
         objective=objective,
@@ -385,7 +385,7 @@ def test_h_missions_usa_el_missionengine_oficial_y_conserva_criterios(oficial):
         allowed_actions=["understand", "analyze", "execute", "verify", "respond"],
     )
     mission = oficial.missions.create(objective, envelope, success_criteria=criteria)
-    assert mission.goal.success_criteria == ["file_exists:notas.txt"]
+    assert mission.goal.success_criteria == ["content_observed:notas.txt"]
     assert status["verifiable"] == 1
 
 
@@ -431,7 +431,7 @@ def test_g_chat_usa_el_intent_classifier_y_el_contrato_de_core02(oficial):
     mission = oficial.running.get(mission_id)
     assert mission is not None
     # El criterio lo produjo el clasificador, con el contrato de CORE-02.
-    assert mission.goal.success_criteria == ["file_exists:notas.txt"]
+    assert mission.goal.success_criteria == ["content_observed:notas.txt"]
 
 
 # =========================================================================== #
@@ -440,10 +440,18 @@ def test_g_chat_usa_el_intent_classifier_y_el_contrato_de_core02(oficial):
 
 
 def test_k_core01_intacto():
-    """CORE-01 cerrado: ni `PREDICATES` ni `parse_predicate` se tocaron."""
+    """CORE-01 cerrado: `parse_predicate` no se aflojó y el vocabulario sólo crecer.
+
+    La guarda original fijaba la tupla exacta para detectar cualquier deriva. P0 §11
+    añadió `content_observed` —el contenido fue leído de verdad, no sólo existe— y esa
+    ampliación es intencionada, así que la guarda se actualiza SIN perder su función:
+    sigue exigiendo que `parse_predicate` no adivine y que un predicado sin forma
+    explícita siga sin ser verificable.
+    """
     from alexis.cognition.goal_verification import PREDICATES, parse_predicate
 
     assert PREDICATES == (
+        "content_observed",
         "file_size_at_least",
         "file_exists",
         "file_missing",
@@ -451,6 +459,9 @@ def test_k_core01_intacto():
         "tests_passing",
     )
     assert parse_predicate("file_exists:notas.txt") == ("file_exists", ["notas.txt"])
+    assert parse_predicate("Los tests del proyecto pasan") is None, (
+        "el parser no debe adivinar: un criterio sin predicado explícito no se comprueba"
+    )
 
 
 def test_l_core02_intacto():

@@ -117,8 +117,15 @@ class TestFaseAResponseComposerEsLaFuente:
 
     @pytest.mark.asyncio
     async def test_a5_la_voz_reformula_pero_no_puede_añadir_exitos(self, tmp_path):
-        """Un modelo REAL puede reformular, pero su texto se vuelve a pasar por el guard."""
-        router = _RealLikeRouter("He completado la tarea, todo listo.")
+        """Un modelo REAL puede reformular, pero su texto no puede affirmar un logro.
+
+        MEDIUM-1: sin verificación del objetivo, el texto del modelo NO se usa. Antes se
+        le limpiaban las frases de logro una a una (un lexicon, en un solo idioma, que
+        un modelo podía esquivar contestando en inglés); ahora la respuesta es la
+        compuesta, anclada al veredicto real. El test afirmaba el marcador del lexicon
+        antiguo: afirma algo más fuerte, que ninguna palabra del modelo sobrevive.
+        """
+        router = _RealLikeRouter("He completado la tarea, todo listo. All done!")
         executor = SandboxExecutor(tools=ToolRegistry(), sandbox=SandboxRunner(workspace=tmp_path),
                                   model_router=router)
         mission = _mission()
@@ -126,9 +133,32 @@ class TestFaseAResponseComposerEsLaFuente:
             mission, verdict=Verdict.FAILURE.value, goal_verified=False).to_dict()
         spoken = await executor._spoken_reply(mission, None)
         assert "completado" not in spoken.lower(), "el guard debe impedir el falso éxito"
-        assert "(logro no verificado)" in spoken
+        assert "all done" not in spoken.lower(), "ni en inglés"
+        assert "listo" not in spoken.lower()
+        # Y lo que se dice es el ESTADO real, no una versión suavizada del texto del modelo.
+        assert "no está verificado" in spoken.lower()
+        assert "todo listo" not in spoken.lower()
         # Y el modelo recibió los HECHOS, no el objetivo desnudo.
         assert "HECHOS A REFORMULAR" in router.prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_a5b_con_el_objetivo_verificado_la_voz_si_puede_ser_natural(self, tmp_path):
+        """La otra mitad del guard: `goal_verified=True` SÍ permite reformular.
+
+        Un guard que cripple las respuestas verificadas sería un parche, no una
+        garantía: La incertidumbre debe sonar natural cuando hay certeza.
+        Lo que no puede pasar es lo contrario: afirmar un logro sin evidencia.
+        """
+        router = _RealLikeRouter("Listo: el objetivo quedó verificado con la evidencia.")
+        executor = SandboxExecutor(tools=ToolRegistry(), sandbox=SandboxRunner(workspace=tmp_path),
+                                  model_router=router)
+        mission = _mission()
+        mission.context["response"] = _composed(
+            mission, verdict=Verdict.SUCCESS.value, goal_verified=True).to_dict()
+        spoken = await executor._spoken_reply(mission, None)
+        assert spoken, "con el objetivo verificado la voz debe poder expresarse"
+        assert "listo" in spoken.lower()
+        assert "no está verificado" not in spoken.lower()
 
     @pytest.mark.asyncio
     async def test_a6_sin_epilogo_la_voz_no_inventa(self, tmp_path):

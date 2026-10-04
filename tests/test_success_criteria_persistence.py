@@ -83,8 +83,15 @@ async def test_los_criterios_del_intent_llegan_al_goal():
     # P0 §5.1: lo que produce el Intent llega al Goal sin perder nada.
     assert mission.goal.success_criteria == intent.success_criteria
     # CORE-02: y llega en el vocabulario que el GoalVerifier sabe comprobar.
+    #
+    # P0 §11: la semántica del objetivo se consulta SIEMPRE, no solo cuando el modelo no
+    # propone nada. Aquí el modelo propuso «el cambio está aplicado en utils.py»
+    # (-> file_exists) y el objetivo además pide «investiga», así que también se exige
+    # que el fichero fuera LEÍDO. El modelo no puede degradar su propio contrato
+    # proposing sólo la mitad débil: lo que se añade, nunca se quita.
     assert mission.goal.success_criteria == [
         "tests_passing:suite",
+        "content_observed:utils.py",
         "file_exists:utils.py",
     ]
 

@@ -124,21 +124,45 @@ def test_todo_criterio_generado_usa_el_vocabulario_del_verifier():
 # ---------------------------------------------------------------------- #
 
 
-def test_1_read_con_path_deriva_file_exists():
+def test_1_read_con_path_deriva_content_observed():
+    """P0 §11 — un objetivo de ANÁLISIS no puede reducirse a existencia.
+
+    Este test fijaba `file_exists:notas.txt` para B5 ("Analiza el archivo notas.txt y
+    dime qué contiene"). Eso era el agujero: `notas.txt` existía antes de que ALEXIS
+    hiciera nada, así que la misión se cerraba sin que nadie hubiera leído el fichero.
+    El criterio correcto es `content_observed`: no basta con que el fichero esté en
+    disco, tiene que haber sido LEÍDO por una herramienta.
+    """
     criteria, status = normalize_criteria(B5, B5, [])
-    assert criteria == ["file_exists:notas.txt"]
+    assert criteria == ["content_observed:notas.txt"]
     assert status["verifiable"] == 1
     assert status["unverifiable"] == 0
 
 
+def test_1b_una_existencia_pura_si_puede_ser_file_exists():
+    """La otra mitad: cuando la pregunta ES si existe, `file_exists` es el contrato."""
+    criteria, _ = normalize_criteria("Comprueba si notas.txt existe", "", [])
+    assert criteria == ["file_exists:notas.txt"]
+
+
 def test_2_write_create_edit_deriva_file_exists():
+    """Crear y modificar siguen acreditando el ARTEFACTO, que es lo que se pide.
+
+    La creación exige además contenido no vacío: un fichero vacío no es "crea el
+    archivo con el resumen", es no haberlo hecho.
+    """
     for texto in (
         "Crea el archivo notas.txt",
         "Escribe el archivo notas.txt",
         "Modifica el archivo notas.txt",
     ):
         criteria, _ = normalize_criteria(texto, texto, [])
-        assert criteria == ["file_exists:notas.txt"], texto
+        assert "file_exists:notas.txt" in criteria, texto
+        # Sólo la creación exige contenido; una modificación no lo exige por sí sola.
+        if texto.lower().startswith("modifica"):
+            assert not [c for c in criteria if c.startswith("file_size_at_least")], texto
+        else:
+            assert "file_size_at_least:notas.txt:1" in criteria, texto
 
 
 def test_2b_write_que_pide_contenido_anade_el_criterio_de_tamanio():
@@ -219,7 +243,7 @@ def test_7b_canonize_es_puro_y_no_toca_el_entorno():
 def test_8_criteria_vacio_mas_path_en_utterance_deriva():
     """Este es el caso real de B5: el modelo respondió `success_criteria: []`."""
     criteria, status = normalize_criteria(B5, "Analyze the file notas.txt and report its contents.", [])
-    assert criteria == ["file_exists:notas.txt"]
+    assert criteria == ["content_observed:notas.txt"]
     assert status["verifiable"] == 1
 
 
@@ -230,7 +254,7 @@ def test_8b_la_utterance_manda_sobre_el_objective_parafraseado():
         "Analyze the file完全不同.txt and report",  # ruta que el modelo inventó
         [],
     )
-    assert criteria == ["file_exists:notas.txt"]
+    assert criteria == ["content_observed:notas.txt"]
     assert not [c for c in criteria if "完全不同" in c]
 
 
@@ -342,7 +366,7 @@ def test_14_ruta_con_espacios_no_se_inventa():
 
 def test_14b_una_ruta_de_un_token_si_se_deriva():
     criteria, _ = normalize_criteria("Analiza notas.txt", "Analiza notas.txt", [])
-    assert criteria == ["file_exists:notas.txt"]
+    assert criteria == ["content_observed:notas.txt"]
 
 
 # ---------------------------------------------------------------------- #
@@ -375,12 +399,19 @@ def test_16_los_criterios_llegan_al_goal_intactos():
         success_criteria=intent.success_criteria,
     )
     assert mission.goal.success_criteria == intent.success_criteria
-    assert mission.goal.success_criteria == ["file_exists:notas.txt"]
+    assert mission.goal.success_criteria == ["content_observed:notas.txt"]
 
 
-def test_17_el_goal_verifier_no_se_ha_tocado():
-    """Guarda de no-regresión: el vocabulario y el parser siguen siendo los de CORE-01."""
+def test_17_el_vocabulario_solo_crece_con_un_predicado_real():
+    """Guarda de no-regresión: el vocabulario es el de CORE-01 más `content_observed`.
+
+    La guarda sigue siendo la misma: un predicado sólo entra en `PREDICATES` si el
+    `GoalVerifier` real lo sabe comprobar, y `parse_predicate` no adivina. P0 §11 añadió
+    `content_observed` (el contenido fue leído de verdad, no sólo existe), y aquí se fija
+    para que nadie lo sustituya por `file_exists` ni lo afloje.
+    """
     assert PREDICATES == (
+        "content_observed",
         "file_size_at_least",
         "file_exists",
         "file_missing",
@@ -389,6 +420,10 @@ def test_17_el_goal_verifier_no_se_ha_tocado():
     )
     assert parse_predicate("Los tests del proyecto pasan") is None
     assert parse_predicate("file_exists:notas.txt") == ("file_exists", ["notas.txt"])
+    assert parse_predicate("content_observed:notas.txt") == (
+        "content_observed",
+        ["notas.txt"],
+    )
 
 
 def test_18_un_canonico_es_siempre_legible_por_el_verifier_real():
@@ -463,7 +498,7 @@ async def test_b5_el_vertical_real_cierra_completed_solo_por_el_contrato(tmp_pat
 
         "Analiza el archivo notas.txt y dime qué contiene"
             → IntentClassifier            (sin modelo: fallback determinista)
-            → success_criteria            ["file_exists:notas.txt"]
+            → success_criteria            ["content_observed:notas.txt"]
             → Mission.goal.success_criteria
             → run_mission                 (fs.read real)
             → WorldModel                  (observación real de la tool)
@@ -478,7 +513,7 @@ async def test_b5_el_vertical_real_cierra_completed_solo_por_el_contrato(tmp_pat
     # 1. El criterio lo produce el CLASIFICADOR, no el test.
     intent = await IntentClassifier().classify(B5)
     assert intent.is_task is True
-    assert intent.success_criteria == ["file_exists:notas.txt"]
+    assert intent.success_criteria == ["content_observed:notas.txt"]
     assert intent.model_meta["criteria_status"]["verifiable"] == 1
 
     # 2. La misión lo recibe sin que nadie lo escriba a mano.
@@ -492,7 +527,7 @@ async def test_b5_el_vertical_real_cierra_completed_solo_por_el_contrato(tmp_pat
         ),
         success_criteria=intent.success_criteria,
     )
-    assert mission.goal.success_criteria == ["file_exists:notas.txt"]
+    assert mission.goal.success_criteria == ["content_observed:notas.txt"]
 
     # 3. Vertical real: fs.read + observación + GoalVerifier + settle.
     runtime, world = _runtime(tmp_path)
@@ -524,7 +559,7 @@ async def test_b5_sin_archivo_no_cierra_completed(tmp_path):
     `GoalVerifier` es una observación real de una herramienta; aquí no existe.
     """
     intent = await IntentClassifier().classify(B5)
-    assert intent.success_criteria == ["file_exists:notas.txt"]
+    assert intent.success_criteria == ["content_observed:notas.txt"]
 
     mission = MissionEngine().create(
         intent.objective or intent.utterance,
@@ -549,24 +584,22 @@ async def test_b5_sin_archivo_no_cierra_completed(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_un_objetivo_sobre_contenido_sigue_siendo_unverifiable(tmp_path):
-    """La limitación que el audit ya reconocía, fijada como test.
+async def test_un_criterio_sobre_el_contenido_que_exige_juzgar_sigue_siendo_unverifiable(tmp_path):
+    """La parte de la limitación anterior que SIGUE siendo cierta, y no debe relajarse.
 
-    `file_exists:notas.txt` acredita que el fichero EXISTE, no que ALEXIS entendiera su
-    contenido. El vocabulario no llega más lejos, así que un criterio que sólo se
-    puede comprobar leyendo el contenido del fichero no puede darse por cumplido: se
-    conserva y queda en `insufficient_evidence`, y la misión NO cierra como
-    COMPLETED aunque el archivo exista y `fs.read` funcione.
+    P0 §11 añadió `content_observed`: se puede comprobar que ALEXIS LEYÓ el fichero. Lo
+    que NO se puede comprobar —y no se va a inventar un juez que sí— es si la respuesta
+    cumple una exigencia de contenido que el vocabulario no expresa. "El análisis
+    menciona las tres ideas del documento" exige juicio sobre el resultado: se conserva,
+    queda en `insufficient_evidence`, y la misión NO cierra.
     """
     (tmp_path / "notas.txt").write_text("contenido real de notas\n", encoding="utf-8")
 
     criteria, status = normalize_criteria(
         "Analiza el archivo notas.txt y dime qué contiene", "", []
     )
-    assert criteria == ["file_exists:notas.txt"]
+    assert criteria == ["content_observed:notas.txt"]
 
-    # El objetivo real ("dime qué contiene") NO es comprobable con el vocabulario
-    # actual: se conserva el criterio, pero no puede satisfied.
     objetivo = "Analiza el contenido de notas.txt y dime qué dice"
     criteria = criteria + ["El análisis menciona las tres ideas del documento"]
     mission = MissionEngine().create(
@@ -582,6 +615,114 @@ async def test_un_objetivo_sobre_contenido_sigue_siendo_unverifiable(tmp_path):
     result = await runtime.run_mission(mission)
 
     assert result.state is not MissionState.COMPLETED, (
-        "un criterio sobre el contenido del fichero no puede satisfiedse con file_exists"
+        "un criterio que exige juzgar el contenido sigue sin checker: no se puede "
+        "declarar cumplido porque no hay predicado que lo compruebe"
     )
     assert status["verifiable"] == 1
+    # Y el motivo dice exactamente cuál de los dos criterios no pudo comprobarse.
+    verificaciones = result.goal_verification
+    assert verificaciones is not None
+    estados = {e.criterion: e.status for e in verificaciones.evaluations}
+    assert estados["El análisis menciona las tres ideas del documento"] is (
+        CriterionStatus.INSUFFICIENT_EVIDENCE
+    )
+
+
+@pytest.mark.asyncio
+async def test_content_observed_exige_lectura_real_y_no_solo_existencia(tmp_path):
+    """P0 §11 — el cierre del agujero: existir no es haber leído.
+
+    Este es el test que el hostile audit exigía. El fichero EXISTE en ambos casos; lo que
+    cambia es si ALEXIS lo leyó:
+
+    · con `fs.read` real  → el contenido fue observado y el criterio se cumple;
+    · sólo con `fs.stat`   → se observó existencia, no contenido, y NO se cumple.
+
+    Es la diferencia entre "el archivo está en disco" y "ALEXIS sabe qué dice", que es
+    justo lo que un objetivo semántico pide.
+    """
+    from alexis.contracts import ExecutionResult, Observation
+
+    (tmp_path / "notas.txt").write_text("contenido real de notas\n", encoding="utf-8")
+    objetivo = "Analiza el archivo notas.txt y dime qué contiene"
+    criteria, _ = normalize_criteria(objetivo, objetivo, [])
+    assert criteria == ["content_observed:notas.txt"]
+
+    mission = MissionEngine().create(
+        objetivo,
+        MissionEnvelope(
+            objective=objetivo,
+            autonomy=AutonomyLevel.SUPERVISED,
+            allowed_actions=list(ALLOWED_ACTIONS),
+        ),
+        success_criteria=criteria,
+    )
+
+    # (1) Sólo `fs.stat`: existence observada, contenido no. NO satisface.
+    world_stat = WorldModel()
+    world_stat.observe_execution(
+        type("S", (), {"id": "stat", "capability": "fs.stat", "action": "research"})(),
+        ExecutionResult(
+            success=True,
+            output={"path": "notas.txt", "exists": True, "size": 24},
+            observations=[Observation("tool.fs.stat", {"exists": True}, trusted=True)],
+        ),
+        mission=mission,
+    )
+    ver_stat = GoalVerifier(world=world_stat).verify(mission)
+    assert ver_stat.verified is False
+    assert ver_stat.evaluations[0].status is CriterionStatus.INSUFFICIENT_EVIDENCE
+    assert "sin su contenido" in ver_stat.evaluations[0].reason
+
+    # (2) `fs.read` real: el contenido fue devuelto por la herramienta. SÍ satisface.
+    world_read = WorldModel()
+    world_read.observe_execution(
+        type("S", (), {"id": "read", "capability": "fs.read", "action": "research"})(),
+        ExecutionResult(
+            success=True,
+            output={"path": "notas.txt", "exists": True, "size": 24, "content": "contenido real de notas\n"},
+            observations=[Observation("tool.fs.read", {"read": True}, trusted=True)],
+        ),
+        mission=mission,
+    )
+    ver_read = GoalVerifier(world=world_read).verify(mission)
+    assert ver_read.verified is True
+    assert ver_read.evaluations[0].status is CriterionStatus.SATISFIED
+    assert "leyó el contenido" in ver_read.evaluations[0].reason
+
+
+@pytest.mark.asyncio
+async def test_content_observed_no_lo_satisface_una_capability_que_escribe(tmp_path):
+    """Una capability que MUTA no puede atestiguar que leyó: sería auto-atestación.
+
+    El circuito cerrado que §5.3 veta: `fs.write` dice "escribí", nunca "leí". Si su
+    afirmación bastara, el paso que cumple el criterio se validaría a sí mismo.
+    """
+    from alexis.contracts import ExecutionResult, Observation
+
+    objetivo = "Analiza el archivo notas.txt y dime qué contiene"
+    criteria, _ = normalize_criteria(objetivo, objetivo, [])
+    mission = MissionEngine().create(
+        objetivo,
+        MissionEnvelope(
+            objective=objetivo,
+            autonomy=AutonomyLevel.SUPERVISED,
+            allowed_actions=list(ALLOWED_ACTIONS),
+        ),
+        success_criteria=criteria,
+    )
+
+    world = WorldModel()
+    world.observe_execution(
+        type("S", (), {"id": "w", "capability": "fs.write", "action": "execute"})(),
+        ExecutionResult(
+            success=True,
+            output={"path": "notas.txt", "exists": True, "size": 24, "content": "lo que yo escribí"},
+            observations=[Observation("tool.fs.write", {"ok": True}, trusted=True)],
+        ),
+        mission=mission,
+    )
+    ver = GoalVerifier(world=world).verify(mission)
+    assert ver.verified is False
+    assert ver.evaluations[0].status is CriterionStatus.INSUFFICIENT_EVIDENCE
+    assert "no puede atestiguar que leyó" in ver.evaluations[0].reason

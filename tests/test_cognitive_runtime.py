@@ -614,6 +614,9 @@ async def test_already_approved_step_is_executed_without_asking_again():
 # ----------------------------------------------------------------------
 
 
+#: Esta observación es deliberadamente un `fs.stat`: acredita EXISTENCIA, no lectura.
+#: Un objetivo que sólo pide `file_exists` se cumple con ella, y por eso el objetivo de
+#: esta misión se declara en esos términos. El camino cognitivo de arriba usa lectura real.
 async def _observe_real_file(tmp_path, world, name):
     """Observa un archivo real con la tool real, para que el objetivo tenga evidencia real."""
     from alexis.execution import SandboxExecutor
@@ -652,13 +655,60 @@ def _full_runtime(cognitive):
     )
 
 
+async def _observe_real_read(tmp_path, world, name):
+    """Observa el archivo REALMENTE LEÍDO, con la tool real y su contenido.
+
+    P0 §11: para un objetivo de lectura, `fs.stat` no basta. Un `stat` observa
+    existencia; el contenido sólo queda observado si una herramienta lo devuelve. Por eso
+    este helper usa `fs.read` a propósito: el objetivo "lee notas.txt" se cumple leyendo,
+    y un test que quisiera aparentar esa lectura con un `stat` estaría falseando la
+    evidencia que el `GoalVerifier` exige.
+    """
+    from alexis.execution import SandboxExecutor
+    from alexis.security.sandbox import SandboxRunner
+    from alexis.tools.filesystem import build_filesystem_tools
+    from alexis.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_all(build_filesystem_tools(tmp_path))
+    executor = SandboxExecutor(tools=registry, sandbox=SandboxRunner(tmp_path))
+    step = PlanStep(
+        "leer",
+        f"leer {name}",
+        "research",
+        RiskLevel.LOW,
+        "executor",
+        capability="fs.read",
+        args={"path": name},
+    )
+    result = await executor.execute(_mission("leer"), step, tool_name="fs.read")
+    assert result.success, f"la lectura real debería haber funcionado: {result.error}"
+    world.observe_execution(step, result)
+    return result
+
+
 @pytest.mark.asyncio
 async def test_full_runtime_completes_through_the_cognitive_loop(tmp_path):
+    """El ciclo cognitivo completo, con la tool REAL y sin dobles en el camino.
+
+    P0 §11: este test usaba un `_ScriptedExecutor` vacío y precargaba el WorldModel. Con
+    el contrato de paso ejecutable (§11) eso ya no basta —ni debe: un ejecutor que no
+    hace nada no puede producir el contenido que el paso promete—, así que ahora usa el
+    `SandboxExecutor` real sobre el workspace real. Es un test MÁS fuerte: la evidencia
+    la produce la herramienta, no el test.
+    """
     (tmp_path / "notas.txt").write_text("contenido", encoding="utf-8")
     from alexis.capabilities import build_catalog
+    from alexis.execution import SandboxExecutor
+    from alexis.security.sandbox import SandboxRunner
+    from alexis.tools.filesystem import build_filesystem_tools
+    from alexis.tools.registry import ToolRegistry
 
     world = WorldModel()
-    await _observe_real_file(tmp_path, world, "notas.txt")
+    registry = ToolRegistry()
+    registry.register_all(build_filesystem_tools(tmp_path))
+    real_executor = SandboxExecutor(tools=registry, sandbox=SandboxRunner(tmp_path))
+
     mission = _mission(
         "lee notas.txt",
         capabilities=[s.id for s in build_catalog().enabled()],
@@ -668,9 +718,8 @@ async def test_full_runtime_completes_through_the_cognitive_loop(tmp_path):
     cognitive = CognitiveRuntime(
         policy=PolicyEngine(),
         gate=AutonomyGate(),
-        executor=None,
+        executor=real_executor,
         verifier=FilesystemVerifier(workspace=tmp_path),
-        execute=_ScriptedExecutor({}),
         world=world,
         goal_verifier=GoalVerifier(world=world),
     )
@@ -685,6 +734,10 @@ async def test_full_runtime_completes_through_the_cognitive_loop(tmp_path):
     assert result.context["knowledge"]["verified"] is True
     assert result.context["knowledge"]["claims"]
     assert result.context["claims"]
+    # Y el contenido lo leyó la herramienta real, no el test.
+    entidad = world.known_path("notas.txt")
+    assert entidad is not None
+    assert entidad.attributes.get("content_observed") is True
 
 
 @pytest.mark.asyncio

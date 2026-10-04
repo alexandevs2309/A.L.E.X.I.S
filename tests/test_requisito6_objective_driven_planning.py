@@ -306,7 +306,10 @@ async def test_13_cada_paso_lleva_objetivo_y_criterios():
         assert step.success_criteria, f"{step.id} sin success_criteria"
     verify = plan.steps[1]
     assert "verificar con observaciones independientes y registrar el resultado" in verify.success_criteria
-    assert "deja" in plan.steps[0].success_criteria[0]
+    # P0 §11 / Req #7: el paso de escritura no describe su éxito, lo DECLARA con un
+    # predicado que el GoalVerifier sabe evaluar. Antes era prosa ("deja ... en el estado
+    # previsto") y nadie la evaluaba: el paso se completaba por `tool.success`.
+    assert plan.steps[0].success_criteria == ["file_exists:informe.txt"]
 
 
 # ======================================================================

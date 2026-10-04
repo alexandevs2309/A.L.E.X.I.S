@@ -145,9 +145,10 @@ class TestDerivacion:
                      path="informe.txt", content="hola")
 
         assert step_objective_for(mission, step) == "ejecutar fs.write para producir informe.txt"
-        assert step_criteria_for(mission, step) == [
-            "fs.write deja informe.txt en el estado previsto por el paso"
-        ]
+        # P0 §11 / Req #7: el criterio de un paso con efecto observable es un PREDICADO
+        # comprobable, no prosa. Con prosa el contrato era decorativo: nada lo evaluaba y
+        # el paso se completaba porque `tool.success` fuera True.
+        assert step_criteria_for(mission, step) == ["file_exists:informe.txt"]
 
     def test_pasos_puramente_cognitivos_no_se_inventan_criterios(self):
         mission = _mission()
@@ -160,14 +161,24 @@ class TestDerivacion:
             )
 
     def test_capabilities_solo_lectura_tienen_criterio_de_observacion(self):
+        """Una lectura se acredita LEYENDO, y el predicado lo dice.
+
+        `fs.read` y `research.filesystem` devuelven contenido, así que su criterio es
+        `content_observed`. Las que sólo observan metadatos (`fs.stat`) se acreditan con
+        `file_exists`: no pueden afirmar más de lo que vieron, y exigirles contenido
+        sería exigir algo que no pueden dar.
+        """
         mission = _mission()
-        for cap in ("fs.read", "fs.stat", "research.filesystem", "verification.filesystem"):
+        for cap in ("fs.read", "research.filesystem"):
+            step = _step("observar", cap, action="execute", path="informe.txt")
+            assert step_criteria_for(mission, step) == ["content_observed:informe.txt"]
+        for cap in ("fs.stat",):
             step = _step("observar", cap, action="execute", path="informe.txt")
             criteria = step_criteria_for(mission, step)
             assert len(criteria) == 1
             assert "informe.txt" in criteria[0]
-            assert "sin modificar nada" in criteria[0]
-            assert "estado previsto" not in criteria[0]
+            # Sin ruta en args no se inventa predicado: se conserva la declaración honesta.
+            assert "estado previsto" not in criteria[0] or criteria[0].startswith("file_")
 
     def test_research_nunca_afirma_haber_modificado(self):
         mission = _mission()
@@ -215,8 +226,9 @@ class TestPlantilla:
         assert by_id["verify"].success_criteria == [
             "verificar con observaciones independientes y registrar el resultado"
         ]
-        assert by_id["execute"].success_criteria  # estado deja/se registra
-        assert "deja" in by_id["execute"].success_criteria[0]
+        # El paso de escritura declara un predicado COMPROBABLE: esto es lo que hace que
+        # el contrato del paso sea ejecutable y no una descripción.
+        assert by_id["execute"].success_criteria == ["file_exists:informe.txt"]
         assert "informe.txt" in by_id["execute"].objective
 
     @pytest.mark.asyncio
