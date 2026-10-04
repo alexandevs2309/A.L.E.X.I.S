@@ -158,9 +158,26 @@ class SandboxExecutor:
         return self._finish(rewritten, composed)
 
     def _finish(self, text: str, composed) -> str:
-        """Guard de falso éxito + provenance, aplicados a texto que venga del modelo."""
+        """Guard de falso éxito + provenance, aplicados a texto que venga del modelo.
+
+        MEDIUM-1 — la autoridad es el ESTADO VERIFICADO, no una lista de palabras.
+
+        Con `goal_verified=False` el texto del modelo no se usa. No es que se le limpien
+        las frases de logro: es que no se le permite hablar en su nombre. Un lexicon, por
+        amplio que sea, depende de haber previsto la frase; y basta con que el modelo
+        responda en otro idioma, o con una construcción que la lista no cubre, para que
+        un falso éxito pase intacto. Aquí el impedimento es estructural: sin verificación
+        del objetivo, la respuesta es la compuesta, que está anclada al veredicto real.
+
+        Con `goal_verified=True` la reformulación se acepta, porque el objetivo está
+        comprobado y la naturalidad no puede mentir sobre él. Aun así pasa por el
+        lexicon, como segunda capa.
+        """
+        honest = render_for_voice(composed)
         if not text:
-            return render_for_voice(composed)
+            return honest
+        if not composed.goal_verified:
+            return self._keep_provenance(honest, composed)
         return self._keep_provenance(
             ResponseComposer().sanitize(text, composed.goal_verified), composed
         )

@@ -55,7 +55,23 @@ COMPLETION_CLAIMS = (
     "logro", "logros", "logra", "logró", "logramos", "logrado", "lograda",
     # otros
     "listo",
+    # P0 §11 / MEDIUM-1 — el guard NO puede depender de que el modelo hable español.
+    # Un lexicon de un solo idioma deja pasar "finished", "done" o "all set" con
+    # `goal_verified=False`, que es exactamente el falso éxito que §5.6.1 prohíbe.
+    # Inglés
+    "done", "finished", "completed", "complete", "accomplished", "achieved",
+    "successfully", "successful", "succeeded", "all set", "allset", "ready",
+    "task complete", "work done", "wrapped up", "in place",
+    # Francés
+    "terminé", "termine", "achevé", "accompli", "fait", "prêt", "prete",
+    # Alemán / italiano / portugués
+    "fertig", "erledigt", "abgeschlossen", "fatto", "completato", "concluído",
+    "concluido", "pronto", "feito", "realizado",
 )
+
+#: Lo que el guard deja en lugar de una afirmación de logro. Es una constante y no una
+#: cadena repetida, para que el guard y `asserts_completion` no puedan divergir.
+_UNVERIFIED_MARKER = "(logro no verificado)"
 
 _COMPLETION_RE = re.compile(
     r"\b(" + "|".join(re.escape(word) for word in COMPLETION_CLAIMS) + r")\b",
@@ -209,7 +225,7 @@ class ResponseComposer:
         hits = sorted({match.group(0) for match in _COMPLETION_RE.finditer(text)})
         if not hits:
             return text, []
-        return _COMPLETION_RE.sub("(logro no verificado)", text), hits
+        return _COMPLETION_RE.sub(_UNVERIFIED_MARKER, text), hits
 
     # ------------------------------------------------------------------ #
     # Piezas
@@ -285,10 +301,15 @@ class ResponseComposer:
         Con `goal_verified=True` no puede pasar. Sin ella, devuelve `True` sólo si
         sobrevive alguna palabra de logro, que es exactamente el falso éxito que §5.6.1
         prohíbe.
+
+        Antes de escanear se retira el MARCADOR del propio guard ("logro no verificado"):
+        contiene la palabra «logro» y, sin esta retirada, el texto ya neutralizado se
+        detectaría como una afirmación de logro — el guard se acusa a sí mismo.
         """
         if reply.goal_verified:
             return False
-        return _COMPLETION_RE.search(reply.text or "") is not None
+        text = (reply.text or "").replace(_UNVERIFIED_MARKER, "")
+        return _COMPLETION_RE.search(text) is not None
 
     def sanitize(self, text: str, goal_verified: bool) -> str:
         """Reaplica el guard sobre texto que venga de otro sitio (p. ej. un modelo).
@@ -298,7 +319,7 @@ class ResponseComposer:
         """
         if goal_verified:
             return text
-        return _COMPLETION_RE.sub("(logro no verificado)", text or "")
+        return _COMPLETION_RE.sub(_UNVERIFIED_MARKER, text or "")
 
 
 # --------------------------------------------------------------------------- #
