@@ -626,7 +626,21 @@ class AlexisRuntime:
             await self.event_repo.append("plan.invalid", payload, mission.id)
 
     async def _plan_with_rules(self, mission: Mission, *, source: str):
-        """Plan por reglas. Es el suelo: si tampoco valida, no hay plan ejecutable."""
+        """Plan por reglas. Es el suelo: si tampoco valida, no hay plan ejecutable.
+
+        CORE-12: primero la estrategia aprendida. Si una skill validada coincide con el
+        objetivo, su `procedure` ES el plan — la plantilla es lo que se usa cuando no hay
+        estrategia. No es una excepción: la skill plan se valida igual que la plantilla,
+        y si no valida, cae a la plantilla y de ahí al rechazo de siempre.
+        """
+        plan, skill_source = self._plan_with_skill(mission, source=source)
+        if plan is not None:
+            reasons = self._plan_reasons(mission, plan)
+            if not reasons:
+                return plan, skill_source
+            await self._reject_plan(mission, plan, source=source)
+            plan = None
+
         plan = await self.planner.create_plan(mission)
         reasons = self._plan_reasons(mission, plan)
         if not reasons:
@@ -649,6 +663,56 @@ class AlexisRuntime:
             "note": "ni el plan proposing por el modelo ni el de reglas son ejecutables",
         }
         return None, {"proposed_by": "rule_based", "source": source, "accepted": False, "reasons": reasons}
+
+    def _skill_match(self, mission):
+        """CORE-12 — skill validada cuyo `applicability` coincide con el objetivo, o `None`.
+
+        Se consultan las capabilities que la misión puede ofrecer: una skill que pida una
+        capability ausente no aplica ni como candidato. La planificación nunca puede caer
+        por un problema del registro.
+        """
+        try:
+            registry = self.skill_registry()
+            if registry is None or not registry.all():
+                return None
+            capabilities = [c for c in (getattr(mission.envelope, "capabilities", []) or [])]
+            verdict, found, reasons = registry.match(
+                mission.goal.objective, capabilities=capabilities
+            )
+            if found is None:
+                return None
+            return verdict, found, reasons
+        except Exception as exc:  # noqa: BLE001 — las skills nunca tumbar planificar
+            log.warning("learning: no se pudo consultar skills al planificar (%s)", exc)
+            return None
+
+    def _plan_with_skill(self, mission: Mission, *, source: str):
+        """CORE-12 — plan desde la skill cuyo `MATCH` es seguro. `(None, None)` si no aplica.
+
+        Sólo `MATCH` reutiliza. `UNCERTAIN` disfraza de estrategia lo que es conjetura, y
+        CORE-11 se construyó para que una skill nunca aventaje por parecido débil.
+        """
+        from alexis.cognition.planner import Planner
+        from alexis.learning.skill import SkillMatch
+
+        matched = self._skill_match(mission)
+        if matched is None:
+            return None, None
+        verdict, found, reasons = matched
+        if verdict != SkillMatch.MATCH:
+            return None, None
+        plan = Planner.plan_from_skill(mission, found)
+        if plan is None:
+            return None, None
+        provenance = {
+            "proposed_by": "skill",
+            "source": source,
+            "accepted": True,
+            "skill_id": found.skill_id,
+            "skill_version": found.version,
+            "reasons": reasons,
+        }
+        return plan, provenance
 
     def _plan_catalog_reason(self) -> str:
         """Por qué el validador no puede comprobar capabilities, o `""` si sí puede.

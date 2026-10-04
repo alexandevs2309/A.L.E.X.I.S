@@ -14,6 +14,51 @@ class Planner:
     usando los mismos ids para no romper checkpoint/resume/approval.
     """
 
+    @staticmethod
+    def plan_from_skill(mission, skill_version) -> Plan | None:
+        """CORE-12 — plan desde el `procedure` de una skill validada, o `None`.
+
+        No añade ni quita nada: la skill ES la estrategia. Cada paso conserva su id (para
+        checkpoint/resume), capability, acción, riesgo, args y requires_approval, y se marca
+        `proposed_by="skill"` para que la traza distinga un plan reutilizado de una plantilla.
+        Una skill con estructura corrupta nunca puede tumbar la planificación.
+        """
+        try:
+            procedure = list(getattr(skill_version, "procedure", []) or [])
+            if not procedure:
+                return None
+            steps: list[PlanStep] = []
+            for index, raw in enumerate(procedure):
+                capability = raw.get("capability")
+                action = raw.get("action", "execute")
+                if not capability:
+                    return None
+                try:
+                    risk = RiskLevel(raw.get("risk", "low"))
+                except ValueError:
+                    risk = RiskLevel.LOW
+                steps.append(
+                    PlanStep(
+                        id=raw.get("id") or f"skill-step-{index}",
+                        description=raw.get(
+                            "description",
+                            f"Skill {skill_version.name} v{skill_version.version}: {action} {capability}",
+                        ),
+                        action=action,
+                        risk=risk,
+                        agent=raw.get("agent", "executor"),
+                        depends_on=list(raw.get("depends_on") or []),
+                        requires_approval=bool(raw.get("requires_approval", False)),
+                        capability=capability,
+                        proposed_by="skill",
+                        rationale=f"procedimiento reutilizado de la skill {skill_version.name}",
+                        args=dict(raw.get("args") or {}),
+                    )
+                )
+            return Plan(mission.id, steps)
+        except Exception:  # noqa: BLE001 — una skill corrupta nunca tumbar planificar
+            return None
+
     def _select_execute_capability(self, mission, objective: str, intent: str):
         """Capability de ejecución elegida por selección dinámica, o `None` si no se puede.
 
