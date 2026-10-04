@@ -4,6 +4,11 @@
 
 This version defines ALEXIS as a complete personal AI system rather than a chatbot or coding agent.
 
+`docs/VISION.md` is the **north-star specification** for the complete system, and this
+repository is an incremental, honest implementation of its foundation. Not everything in the
+vision exists yet, and nothing here claims it does: `docs/VISION-ALIGNMENT.md` records what is
+real, what is partial, and what is only a contract.
+
 ## Architecture
 
 ALEXIS is organized around twelve capability domains:
@@ -72,6 +77,17 @@ sin `GoalVerifier` no puede cerrar ninguna misión (ver `apps/demo/runtime_flags
 
 ## Documentation map
 
+**Start here if you are an agent or new contributor:**
+
+- `docs/VISION.md` — **north-star**: the complete long-term ALEXIS. Describes the TARGET, not
+  the current system. Read its warning block before anything else.
+- `docs/VISION-ALIGNMENT.md` — **what actually exists**, section by section against the
+  vision, with evidence pointers. Check this before claiming a capability works.
+
+**Current state of the system:**
+
+- `docs/IMPLEMENTATION-STATUS.md` — qué está implementado y qué falta.
+- `docs/P0-COGNITIVE-CORE-GAP-ANALYSIS.md` — auditoría P0 con su método de puntuación.
 - `docs/MINDMAP.md` — mapa mental maestro.
 - `docs/BLUEPRINT.md` — blueprint arquitectónico.
 - `docs/SYSTEM-MAP.md` — mapa de sistemas y estado conceptual.
@@ -79,7 +95,6 @@ sin `GoalVerifier` no puede cerrar ninguna misión (ver `apps/demo/runtime_flags
 - `docs/CAPABILITIES.md` — mapa de capacidades.
 - `docs/AUTONOMY-V0.5-CAPABILITIES.md` — modelo de autonomía por capacidades y políticas (v0.5).
 - `docs/SELF-MODEL.md` — Self Model: autoconocimiento operacional de ALEXIS y presencia desde el estado real.
-- `docs/IMPLEMENTATION-STATUS.md` — qué está implementado y qué falta.
 - `docs/DEVELOPMENT.md` — guía de desarrollo ordenada: por dónde empezar y cómo seguir.
 - `docs/SECURITY.md` — modelo de seguridad.
 - `docs/ROADMAP.md` — evolución por versiones.
