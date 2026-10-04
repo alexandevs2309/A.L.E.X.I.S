@@ -32,11 +32,53 @@ _FAMILY_PREFERRED = {
     "read": ("fs.read", "research.filesystem", "fs.stat"),
     "analyze": ("fs.read", "fs.stat", "research.filesystem"),
     "existence": ("fs.stat", "research.filesystem"),
+    "transform": ("fs.read", "fs.write"),
 }
+
+#: P0 §11 — un objetivo TRANSFORMACIONAL nombra dos rutas: una de la que se parte y otra
+#: que se produce. "crea salida.txt con un resumen de notas.txt" no es una escritura de
+#: `salida.txt`: es leer `notas.txt` y escribir `salida.txt`. Sin esta detección el plan
+#: era `[execute, verify]` y la entrada no se leía nunca, de modo que la cadena causal que
+#: el objetivo pide no existía —el sistema escribía un fichero cuyo contenido no procedía
+#: de nada observado—.
+_TRANSFORM_HINTS = (
+    "a partir de", "basado en", "basada en", "con un resumen de", "con la resumen de",
+    "con una copia de", "copia de", "traduce", "traducir", "transforma", "transformar",
+)
+
+
+def _transform_paths(objective: str) -> tuple[str, str]:
+    """(entrada, salida) de un objetivo transformacional, o `("", "")` si no lo es.
+
+    Reutiliza la clasificación semántica de `criteria.py`: si el contrato de la misión
+    exige `content_observed` de una ruta y `file_exists` de otra, el plan tiene que hacer
+    exactamente eso. Una sola fuente de verdad para decidir qué es entrada y qué salida.
+    """
+    from alexis.cognition.criteria import classify_objective_semantics, criteria_for_objective
+
+    if classify_objective_semantics(objective) != "transformation":
+        return "", ""
+    criteria = criteria_for_objective(objective)
+    source = ""
+    target = ""
+    for criterion in criteria:
+        name, _, argument = criterion.partition(":")
+        argument = argument.split(":")[0]
+        if name == "content_observed" and argument:
+            source = argument
+        elif name in ("file_exists", "file_size_at_least") and argument:
+            target = argument
+    if source and target and source != target:
+        return source, target
+    return "", ""
 
 
 def _objective_family(objective: str, intent: str) -> str:
     """Familia de FORMA del plan, derivada de la intención y de señales léxicas.
+
+    `transform` gana a `write`: si el objetivo tiene entrada y salida, el plan tiene que
+    abarcar ambos. Un objetivo que empieza por un verbo de creación no es una
+    escritura aislada cuando además nombra de dónde sale lo que hay que escribir.
 
     Los verbos de síntesis ganan a la lectura (el objetivo pide conclusiones, no solo
     leer). `unsupported` devuelve la plantilla declarada como fallback.
@@ -44,6 +86,9 @@ def _objective_family(objective: str, intent: str) -> str:
     folded = (objective or "").strip().lower()
     if intent == "unsupported":
         return "unsupported"
+    source, target = _transform_paths(objective or "")
+    if source and target:
+        return "transform"
     if intent == "write":
         return "write"
     if intent == "destructive":
@@ -207,6 +252,11 @@ class Planner:
         if preferred is None:
             return None
 
+        # P0 §11: en una transformación, entrada y salida se calculan aquí y se usan
+        # abajo para encadenar los pasos. Se recalcula en lugar de confiar en el objetivo
+        # pelado porque es la MISMA función que decidió la familia: una sola verdad.
+        source, target_path = _transform_paths(objective or "")
+
         try:
             selector = CapabilitySelector(catalog=catalog)
             selection = selector.select(objective, envelope=getattr(mission, "envelope", None))
@@ -224,6 +274,61 @@ class Planner:
         target = extract_workspace_path(objective) or None
         args = {"path": target} if target else {}
 
+        if family == "transform":
+            # P0 §11 — el plan tiene que ENCADENAR la transformación: primero se observa
+            # la entrada, después se produce la salida, y sólo entonces se verifica de
+            # forma independiente. El paso de lectura declara `depends_on` vacío y el de
+            # escritura depende de él: no se puede "resumir" un fichero que no se ha leído,
+            # y el plan lo hace imposible en lugar de confiar en que el modelo lo haga.
+            read_capability = (
+                _pick_capability(list(selection.selected), catalog, ("fs.read", "research.filesystem"))
+                or "fs.read"
+            )
+            write_capability = (
+                _pick_capability(list(selection.selected), catalog, ("fs.write",))
+                or "fs.write"
+            )
+            return [
+                PlanStep(
+                    "research",
+                    f"Leer {source} para poder trabajar sobre su contenido",
+                    "research",
+                    RiskLevel.LOW,
+                    "researcher",
+                    capability=read_capability,
+                    proposed_by=PLANNED_OBJECTIVE_DRIVEN,
+                    rationale=(
+                        "P0 §11: la salida que se pide deriva de esta entrada; sin "
+                        "observarla, escribir el fichero sería inventar su contenido"
+                    ),
+                    args={"path": source},
+                ),
+                PlanStep(
+                    "execute",
+                    f"Escribir {target} a partir del contenido observado",
+                    "execute",
+                    RiskLevel(catalog.get(write_capability).default_risk)
+                    if catalog.has(write_capability)
+                    else RiskLevel.MEDIUM,
+                    "executor",
+                    ["research"],
+                    capability=write_capability,
+                    proposed_by=PLANNED_OBJECTIVE_DRIVEN,
+                    rationale="P0 §11: la producción depende de la lectura previa",
+                    args={"path": target_path},
+                ),
+                PlanStep(
+                    "verify",
+                    f"Verificar de forma independiente que {target_path} quedó como se pidió",
+                    "verify",
+                    RiskLevel.LOW,
+                    "critic",
+                    ["execute"],
+                    capability="verification.filesystem",
+                    proposed_by=PLANNED_OBJECTIVE_DRIVEN,
+                    rationale="Req 6: verificación read-only e independiente de la acción",
+                ),
+            ]
         if family == "write" or family == "remove":
             effect = (
                 RiskLevel(catalog.get(capability).default_risk)
@@ -505,6 +610,37 @@ _READ_ONLY_CAPABILITIES = {
 }
 
 
+#: Acciones cuyo efecto SOBRE EL MUNDO es comprobable con el vocabulario del
+#: `GoalVerifier`. Para ellas el contrato del paso se emite en forma de predicado, y
+#: `_absorb` lo evalúa contra la observación real antes de dar el paso por cumplido.
+#: P0 §11 / Req #7: sin esto, `tool.success` decidía el paso y el contrato era decorativo.
+_EXECUTABLE_STEP_ACTIONS = frozenset({"research", "execute"})
+
+#: Predicado que corresponde a una acción sobre una ruta. El criterio del PASO se deriva
+#: de lo que la acción PROMETE hacer, no de lo que el objetivo pide: un paso de escritura
+#: promete que el fichero exists; uno de lectura, que su contenido fue observado.
+_STEP_PREDICATE_BY_CAPABILITY = {
+    "fs.write": "file_exists",
+    "fs.remove": "file_missing",
+    "fs.read": "content_observed",
+    "research.filesystem": "content_observed",
+}
+
+
+def _step_target_path(step: PlanStep) -> str:
+    """Ruta que el paso opera, tal y como la ejecutaría la herramienta.
+
+    Se leen los MISMOS `args` que consume el executor, y sólo si son un único segmento:
+    si el paso no tiene una ruta inequívoca no se inventa un predicado, porque un
+    predicado sobre una ruta inventada comprobaría el fichero equivocado.
+    """
+    args = getattr(step, "args", None) or {}
+    path = args.get("path") if isinstance(args, dict) else None
+    if isinstance(path, str) and path and not path.startswith("/") and ".." not in path:
+        return path.strip()
+    return ""
+
+
 def step_criteria_for(mission, step: PlanStep) -> list[str]:
     """Req 7 — criterios de éxito DEL PASO, no del objetivo.
 
@@ -515,9 +651,22 @@ def step_criteria_for(mission, step: PlanStep) -> list[str]:
       verificación independiente (GoalVerifier sigue siendo la autoridad del objetivo).
     - Pasos puramente cognitivos no tienen producto observable propio: devuelven `[]`,
       declarando la limitación en vez de inventar un criterio falso.
+    - P0 §11: si el paso tiene un efecto OBSERVABLE sobre una ruta, el criterio se emite
+      como PREDICADO comprobable, no como prosa. Ése es el cambio que hace el contrato
+      ejecutable: un paso de escritura no se da por cumplido porque la tool dijera que
+      tuvo éxito, sino porque se observó que el fichero quedó como el paso prometía.
     """
     action = str(getattr(step, "action", "") or "")
     target = _step_target(step)
+
+    # P0 §11: contrato EJECUTABLE para los pasos que dejan estado observable.
+    if action in _EXECUTABLE_STEP_ACTIONS:
+        capability = str(getattr(step, "capability", "") or "")
+        path = _step_target_path(step)
+        predicate = _STEP_PREDICATE_BY_CAPABILITY.get(capability)
+        if predicate and path:
+            return [f"{predicate}:{path}"]
+
     if action in ("understand", "analyze", "plan", "recall", "synthesize", "replan"):
         return []
     if action == "research":

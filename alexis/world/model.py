@@ -873,6 +873,17 @@ class WorldModel:
                 attributes["truncated"] = bool(output["truncated"])
             if not success and not attributes.get("exists"):
                 attributes["exists"] = False
+            # P0 §11 — "existe" y "he leído su contenido" son hechos distintos, y solo el
+            # segundo sostiene un objetivo semántico ("analiza y dime qué contiene"). La
+            # señal NO es una lista de capabilities: es lo que la tool devolvió de verdad.
+            # `fs.read` entrega `content`; `fs.stat` sólo metadatos. Se registra el hecho
+            # observado, no la intención de la tool.
+            content = output.get("content")
+            if isinstance(content, str):
+                attributes["content_observed"] = True
+                attributes["content_length"] = len(content)
+            else:
+                attributes["content_observed"] = False
             observed.append(
                 self.upsert(
                     WorldEntity(

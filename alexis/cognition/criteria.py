@@ -84,6 +84,9 @@ _EDIT_TERMS = (
     "modifica", "modificar", "edita", "editar", "actualiza", "actualizar",
     "cambia", "cambiar", "corrige", "corregir", "arregla", "arreglar", "repara",
     "reparar", "añade contenido", "amplia", "ampliar", "sustituye",
+    # P0 §11: copiar y volcar también PRODUCEN un artefacto. Sin ellos, "copia A en B"
+    # no caía en ninguna familia y se quedaba sin criterio verificable.
+    "copia", "copiar", "copie",
 )
 _DELETE_TERMS = (
     "borra", "borrar", "elimina", "eliminar", "quita", "quitar", "suprime",
@@ -169,6 +172,19 @@ _PATH_LEAD_WORDS = frozenset({
     "quita", "quitar", "suprime", "mira", "busca", "buscar", "investiga", "investigar",
     "analyze", "read", "open", "show", "delete", "remove", "create", "write", "update",
     "fix", "review", "summarize", "explain", "report",
+    # P0 §11: las preguntas de existencia y de contenido también introducen el nombre del
+    # fichero. Sin estas, "comprueba si notas.txt existe" no parecía nombrar una ruta
+    # completa ("si" no es un artículo) y el objetivo se quedaba sin criterio.
+    "si", "sí", "comprueba", "comprobar", "compruebe", "verifica", "verificar",
+    "dime", "diga", "diga", "muéstrame", "muestrame", "muestra", "traduce", "traducir",
+    "resume", "resumir", "resuma", "copia", "copiar", "extrae", "extraer", "quiero",
+    "necesito", "debe", "deben", "tiene", "tienen", "hay", "existe", "existen", "esta",
+    "está", "este", "esta", "datos", "dato", "archivo", "fichero", "documento",
+    # P0 §11: los verbos de pregunta sobre el CONTENIDO también introducen el nombre.
+    # Sin ellos, "dime qué contiene notas.txt" no parecía nombrar una ruta completa
+    # (la palabra previa es "contiene") y el objetivo se quedaba sin criterio.
+    "contiene", "contengan", "dice", "diga", "dicen", "tenia", "tenía", "saying",
+    "poner", "pone", "ponega", "ocurre", "explica", "explicame", "resumen",
 })
 
 
@@ -226,22 +242,263 @@ def _is_negated(text: str) -> bool:
 
 
 def _derives_for_intent(intent: str, text: str, path: str) -> str | None:
-    """Predicado canónico para un objetivo con ruta, según read/write/destructive.
+    """Deprecated: usa `criteria_for_objective`. Se conserva para los tests que aún la
+    invocan con (intent, text, path). Delega en la clasificación semántica."""
+    return criteria_for_objective(text)[0] if criteria_for_objective(text) else None
 
-    - negated     → file_missing:RUTA            ("ya no está", "borrado")
-    - destructive → file_missing:RUTA            (regla E)
-    - write/edit  → file_exists:RUTA             (regla D)
-    - read        → file_exists:RUTA             (regla C)
+
+# --------------------------------------------------------------------------- #
+# P0 §11 — SEMÁNTICA DEL OBJETIVO
+#
+# El fallo que este bloque cierra: la presencia de una ruta bastaba para derivar
+# `file_exists:RUTA`. "Analiza notas.txt y dime qué contiene" quedaba reducido a
+# "notas.txt existe", un hecho que ya era cierto antes de que ALEXIS hiciera nada, y la
+# misión se cerraba sin que nadie hubiera leído el fichero.
+#
+# La regla nueva: una ruta NO habilita un predicado por sí sola. Hay que leer qué pide
+# el objetivo, y cada familia semántica tiene su contrato de verificación:
+#
+#   existence      → file_exists:RUTA        (el objetivo ES que exista)
+#   destructive    → file_missing:RUTA       (el objetivo ES que no exista)
+#   creation       → file_exists:RUTA + tamaño no vacío (el objetivo ES el artefacto)
+#   modification   → file_exists:RUTA        (el objetivo ES cambiarlo)
+#   analysis       → content_observed:RUTA   (el objetivo es el CONTENIDO, no el fichero)
+#   transformation → content_observed:ENTRADA + file_exists:SALIDA + tamaño (hay cadena)
+#   query          → sin predicado            (no hay artefacto: hoy no es comprobable)
+#
+# Un objetivo semántico nunca se degrada a un criterio más débil: si no hay predicado
+# que lo sostenga, queda unverifiable y la misión NO se cierra.
+# --------------------------------------------------------------------------- #
+
+#: families de objetivo. Los nombres son de contrato, no de marketing.
+SEMANTICS = (
+    "existence",
+    "destructive",
+    "creation",
+    "modification",
+    "analysis",
+    "transformation",
+    "query",
+)
+
+#: Pistas de que el objetivo pide CONTENIDO, no existencia. "dime qué contiene" no es
+#: "comprueba que existe": son dos preguntas distintas y van por caminos distintos.
+_ANALYSIS_TERMS = (
+    "analiza", "analizar", "analice", "análisis", "analisis", "resume", "resumir",
+    "explica", "explicar", "explícame", "explicame", "describe", "describir",
+    "qué contiene", "que contiene", "interpreta", "interpretar",
+    "compara", "comparar", "calcula", "calcular", "revisa", "revisar", "investiga",
+    "investigar", "sintetiza", "sintetizar", "extrae", "extraer", "busca dentro",
+    "analyze", "summarize", "explain", "describe", "read and tell",
+    "what does it contain", "inspecciona", "inspeccionar", "estudia", "estudiar",
+    # P0 §11: traducir o extraer de un fichero pide su CONTENIDO, aunque no se use la
+    # palabra "analiza". Sin esto, "traduce notas.txt" se habría leido como existencia.
+    "traduce", "traducir", "extrae", "extraer",
+)
+
+#: Palabras que describen el CONTENIDO pedido dentro de un objetivo de creación. No
+#: convierten "crea X con el resumen de Y" en un objetivo de análisis: ahí "resumen" dice
+#: QUÉ se escribe, no que haya que analizar. Por eso se listan aparte y se consultan sólo
+#: cuando ya se ha decidido que el objetivo es una creación.
+_CONTENT_NOUNS = ("resumen", "contenido", "texto", "datos", "copia", "traducción", "traduccion")
+
+#: "…a partir de X", "basado en X", "con un resumen de X": hay una entrada y una salida.
+_CHAIN_TERMS = (
+    "a partir de", "basado en", "basada en", "con un resumen de", "con la resumen de",
+    "con una copia de", "copia de", "traduce", "traducir", "transforma", "transformar",
+    "extrae de", "extraído de", "extraido de", "copia", "copiar",
+)
+
+#: Pistas de que el objetivo es una consulta, no un artefacto sobre el workspace.
+_QUERY_TERMS = (
+    "qué puedes hacer", "que puedes hacer", "qué sabes", "que sabes", "quién eres",
+    "quien eres", "cómo estás", "como estas", "ayuda", "help",
+)
+
+#: Verbos que hacen que la ÚNICA respuesta correcta sea "existe" o "no existe".
+_EXISTENCE_VERBS = (
+    "comprueba", "comprobar", "compruebe", "verifica", "verificar", "verifique",
+    "existe", "existen", "hay", "check",
+)
+
+
+def classify_objective_semantics(text: str, *, path: str | None = None) -> str:
+    """La familia semántica del objetivo. Decide QUÉ se puede verificar, no QUÉ se hizo.
+
+    La precedencia es deliberada y la explica cada regla:
+
+    1.BORRADO manda sobre todo: si el objetivo es que algo NO exista, ninguna otra
+      lectura es posible.
+    2. EXISTENCIA: la pregunta ES si existe. Se exige que NO pida contenido, porque
+      "comprueba si el informe existe" es existencia y "comprueba qué dice el informe" no.
+    3. TRANSFORMACIÓN: dos rutas y una relación entre ellas. Va antes que creación porque
+      "crea Y con un resumen de X" tiene dos rutas y es una cadena, no una escritura aislada.
+    4. CREACIÓN / 5. MODIFICACIÓN: el artefacto es el objetivo, así que su contenido es
+      exigible. Un verbo de creación gana a un sustantivo de contenido.
+    6. ANÁLISIS: una sola ruta y se pide su contenido.
+    7. CONSULTA: no hay artefacto que comprobar. Hoy no es verificable, y se dice.
+
+    NUNCA degrada: si la familia no tiene predicado que la sostenga, devuelve una lista
+    vacía y la misión queda en `insufficient_evidence`, que es un estado honesto.
     """
     low = _norm(text)
+    if not low:
+        return "query"
 
-    if _is_negated(text) or any(term in low for term in _DELETE_TERMS):
-        return f"file_missing:{path}"
-    if any(term in low for term in _CREATE_TERMS) or any(term in low for term in _EDIT_TERMS):
-        return f"file_exists:{path}"
-    if classify_objective_intent(text) == "read":
-        return f"file_exists:{path}"
-    return None
+    paths = _all_safe_paths(text)
+    if path is not None and path not in paths:
+        paths = [path, *paths]
+
+    # 1. Borrado.
+    if classify_objective_intent(text) == "destructive" or _is_negated(text):
+        return "destructive"
+    if any(term in low for term in _DELETE_TERMS):
+        return "destructive"
+
+    wants_content = _mentions_analysis(low)
+
+    # 2. Existencia: se pregunta por la existencia y NO por el contenido.
+    if not wants_content and any(
+        re.search(rf"\b{verb}\b", low) for verb in _EXISTENCE_VERBS
+    ):
+        return "existence"
+
+    # 3. Cadena entrada→salida: dos rutas y una relación que las une.
+    has_chain = any(term in low for term in _CHAIN_TERMS)
+    if len(paths) >= 2 and (has_chain or wants_content):
+        return "transformation"
+    if len(paths) >= 2 and any(term in low for term in _CREATE_TERMS + _EDIT_TERMS):
+        return "transformation"
+
+    # 4. Creación: el verbo manda sobre el sustantivo ("con el resumen de" describe QUÉ
+    # se escribe, no pide un análisis).
+    if any(term in low for term in _CREATE_TERMS):
+        return "creation"
+
+    # 5. Modificación.
+    if any(term in low for term in _EDIT_TERMS):
+        return "modification"
+
+    # 6. Análisis: una ruta y se pide lo que hay dentro.
+    if wants_content and paths:
+        return "analysis"
+    if paths and classify_objective_intent(text) == "read":
+        return "analysis"
+
+    # 7. Consulta.
+    return "query"
+
+
+def _mentions_analysis(low: str) -> bool:
+    return any(term in low for term in _ANALYSIS_TERMS)
+
+
+def _all_safe_paths(text: str) -> list[str]:
+    """Todas las rutas del workspace citadas, en orden y sin inventar nombres.
+
+    Aplica la MISMA salvaguarda que `_safe_path` a cada coincidencia: se mira la palabra
+    que introduce al nombre en el TEXTO ORIGINAL. Sin eso, "informe final.txt" produciría
+    "final.txt" y el criterio comprobaría un fichero que el usuario nunca nombró.
+    """
+    raw = text or ""
+    found: list[str] = []
+    for match in re.finditer(
+        r"[\w./\-]+\.(?:txt|md|json|log|csv|py|ini|env|yaml|yml)", raw
+    ):
+        candidate = match.group(0)
+        if not candidate or candidate in found:
+            continue
+        before = raw[: match.start()].strip()
+        if before:
+            lead = before.split()[-1].strip("\"'.,;:()[]!?").lower()
+            if lead not in _PATH_LEAD_WORDS:
+                continue
+        found.append(candidate)
+    return found
+
+
+def _output_path(text: str, paths: list[str]) -> str:
+    """Cuál de las rutas es la que el objetivo PRODUCE.
+
+    Dos formas, en orden:
+
+    1. Un verbo de CREACIÓN pegado a la ruta —"crea salida.txt con un resumen de
+       notas.txt"—: la ruta que sigue al verbo es la salida, y la otra es la entrada.
+    2. Sin verbo de creación —"copia notas.txt en copia.txt", "traduce A en B"—: en una
+       cadena el destino es la ÚLTIMA ruta y el origen la primera. Aquí está la razón de
+       no tratar "copia" como creación: en "copia notas.txt en copia.txt" el verbo
+       precede al ORIGEN, y tomarlo por el nombre de la salida habría pedido crear
+       notas.txt — la operación exactamente inversa a la pedida.
+
+    Sin esta distinción "traduce A en B" invertía entrada y salida, y el sistema habría
+    exigido leer B y haber creado A: el criterio describía justo lo contrario.
+    """
+    low = text or ""
+    for term in _CREATE_TERMS:
+        index = low.find(term)
+        if index == -1:
+            continue
+        for path in paths:
+            position = low.find(path)
+            if index < position <= index + 30:
+                return path
+    return paths[-1] if paths else ""
+
+
+def criteria_for_objective(text: str) -> list[str]:
+    """Criterios que el objetivo SOSTIENE, según su familia semántica.
+
+    Devuelve una lista vacía cuando el objetivo no nombra un artefacto comprobable. Es
+    preferible devolver vacío a devolver un predicado que no mide lo pedido: una lista
+    vacía deja la misión en `insufficient_evidence`, que es un estado honesto.
+    """
+    paths = _all_safe_paths(text)
+    semantics = classify_objective_semantics(text)
+
+    if semantics == "destructive":
+        if not paths:
+            return []
+        return [f"file_missing:{paths[0]}"]
+
+    if semantics == "existence":
+        if not paths:
+            return []
+        return [f"file_exists:{paths[0]}"]
+
+    if semantics == "creation":
+        if not paths:
+            return []
+        target = paths[0]
+        # El objetivo de una creación ES el artefacto con contenido: un fichero vacío no
+        # es "crear el archivo con el resumen", es no haberlo hecho. Por eso el tamaño
+        # mínimo es parte del contrato, no un extra opcional.
+        return [f"file_exists:{target}", f"file_size_at_least:{target}:1"]
+
+    if semantics == "modification":
+        if not paths:
+            return []
+        return [f"file_exists:{paths[0]}"]
+
+    if semantics == "analysis":
+        if not paths:
+            return []
+        # Éste es el cambio que cierra el gap: contenido observado, NO existencia.
+        return [f"content_observed:{paths[0]}"]
+
+    if semantics == "transformation":
+        if len(paths) < 2:
+            return [f"content_observed:{paths[0]}"] if paths else []
+        target = _output_path(text, paths)
+        source = next((p for p in paths if p != target), paths[0])
+        return [
+            # Se leyó la entrada...
+            f"content_observed:{source}",
+            # ...y se produjo una salida con contenido.
+            f"file_exists:{target}",
+            f"file_size_at_least:{target}:1",
+        ]
+
+    return []
 
 
 def _classify_criterion(text: str, intent: str) -> tuple[str | None, str]:
@@ -271,22 +528,31 @@ def _classify_criterion(text: str, intent: str) -> tuple[str | None, str]:
     if tests is not None:
         return tests, "canonical"
 
-    # Reglas B/C/D/E: contiene una ruta del workspace.
+    # P0 §11: contiene una ruta del workspace. Lo que decide el predicado es la
+    # SEMÁNTICA del criterio, no la mera presencia de la ruta.
     path = _safe_path(raw)
     if path is not None:
-        return _derives_for_intent(intent, raw, path), "canonical"
+        derived = criteria_for_objective(raw)
+        if derived:
+            return derived[0], "canonical"
+        return None, "unverifiable"
 
     # Regla J: nada que comprobar, pero el criterio del modelo no se pierde.
     return None, "unverifiable"
 
 
 def _derive_from_utterance(utterance: str, objective: str) -> list[str]:
-    """Criterios deterministas desde el texto del usuario (reglas C-G, H).
+    """Criterios deterministas desde el texto del usuario (P0 §11 + reglas H).
 
     Prioriza el `utterance` ORIGINAL sobre el `objective` del modelo: el modelo puede
     parafrasear e inventar o cambiar la ruta, el utterance no (regla H). Si del
     utterance sale algún criterio, no se mira el objective: una ruta que el modelo
     inventó no puede colarse en el contrato.
+
+    P0 §11: lo que decide QUÉ se verifica es la SEMÁNTICA del objetivo, no que el texto
+    nombre una ruta. Se construye con `criteria_for_objective`, que clasifica la familia
+    y devuelve el contrato de esa familia. Los predicados de suite (reglas F/G) siguen
+    teniendo prioridad: hablan de la suite y no de una ruta.
     """
     for text in (utterance, objective):
         if not (text or "").strip():
@@ -298,19 +564,11 @@ def _derive_from_utterance(utterance: str, objective: str) -> list[str]:
         if tests is not None:
             criteria.append(tests)
 
-        path = _safe_path(text)
-        if path is not None:
-            derived = _derives_for_intent(intent, text, path)
-            if derived is not None:
+        # P0 §11: la semántica del objetivo decide el contrato. Una ruta sola NO basta
+        # para derivar `file_exists`.
+        for derived in criteria_for_objective(text):
+            if derived not in criteria:
                 criteria.append(derived)
-                # Regla D (segunda parte): si además se pide contenido no vacío en un
-                # objetivo de escritura/edición, se añade el criterio de tamaño.
-                if (
-                    _wants_content(text)
-                    and derived.startswith("file_exists")
-                    and any(term in _norm(text) for term in _CREATE_TERMS + _EDIT_TERMS)
-                ):
-                    criteria.append(f"file_size_at_least:{path}:1")
 
         if criteria:
             return criteria[:MAX_CRITERIA]
@@ -374,10 +632,19 @@ def normalize_criteria(
         if canonical not in criteria and len(criteria) < MAX_CRITERIA:
             criteria.append(canonical)
 
-    if not any(_is_verifiable(c) for c in criteria):
-        for derived in _derive_from_utterance(utterance, objective):
-            if derived not in criteria and len(criteria) < MAX_CRITERIA:
-                criteria.append(derived)
+    # P0 §11: la semántica del objetivo se consulta SIEMPRE, no sólo cuando el modelo no
+    # proposed nada. Antes, si el modelo proponía un criterio trivial —"El archivo
+    # notas.txt existe"— para un objetivo de análisis, ese criterio se aceptaba y el
+    # fuerte nunca se derivaba: el modelo podía degradar su propio contrato y el
+    # objetivo quedaba saldado con la mitad de lo que se le pidió.
+    #
+    # Los predicados EXPUESTOS por el modelo se conservan tal cual (regla A): si el
+    # objetivo trae `file_exists:X` escrito, nadie lo reemplaza. Lo que se añade es el
+    # criterio que la semántica del objetivo exige y el modelo no propuso — nunca al
+    # revés, y nunca un criterio más débil.
+    for derived in _derive_from_utterance(utterance, objective):
+        if derived not in criteria and len(criteria) < MAX_CRITERIA:
+            criteria.append(derived)
 
     criteria = criteria[:MAX_CRITERIA]
     verifiable = [c for c in criteria if _is_verifiable(c)]
@@ -407,6 +674,9 @@ def normalize_criteria(
 __all__ = [
     "MAX_CRITERIA",
     "PREDICATES",
+    "SEMANTICS",
     "canonicalize",
+    "classify_objective_semantics",
+    "criteria_for_objective",
     "normalize_criteria",
 ]

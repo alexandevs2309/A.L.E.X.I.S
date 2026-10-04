@@ -43,6 +43,7 @@ from alexis.world.model import TEST
 #: Predicados que una observación de herramienta puede comprobar de forma estructurada.
 #: Formato en el texto del criterio: ``predicado:argumento[:extra]``.
 PREDICATES = (
+    "content_observed",
     "file_size_at_least",
     "file_exists",
     "file_missing",
@@ -360,6 +361,8 @@ class GoalVerifier:
                     evidence=claims,
                 )
             return self._check_file_size(criterion, name, args[0], minimum, claims=claims)
+        if name == "content_observed" and args:
+            return self._check_content_observed(criterion, args[0], claims=claims)
 
         return CriterionEvaluation(
             criterion=criterion,
@@ -558,6 +561,85 @@ class GoalVerifier:
             status=CriterionStatus.NOT_SATISFIED,
             reason=f"no cumplido: {path} pesa {size} y se exigían al menos {minimum}",
             predicate=name,
+            evidence=[evidence, *claims],
+        )
+
+    def _check_content_observed(self, criterion, path, claims) -> CriterionEvaluation:
+        """P0 §11 — "el contenido de RUTA fue observado", no "RUTA existe".
+
+        Es la diferencia que un objetivo semántico necesita: "analiza notas.txt y dime qué
+        contiene" NO se cumple porque el fichero esté en disco. Se cumple porque una
+        herramienta le devolvió a ALEXIS su contenido.
+
+        Tres exigencias, todas verificables contra lo observado:
+          1. que alguien observara la ruta con una tool;
+          2. que esa observación trajera contenido de verdad (`content_observed`), no
+             sólo metadatos — un `fs.stat` no lee el fichero;
+          3. que la capability sea observadora. Una capability que MUTA no puede atestiguar
+             que leyó: sería auto-atestación, el circuito cerrado que §5.3 veta.
+        """
+        observed = self._observed_entity(path)
+        if observed is None:
+            return self._no_observation(criterion, "content_observed", path, claims)
+
+        if not bool(observed.attributes.get("content_observed", False)):
+            length = observed.attributes.get("content_length")
+            return CriterionEvaluation(
+                criterion=criterion,
+                status=CriterionStatus.INSUFFICIENT_EVIDENCE,
+                reason=(
+                    f"se observó {path} pero sin su contenido: la herramienta afirmó "
+                    f"existencia/metadatos, no el texto. Estar en disco no es haberlo leído"
+                    + (f" (la observación declara content_length={length})" if length else "")
+                ),
+                predicate="content_observed",
+                evidence=[CriterionEvidence(
+                    evidence_id=observed.id,
+                    source=observed.source,
+                    grade=GRADE_EVIDENCE,
+                    detail=(
+                        f"observación sin contenido de {path} (fuente: {observed.source}): "
+                        "existe no es leer"
+                    ),
+                    trusted=True,
+                ), *claims],
+            )
+
+        if not self._is_independent_observation(observed):
+            return CriterionEvaluation(
+                criterion=criterion,
+                status=CriterionStatus.INSUFFICIENT_EVIDENCE,
+                reason=(
+                    f"la lectura de {path} la afirmó {observed.source}, que cambia el fichero "
+                    "en lugar de mirarlo: una capability que muta no puede atestiguar que leyó"
+                ),
+                predicate="content_observed",
+                evidence=[CriterionEvidence(
+                    evidence_id=observed.id,
+                    source=observed.source,
+                    grade=GRADE_EVIDENCE,
+                    detail=f"afirmación de una capability que muta, no de lectura: {observed.source}",
+                    trusted=True,
+                ), *claims],
+            )
+
+        length = observed.attributes.get("content_length")
+        evidence = CriterionEvidence(
+            evidence_id=observed.id,
+            source=observed.source,
+            grade=GRADE_EVIDENCE,
+            detail=(
+                f"una herramienta leyó el contenido de {path} y devolvió "
+                f"{length if length is not None else '?'} caracter(es) "
+                f"(fuente: {observed.source}, {observed.observations} observación/es)"
+            ),
+            trusted=True,
+        )
+        return CriterionEvaluation(
+            criterion=criterion,
+            status=CriterionStatus.SATISFIED,
+            reason=f"cumplido: {evidence.detail}",
+            predicate="content_observed",
             evidence=[evidence, *claims],
         )
 
