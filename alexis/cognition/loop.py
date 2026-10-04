@@ -37,7 +37,11 @@ from alexis.cognition.contracts import (
     SelfBrief,
 )
 from alexis.cognition.evidence import EvidenceStore
-from alexis.cognition.goal_verification import GoalVerification, GoalVerifier
+from alexis.cognition.goal_verification import (
+    GoalVerification,
+    GoalVerifier,
+    parse_predicate,
+)
 from alexis.cognition.response import ResponseComposer
 from alexis.cognition.state import Decision, KnowledgeState, NextAction, Verdict
 from alexis.contracts import (
@@ -247,6 +251,18 @@ def _model_provenance(response) -> dict:
         "fallback_error": getattr(response, "fallback_error", None),
         "chain": list(getattr(response, "chain", None) or []),
     }
+
+
+@dataclass
+class _StepContract:
+    """Veredicto del CONTRATO de un paso (Req #7), no de la herramienta.
+
+    `satisfied=False` con `result.success=True` es el caso que este tipo existe para
+    representar: la acción no falló, pero no dejado el estado que el paso prometía.
+    """
+
+    satisfied: bool
+    reason: str
 
 
 class CognitiveRuntime:
@@ -2071,8 +2087,42 @@ class CognitiveRuntime:
         return settle(mission, goal)
 
     def _absorb(self, step: PlanStep, result: ExecutionResult, knowledge: KnowledgeState) -> None:
+        """Asimila el resultado de un paso y decide si el paso se dio por CUMPLIDO.
+
+        P0 §11 / Req #7 — `tool.success` NO completa un paso. Dice que la herramienta no
+        falló; no dice que el paso dejara el estado que prometía. Una `fs.write` puede
+        devolver éxito y no haber escrito nada observable, y una `fs.read` puede devolver
+        éxito sin haber devuelto contenido.
+
+        Así que cuando el paso tiene un contrato COMPROBABLE (un predicado que el
+        `GoalVerifier` sabe evaluar), ese contrato se evalúa contra la observación real
+        y decide. Si no se cumple, el paso NO se marca completado: se registra el
+        incumplimiento y se pide replan, que es lo único honesto que se puede hacer con
+        una acción que funcionó pero noaconsguió su objetivo.
+
+        No se construye un verificador paralelo: se reutiliza el `GoalVerifier` y su
+        evidencia. Un paso cuyo contrato no es comprobable (cognitivo, sin artefacto)
+        conserva el criterio anterior —el tool no falló— porque no hay nada observable
+        que exigirle, y eso queda dicho en el KnowledgeState, no escondido.
+        """
         if result.success:
+            step_evaluation = self._evaluate_step_contract(step, result)
+            if step_evaluation is not None and not step_evaluation.satisfied:
+                knowledge.add_uncertainty(
+                    f"el paso '{step.id}' terminó sin error pero no cumplió su contrato: "
+                    f"{step_evaluation.reason}"
+                )
+                knowledge.diagnosis = f"step_contract_unmet: {step_evaluation.reason}"
+                knowledge.needs_replan = True
+                knowledge.add_unknown(
+                    f"qué faltó para '{step.id}': {step_evaluation.reason}"
+                )
+                self._note_step_contract(step, step_evaluation, knowledge)
+                return
+
             knowledge.mark_completed(step.id)
+            if step_evaluation is not None:
+                self._note_step_contract(step, step_evaluation, knowledge)
             knowledge.add_known(f"'{step.id}' completado: {_brief(result.output)}")
             if isinstance(result.output, dict):
                 message = result.output.get("message")
@@ -2090,6 +2140,112 @@ class CognitiveRuntime:
         for hypothesis in hypotheses:
             knowledge.add_hypothesis(hypothesis)
         knowledge.add_unknown(f"por qué falló '{step.id}': {explanation}")
+
+    def _evaluate_step_contract(self, step: PlanStep, result: ExecutionResult):
+        """Evalúa los criterios del PASO contra el EFECTO que la herramienta reports.
+
+        P0 §11 / Req #7 — por qué se evalúa el resultado y no el WorldModel:
+
+        El contrato de un paso responde a una pregunta distinta del objetivo. El objetivo
+        se verifica contra el MUNDO, y por eso exige observación independiente: el
+        `fs.write` no puede atestiguar que su fichero existe (§5.3). El paso, en cambio,
+        ES la acción: la pregunta es si la herramienta produjo el efecto que promete.
+
+        Por eso se mira lo que la herramienta DECLARÓ haber hecho (`origin: created`,
+        `removed: true`, el `content` devuelto), no su flag `success`. Una tool que
+        devuelve `success=True` sin haber producido el efecto —o que escribe en otro
+        sitio— falla aquí igual, que es justo lo que `success` no distingue.
+
+        Devuelve `None` si el paso no tiene contrato comprobable, y entonces se conserva
+        el criterio anterior (el tool no falló), que queda escrito en el KnowledgeState.
+        """
+        criteria = [
+            c for c in (getattr(step, "success_criteria", None) or [])
+            if parse_predicate(c) is not None
+        ]
+        if not criteria:
+            return None
+
+        output = result.output if isinstance(result.output, dict) else {}
+        for criterion in criteria:
+            name, args = parse_predicate(criterion)
+            ok, reason = self._check_step_effect(name, args, output, step)
+            if not ok:
+                return _StepContract(satisfied=False, reason=reason)
+        return _StepContract(
+            satisfied=True,
+            reason=(
+                "el paso produjo el efecto que declaraba: "
+                + "; ".join(str(c) for c in criteria)
+            ),
+        )
+
+    @staticmethod
+    def _check_step_effect(name, args, output: dict, step: PlanStep) -> tuple[bool, str]:
+        """¿El resultado de la herramienta acredita el efecto que el paso prometía?"""
+        target = args[0] if args else ""
+        if name == "file_exists":
+            if output.get("exists") is True:
+                return True, ""
+            # `fs.write` declara `origin: created|overwritten` y el tamaño: eso SÍ es el
+            # efecto de la acción, observado por quien la ejecutó. Los tres valores son
+            # los que la herramienta emite de verdad; no se inventa un cuarto.
+            if output.get("origin") in ("created", "overwritten", "updated") and output.get("ok") is True:
+                return True, ""
+            return False, (
+                f"la escritura de {target} no deja constancia del fichero: la herramienta "
+                f"no declaró origin=created/overwritten ni exists=true (devolvió {sorted(output)})"
+            )
+        if name == "file_missing":
+            if output.get("removed") is True or output.get("exists") is False:
+                return True, ""
+            return False, (
+                f"el borrado de {target} no deja constancia de haberlo eliminado "
+                f"(la herramienta devolvió {sorted(output)})"
+            )
+        if name == "content_observed":
+            content = output.get("content")
+            if isinstance(content, str) and content:
+                return True, ""
+            return False, (
+                f"la lectura de {target} no devolvió contenido: existir no es haber leído "
+                f"(la herramienta devolvió {sorted(output)})"
+            )
+        if name == "file_size_at_least":
+            size = output.get("size")
+            try:
+                minimum = int(args[1])
+            except (TypeError, ValueError):
+                return False, f"el tamaño mínimo del criterio no es un número: {args[1]!r}"
+            if isinstance(size, (int, float)) and size >= minimum:
+                return True, ""
+            return False, f"{target} pesa {size} y el paso exigía al menos {minimum}"
+        # Predicados de suite: los sabe leer el `GoalVerifier` (con sus conteos y su
+        # `counts_parsed`), no el efecto inmediato de una tool. El paso no se declara
+        # incumplido por no saber juzgar; lo evalúa la verificación del objetivo, que es
+        # donde vive ese predicado.
+        if name in ("tests_passing", "tests_failing"):
+            return True, ""
+        # Predicado que este nivel no sabe juzgar: no se inventa veredicto ni se aprueba
+        # por descuido. Ante la duda, el contrato se marca incumplido.
+        return False, (
+            f"el contrato del paso usa el predicado '{name}', que este nivel no sabe "
+            f"juzgar: se marca incumplido en vez de darse por bueno"
+        )
+
+    def _note_step_contract(
+        self, step: PlanStep, evaluation, knowledge: KnowledgeState
+    ) -> None:
+        """Deja el veredicto del contrato en la traza, para que sea auditable.
+
+        Va al `KnowledgeState`, que ya se persiste con la misión: quien lea el contexto
+        después de un reinicio ve si cada paso cumplió su contrato y por qué, no sólo que
+        la tool no falló.
+        """
+        knowledge.add_known(
+            f"contrato del paso '{step.id}': "
+            f"{'cumplido' if evaluation.satisfied else 'incumplido'} — {evaluation.reason}"
+        )
 
     def _settle(self, outcome: StepOutcome, fingerprint_before: str) -> StepOutcome:
         """Único punto de salida de `step()`: aquí se asienta el veredicto.
