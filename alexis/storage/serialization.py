@@ -95,8 +95,29 @@ def mission_from_row(row: dict) -> Mission:
     from alexis.cognition.goal_verification import GoalVerification
 
     verification = GoalVerification.from_dict(context.get("goal_verification"))
-    if goal_is_confirmed(verification):
+    if goal_is_confirmed(verification, mission):
+        # Se restaura, pero MARCADA como pendiente de revalidación, y el motivo queda
+        # escrito: lo que viene del almacenamiento es una AFIRMACIÓN.
+        #
+        # Qué garantiza y qué no, con exactitud:
+        #   · La FORMA se comprueba: es una GoalVerification real, con criterios, todos
+        #     `satisfied`, y evidencia `trusted` cuya fuente parece una herramienta y cuyo
+        #     grado es una prueba. Un `trusted` a secas, un `source` inventado o un
+        #     `uncertainty` no pasan (§11).
+        #   · El VÍNCULO se comprueba: la verificación tiene que ser de ESTA misión, con
+        #     estos criterios. La de otra misión no sirve.
+        #   · El MUNDO NO se comprueba aquí, y no se puede: no hay herramienta en este
+        #     punto. Por eso `pending_revalidation` es cierto y por eso el runtime exige
+        #     revalidar contra el mundo antes de tratar esto como un logro
+        #     (`_revalidate_restored_completion`). Sin esa revalidación, quien pueda
+        #     ESCRIBIR en la base podría fabricar un completed — y eso es acceso a la base,
+        #     no un fallo de verificación.
+        verification.pending_revalidation = True
         mission.goal_verification = verification
+        mission.context["goal_verification_pending_revalidation"] = (
+            "el estado 'completed' viene del almacenamiento y se ha restaurado sin "
+            "contrastar con el mundo: se revalidará antes de aceptarlo como logro"
+        )
         mission.state = MissionState.COMPLETED
         return mission
 

@@ -86,7 +86,8 @@ _EDIT_TERMS = (
     "reparar", "añade contenido", "amplia", "ampliar", "sustituye",
     # P0 §11: copiar y volcar también PRODUCEN un artefacto. Sin ellos, "copia A en B"
     # no caía en ninguna familia y se quedaba sin criterio verificable.
-    "copia", "copiar", "copie",
+    "copia", "copiar", "copie", "traduce", "traducir", "traduce",
+    "extrae", "extraer", "transforma", "transformar", "generame",
 )
 _DELETE_TERMS = (
     "borra", "borrar", "elimina", "eliminar", "quita", "quitar", "suprime",
@@ -184,8 +185,39 @@ _PATH_LEAD_WORDS = frozenset({
     # Sin ellos, "dime qué contiene notas.txt" no parecía nombrar una ruta completa
     # (la palabra previa es "contiene") y el objetivo se quedaba sin criterio.
     "contiene", "contengan", "dice", "diga", "dicen", "tenia", "tenía", "saying",
+    # §11: verbos que relacionan o transforman dos ficheros también introducen el nombre.
+    # Sin ellos, "compara notas.txt con otros.txt" sólo reconocía la segunda ruta y el
+    # sistema comparaba un fichero con un contrato sobre otro.
+    "compara", "comparar", "comparation", "contrasta", "contrastar", "diferencia",
+    "diferencias", "equipara", "equiparar", "usando", "contra", "versus", "traduce",
+    "traducir", "extrae", "extraer", "transforma", "transformar", "y", "con",
     "poner", "pone", "ponega", "ocurre", "explica", "explicame", "resumen",
 })
+
+
+#: Patrón de un nombre de fichero del workspace dentro de un texto en lenguaje natural.
+_PATH_TOKEN = re.compile(r"[\w./\-]+\.(?:txt|md|json|log|csv|py|ini|env|yaml|yml)")
+
+
+def _admits_path(raw: str, match: re.Match) -> bool:
+    """¿La coincidencia es un nombre de fichero COMPLETO, o un trozo de uno mayor?
+
+    UNA sola regla de admisión, usada por el extractor simple y el múltiple. La palabra
+    que introduce el nombre tiene que ser un artículo, preposición o verbo de tarea; si
+    no lo es, probablemente el nombre tenga espacios ("informe final.txt") y adivinar
+    "final.txt" sería comprobar un fichero que el usuario nunca nombró.
+
+    También admite que la ruta abra la frase tras una interrogación ("¿existe
+    datos.txt?"), donde el signo no es una palabra pero sí introduce el nombre.
+    """
+    before = (raw or "")[: match.start()].strip()
+    if not before:
+        return True  # la ruta es la primera palabra del texto
+    # La puntuación puede ir pegada a la palabra ("¿existe"): se quita por ambos lados.
+    lead = before.split()[-1].strip("\"'.,;:()[]!?").lstrip("¿?¡!").lower()
+    if not lead:
+        return True  # el texto previo era sólo signos de interrogación
+    return lead in _PATH_LEAD_WORDS
 
 
 def _safe_path(text: str) -> str | None:
@@ -211,24 +243,9 @@ def _safe_path(text: str) -> str | None:
         return None
 
     # Localiza el match para inspeccionar la palabra anterior.
-    match = None
-    for candidate in re.finditer(
-        r"[\w./\-]+\.(?:txt|md|json|log|csv|py|ini|env|yaml|yml)", text or ""
-    ):
-        if candidate.group(0) == path:
-            match = candidate
-            break
-    if match is None:
-        return None
-
-    before = (text or "")[: match.start()].strip()
-    if not before:
-        return path  # la ruta es la primera palabra del texto
-    lead = before.split()[-1].strip("\"'.,;:()[]!?").lower()
-    if lead in _PATH_LEAD_WORDS:
-        return path
-    # La palabra previa no introduce un nombre de fichero completo: probablemente hay
-    # espacios en el nombre. No se inventa la ruta.
+    for match in _PATH_TOKEN.finditer(text or ""):
+        if match.group(0) == path:
+            return path if _admits_path(text, match) else None
     return None
 
 def _wants_content(text: str) -> bool:
@@ -278,6 +295,8 @@ SEMANTICS = (
     "modification",
     "analysis",
     "transformation",
+    "comparison",
+    "analysis-multi",
     "query",
 )
 
@@ -294,6 +313,11 @@ _ANALYSIS_TERMS = (
     # P0 §11: traducir o extraer de un fichero pide su CONTENIDO, aunque no se use la
     # palabra "analiza". Sin esto, "traduce notas.txt" se habría leido como existencia.
     "traduce", "traducir", "extrae", "extraer",
+    # §11: verbos que RELACIONAN dos ficheros. "compara A con B" no es un análisis de A:
+    # es un análisis de A **y** B. Sin esta lista, B desaparecía del contrato y el sistema
+    # podía cerrar una comparación sin haber leído nunca el segundo fichero.
+    "compara", "comparar", "comparation", "contrasta", "contrastar", "diferencia",
+    "equipara", "equiparar",
 )
 
 #: Palabras que describen el CONTENIDO pedido dentro de un objetivo de creación. No
@@ -364,11 +388,36 @@ def classify_objective_semantics(text: str, *, path: str | None = None) -> str:
         return "existence"
 
     # 3. Cadena entrada→salida: dos rutas y una relación que las une.
+    #    Sólo cuando el objetivo nombra explícitamente una producción o una relación entre
+    #    las dos. No basta con que pida contenido: "analiza A y B" pide contenido de las
+    #    dos y NO es una transformación — no hay salida que producir. Confundirlas
+    #    obligaba a escribir un fichero que el objetivo no pidió.
     has_chain = any(term in low for term in _CHAIN_TERMS)
-    if len(paths) >= 2 and (has_chain or wants_content):
+    wants_relationship = _mentions_relationship(low)
+    produces_output = any(term in low for term in _CREATE_TERMS)
+    # Un verbo que CONVIERTE ("traduce", "copia", "extrae", "transforma") declara que la
+    # segunda ruta es una SALIDA: existe para producirla. Eso lo distingue de "analiza A y
+    # B", donde las dos rutas son de entrada y no hay nada que escribir.
+    converts = any(term in low for term in _CONVERT_TERMS)
+    if len(paths) >= 2 and has_chain and (produces_output or converts):
         return "transformation"
-    if len(paths) >= 2 and any(term in low for term in _CREATE_TERMS + _EDIT_TERMS):
+    if len(paths) >= 2 and wants_relationship and not produces_output:
+        return "comparison"
+    if len(paths) >= 2 and produces_output and any(
+        term in low for term in _EDIT_TERMS
+    ):
         return "transformation"
+    # Dos rutas, se pide contenido de las dos y no hay verbo de creación: es un análisis
+    # de las dos ("analiza A y B"), no una transformación.
+    if len(paths) >= 2 and wants_content and not produces_output:
+        return "analysis-multi"
+
+    # 3-bis. Comparación: dos rutas que se RELACIONAN, sin que ninguna sea la salida.
+    # "compara A con B" no transforma nada: exige observar LAS DOS. Es una familia propia
+    # porque su contrato no puede reducirse al de un análisis de un solo fichero: si sólo
+    # se leyera A, la comparación no se habría hecho.
+    if len(paths) >= 2 and _mentions_relationship(low):
+        return "comparison"
 
     # 4. Creación: el verbo manda sobre el sustantivo ("con el resumen de" describe QUÉ
     # se escribe, no pide un análisis).
@@ -379,11 +428,20 @@ def classify_objective_semantics(text: str, *, path: str | None = None) -> str:
     if any(term in low for term in _EDIT_TERMS):
         return "modification"
 
-    # 6. Análisis: una ruta y se pide lo que hay dentro.
+    # 6. ANÁLISIS vs LECTURA: son preguntas distintas y sus contratos también.
+    #    "analiza notas.txt" pide el CONTENIDO: hay que leerlo y concluir algo sobre él.
+    #    "lee notas.txt" pide OBSERVAR: basta una lectura, sin etapa de síntesis. Tratarlas
+    #    como la misma añadía un paso `analyze` que el objetivo no pedía, y el plan dejaba
+    #    de corresponder a lo solicitado.
     if wants_content and paths:
         return "analysis"
+
+    # 6-bis. Lectura pura: el objetivo nombra una ruta y no pide contenido, análisis ni
+    # comparación. Su contrato sigue siendo `content_observed` —hay que LEERLA para poder
+    # usarla—, pero la FORMA del plan es una sola observación, sin síntesis. El plan tiene
+    # que hacer lo que se le pidió, ni un paso más.
     if paths and classify_objective_intent(text) == "read":
-        return "analysis"
+        return "read"
 
     # 7. Consulta.
     return "query"
@@ -393,27 +451,39 @@ def _mentions_analysis(low: str) -> bool:
     return any(term in low for term in _ANALYSIS_TERMS)
 
 
+#: Verbos que relacionan dos recursos sin que uno sea la salida del otro.
+#: Verbos que declaran una CONVERSIÓN: la segunda ruta existe para producirla.
+_CONVERT_TERMS = (
+    "traduce", "traducir", "copia", "copiar", "extrae", "extraer",
+    "transforma", "transformar", "resume a", "convertir", "convierte",
+)
+
+_RELATIONSHIP_TERMS = (
+    "compara", "comparar", "comparation", "contrasta", "contrastar", "diferencia",
+    "diferencias", "equipara", "equiparar", "frente a", "contra", "versus", " vs ",
+)
+
+
+def _mentions_relationship(low: str) -> bool:
+    return any(term in low for term in _RELATIONSHIP_TERMS)
+
+
 def _all_safe_paths(text: str) -> list[str]:
     """Todas las rutas del workspace citadas, en orden y sin inventar nombres.
 
-    Aplica la MISMA salvaguarda que `_safe_path` a cada coincidencia: se mira la palabra
-    que introduce al nombre en el TEXTO ORIGINAL. Sin eso, "informe final.txt" produciría
-    "final.txt" y el criterio comprobaría un fichero que el usuario nunca nombró.
+    Delega la admitcion en `_safe_path` para cada coincidencia: así hay UNA sola regla de
+    admisión y el extractor multi-ruta no puede divergir del simple. Esa duplicación ya
+    costó un bug: la versión múltiple no limpiaba la puntuación de la pregunta y
+    "¿existe datos.txt?" se quedaba sin ruta, mientras la simple la aceptaba.
     """
     raw = text or ""
     found: list[str] = []
-    for match in re.finditer(
-        r"[\w./\-]+\.(?:txt|md|json|log|csv|py|ini|env|yaml|yml)", raw
-    ):
+    for match in _PATH_TOKEN.finditer(raw):
         candidate = match.group(0)
         if not candidate or candidate in found:
             continue
-        before = raw[: match.start()].strip()
-        if before:
-            lead = before.split()[-1].strip("\"'.,;:()[]!?").lower()
-            if lead not in _PATH_LEAD_WORDS:
-                continue
-        found.append(candidate)
+        if _admits_path(raw, match):
+            found.append(candidate)
     return found
 
 
@@ -479,11 +549,25 @@ def criteria_for_objective(text: str) -> list[str]:
             return []
         return [f"file_exists:{paths[0]}"]
 
-    if semantics == "analysis":
+    if semantics == "read":
         if not paths:
             return []
-        # Éste es el cambio que cierra el gap: contenido observado, NO existencia.
+        # Leer un fichero exige haber leído su CONTENIDO, no sólo que exista: por eso el
+        # criterio es `content_observed` y no `file_exists`. La diferencia con `analysis`
+        # está en la FORMA del plan, no en lo que hay que comprobar.
         return [f"content_observed:{paths[0]}"]
+
+    if semantics in ("analysis", "analysis-multi"):
+        if not paths:
+            return []
+        # Éste es el cambio que cierra el gap: contenido observado, NO existencia. Con
+        # varias rutas se exigen todas: "analiza A y B" no se cumple leyendo sólo A.
+        return [f"content_observed:{path}" for path in paths[:MAX_CRITERIA]]
+
+    if semantics == "comparison":
+        # Comparar A con B exige haber leído A Y B. El contrato lo dice: si sólo se
+        # cumple una de las dos, la comparación no se ha hecho.
+        return [f"content_observed:{path}" for path in paths[:MAX_CRITERIA]]
 
     if semantics == "transformation":
         if len(paths) < 2:
@@ -573,6 +657,15 @@ def _derive_from_utterance(utterance: str, objective: str) -> list[str]:
         if criteria:
             return criteria[:MAX_CRITERIA]
     return []
+
+
+def all_objective_paths(text: str) -> list[str]:
+    """Rutas que el objetivo nombra, validadas y en orden. API compartida.
+
+    El planner la consume para no tener su propia idea de qué es un "target": si el plan
+    y el contrato seExtracen por rutas distintas, la misión se contradice (§11).
+    """
+    return _all_safe_paths(text)
 
 
 def _is_verifiable(criterion: str) -> bool:
@@ -675,6 +768,7 @@ __all__ = [
     "MAX_CRITERIA",
     "PREDICATES",
     "SEMANTICS",
+    "all_objective_paths",
     "canonicalize",
     "classify_objective_semantics",
     "criteria_for_objective",

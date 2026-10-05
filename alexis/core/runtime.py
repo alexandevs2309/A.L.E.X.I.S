@@ -105,6 +105,63 @@ class AlexisRuntime:
             return {"exists": False, "error": str(result.error or "")}
         return {"exists": bool(result.output.get("exists")), "output": result.output}
 
+    async def _revalidate_restored_completion(self, mission: Mission) -> bool:
+        """¿Sigue el objetivo siendo cierto AHORA? Contrasta la fila con el mundo real.
+
+        No reescribe el estado por su cuenta: si el verificador confirma, la misión se
+        queda como estaba. Si no —porque el mundo cambió, porque la evidencia persistida
+        no se sostiene, o porque no hay verificador para comprobarla— la misión baja a
+        `NEEDS_VERIFICATION` y queda escrito por qué, que es más honesto que fingir un
+        logro que nadie ha comprobado en esta ejecución.
+        """
+        from alexis.autonomy.goal_state import goal_is_confirmed, settle
+
+        persisted = getattr(mission, "goal_verification", None)
+        if not goal_is_confirmed(persisted, mission):
+            self._demote_unverified_completion(
+                mission,
+                "la verificación que venía almacenada no se sostiene para esta misión "
+                "(vínculo, criterios o procedencia de la evidencia)",
+            )
+            return False
+
+        try:
+            verification = self._verify_goal(mission)
+        except Exception as exc:  # noqa: BLE001 — un verificador roto no confirma nada
+            self._demote_unverified_completion(
+                mission, f"no se pudo revalidar el objetivo tras el reinicio: {exc}"
+            )
+            return False
+
+        if verification is None:
+            self._demote_unverified_completion(
+                mission,
+                "no hay GoalVerifier para revalidar el objetivo: la fila lo afirmaba, "
+                "pero nadie puede comprobarlo en esta ejecución",
+            )
+            return False
+
+        if goal_is_confirmed(verification, mission):
+            settle(mission, verification)
+            return True
+
+        self._demote_unverified_completion(
+            mission,
+            f"el objetivo ya no se sostiene contra el mundo real: "
+            f"{verification.reason}",
+        )
+        return False
+
+    def _demote_unverified_completion(self, mission: Mission, reason: str) -> None:
+        """Baja un `COMPLETED` no revalidado a `NEEDS_VERIFICATION`, con el motivo escrito.
+
+        Se usa `NEEDS_VERIFICATION` porque ya existe en la arquitectura y significa justo
+        esto: el objetivo no está comprobado. No se inventa un estado nuevo.
+        """
+        mission.context["goal_verification_reason"] = reason
+        mission.context["goal_verification_rejected"] = True
+        object.__setattr__(mission, "state", MissionState.NEEDS_VERIFICATION)
+
     async def _recover_mission(self, mission: Mission) -> bool:
         """RESTORE → INSPECT WORLD → DECIDE. Devuelve si la misión puede continuar.
 
@@ -120,6 +177,22 @@ class AlexisRuntime:
         )
 
         manager = self._recovery_manager()
+
+        # --- PERSISTENCIA NO ES AUTORIDAD -------------------------------- #
+        # Una fila que dice `completed` es una AFIRMACIÓN, no una prueba. Antes de
+        # aceptarla se contrasta con el mundo real: se vuelve a pedir al `GoalVerifier`
+        # que la compruebe AHORA, contra lo que existe de verdad. Si no se sostiene, la
+        # misión baja a `NEEDS_VERIFICATION` con el motivo escrito.
+        #
+        # Esto cierra el ataque que la revalidación estática no alcanza: un atacante que
+        # conoce la fila puede replicar el vínculo misión/objetivo/criterios y escribir
+        # una evidencia con `source: tool:...`, porque todo eso es texto. Lo que NO puede
+        # escribir es el mundo. Por eso la comprobación final es contra el mundo.
+        if mission.state is MissionState.COMPLETED:
+            await self._revalidate_restored_completion(mission)
+            if mission.state is not MissionState.COMPLETED:
+                return False
+
         # §11: una misión que quedó esperando aprobación NO se reanuda por su cuenta. Recovery
         # no concede excepciones: si había una aprobación pendiente antes del corte, sigue
         # pendiente. Continuar aquí ejecutaría algo que una persona todavía no autorizó.

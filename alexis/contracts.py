@@ -87,7 +87,7 @@ class Mission:
         if name == "state" and value == MissionState.COMPLETED:
             from alexis.autonomy.goal_state import goal_is_confirmed
 
-            if not goal_is_confirmed(self.goal_verification):
+            if not goal_is_confirmed(self.goal_verification, self):
                 raise UnverifiedGoalError(
                     f"la misión {getattr(self, 'id', '?')} no puede pasar a COMPLETED: "
                     "su GoalVerification no dice verified=True con todos los criterios "

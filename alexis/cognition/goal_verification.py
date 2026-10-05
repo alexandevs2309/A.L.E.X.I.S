@@ -68,6 +68,26 @@ class CriterionStatus(str, Enum):
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 
 
+def is_meaningful_content(content) -> bool:
+    """¿Este contenido cuenta como "contenido observado"?
+
+    Una sola definición, compartida por las TRES capas que juzgan el mismo hecho
+    (`GoalVerifier`, el contrato de paso y la observación del mundo). Que coincidan no es
+    casualidad: si una acepta un fichero vacío y la otra no, el sistema se contradice
+    consigo mismo y el resultado depende de por dónde se mire.
+
+    No es contenido útil el `None`, ni una cadena vacía, ni una que sólo tenga espacio en
+    blanco: leer un fichero vacío es una lectura real, pero no hay nada que analizar ni que
+    reportar, y eso es exactamente lo que un objetivo semántico pedía.
+
+    El `WorldModel` calcula esta misma condición al observar y la guarda como
+    `content_meaningful`, para que el verificador no tenga que re-interpretar la cadena.
+    """
+    if not isinstance(content, str):
+        return False
+    return bool(content.strip())
+
+
 @dataclass
 class CriterionEvidence:
     """Una evidencia concreta usada (o descartada) para evaluar un criterio."""
@@ -143,12 +163,25 @@ class CriterionEvaluation:
 
 @dataclass
 class GoalVerification:
-    """Resultado de evaluar el objetivo de una misión criterio por criterio."""
+    """Resultado de evaluar el objetivo de una misión criterio por criterio.
+
+    `subject` es la IDENTIDAD de lo que se verificó: qué misión, con qué objetivo y con
+    qué criterios. No es metadata decorativa: es lo que impide que la verificación de una
+    misión satisfaga a otra (§11). Sin ese vínculo, copiar el objeto de la fila de la
+    misión A a la de la B bastaba para declarar `COMPLETED` algo que nunca se ejecutó.
+    """
 
     objective: str
     evaluations: list[CriterionEvaluation] = field(default_factory=list)
     verified: bool = False
     reason: str = ""
+    #: Identidad verificada: `mission_id`, `objective` y `criteria` de esa misión.
+    subject: dict[str, Any] = field(default_factory=dict)
+    #: §11: True cuando esta verificación viene del ALMACENAMIENTO y aún no se ha
+    #: contrastado con el mundo en la ejecución actual. Una fila guardada no autoriza
+    #: por sí sola: se revalida. No se persiste (es estado de esta ejecución) precisamente
+    #: porque su valor es justamente "esto aún no está comprobado aquí".
+    pending_revalidation: bool = False
 
     def counts(self) -> dict[str, int]:
         return {
@@ -167,6 +200,7 @@ class GoalVerification:
             "objective": self.objective,
             "verified": self.verified,
             "reason": self.reason,
+            "subject": dict(self.subject),
             "counts": self.counts(),
             "criteria": [e.to_dict() for e in self.evaluations],
         }
@@ -180,6 +214,7 @@ class GoalVerification:
             objective=str(raw.get("objective") or ""),
             evaluations=evaluations,
             verified=bool(raw.get("verified")),
+            subject=dict(raw.get("subject") or {}),
             reason=str(raw.get("reason") or ""),
         )
 
@@ -264,6 +299,37 @@ def parse_predicate(criterion: str) -> tuple[str, list[str]] | None:
     return None
 
 
+def verification_subject(mission, criteria) -> dict[str, Any]:
+    """La identidad de lo verificado: misión, objetivo y criterios.
+
+    Es lo que hace que una verificación NO sea reutilizable entre misiones. Se sellan los
+    tres, y no sólo la misión: dos misiones distintas pueden pedir exactamente lo mismo,
+    y aun así la verificación de una no prueba nada sobre la otra (se ejecutó en otro
+    momento, sobre otro mundo, con otra evidencia).
+    """
+    goal = getattr(mission, "goal", None)
+    return {
+        "mission_id": str(getattr(mission, "id", "") or ""),
+        "objective": str(getattr(goal, "objective", "") or ""),
+        "criteria": [str(c) for c in (criteria or [])],
+    }
+
+
+def subject_matches(verification, mission) -> bool:
+    """¿Esta verificación se hizo PARA esta misión, con estos criterios?"""
+    subject = getattr(verification, "subject", None)
+    if not isinstance(subject, dict) or not subject:
+        return False
+    expected = verification_subject(
+        mission, getattr(getattr(mission, "goal", None), "success_criteria", []) or []
+    )
+    if str(subject.get("mission_id") or "") != expected["mission_id"]:
+        return False
+    if str(subject.get("objective") or "") != expected["objective"]:
+        return False
+    return [str(c) for c in (subject.get("criteria") or [])] == expected["criteria"]
+
+
 class GoalVerifier:
     """Comprueba los `success_criteria` de una misión contra evidencia observada."""
 
@@ -294,6 +360,7 @@ class GoalVerifier:
                     "el objetivo no tiene criterios de éxito: sin criterios no hay nada "
                     "que verificar y no se puede declarar verificado"
                 ),
+                subject=verification_subject(mission, wanted),
             )
 
         evaluations = [self._evaluate_criterion(str(c)) for c in wanted]
@@ -302,6 +369,7 @@ class GoalVerifier:
             evaluations=evaluations,
             verified=self._is_verified(evaluations),
             reason=self._overall_reason(evaluations),
+            subject=verification_subject(mission, wanted),
         )
 
     # ------------------------------------------------------------------ #
@@ -600,6 +668,32 @@ class GoalVerifier:
                     detail=(
                         f"observación sin contenido de {path} (fuente: {observed.source}): "
                         "existe no es leer"
+                    ),
+                    trusted=True,
+                ), *claims],
+            )
+
+        # §11 — un fichero VACIO no es "contenido observado". Se registró que la tool
+        # devolvió la cadena, y la cadena no tenía nada: hay que decirlo con el mismo
+        # criterio que usa el contrato de paso, o las dos capas se contradirían (una
+        # aceptando un vacío y la otra no).
+        if not observed.attributes.get("content_meaningful", False):
+            return CriterionEvaluation(
+                criterion=criterion,
+                status=CriterionStatus.INSUFFICIENT_EVIDENCE,
+                reason=(
+                    f"se leyó {path} pero su contenido está vacío: no hay nada que "
+                    f"analizar ni que reportar. Estar en disco no es haberlo leído, y "
+                    f"un fichero vacío tampoco es haberlo leído"
+                ),
+                predicate="content_observed",
+                evidence=[CriterionEvidence(
+                    evidence_id=observed.id,
+                    source=observed.source,
+                    grade=GRADE_EVIDENCE,
+                    detail=(
+                        f"la herramienta leyó {path} y devolvió una cadena vacía "
+                        f"(fuente: {observed.source})"
                     ),
                     trusted=True,
                 ), *claims],
