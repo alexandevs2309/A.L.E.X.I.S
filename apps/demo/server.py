@@ -35,6 +35,7 @@ from apps.demo.app import (
     create_handler,
     init_storage,
     start_services,
+    stop_services,
 )
 from apps.ui import PAGE
 from alexis.contracts import AutonomyLevel, MissionEnvelope, MissionState
@@ -259,7 +260,10 @@ def build_runtime() -> OfficialRuntime:
     pedirla: `apps/api` no puede, y por eso no puede ser un segundo ALEXIS.
     """
     loop = asyncio.new_event_loop()
-    threading.Thread(target=loop.run_forever, daemon=True).start()
+    loop_thread = threading.Thread(
+        target=loop.run_forever, name="alexis-runtime-loop", daemon=True
+    )
+    loop_thread.start()
     storage = init_storage(loop)
     rt = build_runtime_from_app(
         loop=loop,
@@ -268,6 +272,7 @@ def build_runtime() -> OfficialRuntime:
         on_mission_end=lambda mission: _announce_voice(rt, mission),
         on_mission_activity=lambda: _touch_voice(rt),
     )
+    rt.extras["loop_thread"] = loop_thread
     rt.state["voice_mode"] = _VOICE_MODE_DEFAULT
     _touch_voice(rt)
     return rt
@@ -293,7 +298,9 @@ def main() -> None:
             if item["topic"] == DEFAULT_TOPIC:
                 on_clap_event(rt, item["payload"])
 
-    asyncio.run_coroutine_threadsafe(_clap_consumer(), rt.loop)
+    clap_task = asyncio.run_coroutine_threadsafe(_clap_consumer(), rt.loop)
+    rt.extras["clap_task"] = clap_task
+    rt.extras["clap"] = clap
     if os.environ.get("ALEXIS_CLAP_ENABLED", "1") == "1":
         ok, note = clap.start(rt.events, DEFAULT_TOPIC, rt.loop)
         print(f"[clap] listener: {note}")
@@ -304,7 +311,26 @@ def main() -> None:
     print(f"ALEXIS (runtime oficial) en http://127.0.0.1:{port}")
     print("  rutas oficiales: /health /ui /chat /missions /stream /state /self /capabilities")
     print("  rutas del demo:  / /avatar /face /classic /voice-mode /clap")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nALEXIS: apagado solicitado.")
+    finally:
+        server.server_close()
+        clap.stop()
+        clap_task.cancel()
+        try:
+            asyncio.run_coroutine_threadsafe(stop_services(rt), rt.loop).result(timeout=10)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] shutdown del runtime: {exc}")
+        try:
+            rt.loop.call_soon_threadsafe(rt.loop.stop)
+            loop_thread = rt.extras.get("loop_thread")
+            if loop_thread is not None:
+                loop_thread.join(timeout=5)
+        finally:
+            if not rt.loop.is_running():
+                rt.loop.close()
 
 
 if __name__ == "__main__":
