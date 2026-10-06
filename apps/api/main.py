@@ -137,6 +137,8 @@ async def stream(rt=Depends(require_official_runtime), _: None = Depends(require
                 yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
         except asyncio.CancelledError:
             pass
+        finally:
+            rt.events.unsubscribe_async(sub)
 
     return StreamingResponse(
         feed(),

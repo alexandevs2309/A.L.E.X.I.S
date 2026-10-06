@@ -68,6 +68,7 @@ class AuditSink:
         self.audit_repo = audit_repo
         self.event_repo = event_repo
         self._sub = None
+        self._bus = None
         self._task = None
 
     # ------------------------------------------------------------------ #
@@ -76,6 +77,9 @@ class AuditSink:
 
     def attach(self, bus, loop) -> "AuditSink":
         """Se suscribe al bus oficial y empieza a consumir. Devuelve `self`."""
+        if self._task is not None:
+            return self
+        self._bus = bus
         self._sub = bus.subscribe_async()
         self._task = loop.create_task(self._consume())
         return self
@@ -89,13 +93,18 @@ class AuditSink:
 
     async def stop(self) -> None:
         """Detiene el consumo. Para tests y para un apagado ordenado."""
-        if self._task is not None:
-            self._task.cancel()
+        task = self._task
+        self._task = None
+        if task is not None and not task.done():
+            task.cancel()
             try:
-                await self._task
+                await task
             except asyncio.CancelledError:
                 pass
-            self._task = None
+        if self._sub is not None and self._bus is not None:
+            self._bus.unsubscribe_async(self._sub)
+        self._sub = None
+        self._bus = None
 
     # ------------------------------------------------------------------ #
     # Escritura

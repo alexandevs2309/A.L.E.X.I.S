@@ -27,7 +27,21 @@ class EventBus:
         self._sync_subs.append(sub)
         return sub
 
+    def unsubscribe(self, sub: queue.Queue) -> None:
+        """Desregistra un consumidor sync para permitir conexiones SSE limpias."""
+        try:
+            self._sync_subs.remove(sub)
+        except ValueError:
+            pass
+
     def subscribe_async(self) -> asyncio.Queue:
         sub = asyncio.Queue(maxsize=100)
         self._async_subs.append(sub)
         return sub
+
+    def unsubscribe_async(self, sub: asyncio.Queue) -> None:
+        """Desregistra un consumidor async para permitir reinicios limpios."""
+        try:
+            self._async_subs.remove(sub)
+        except ValueError:
+            pass
