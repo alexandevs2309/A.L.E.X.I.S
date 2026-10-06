@@ -62,3 +62,58 @@ async def test_audit_sink_stop_removes_subscription_and_task():
     assert sink._task is None
     assert sink._sub is None
     assert not bus._async_subs
+
+
+
+@pytest.mark.asyncio
+async def test_stop_services_stops_worker_observers_and_database():
+    from apps.demo.app import stop_services
+
+    loop = asyncio.get_running_loop()
+    stopped = []
+
+    class _Worker:
+        def __init__(self):
+            self.event = asyncio.Event()
+
+        def stop(self):
+            stopped.append("worker")
+            self.event.set()
+
+    worker = _Worker()
+
+    async def worker_loop():
+        await worker.event.wait()
+
+    worker_task = asyncio.run_coroutine_threadsafe(worker_loop(), loop)
+
+    class _Service:
+        async def stop(self):
+            stopped.append("service")
+
+    class _DB:
+        async def close(self):
+            stopped.append("db")
+
+    rt = SimpleNamespace(
+        worker=worker,
+        extras={
+            "services_started": True,
+            "worker_task": worker_task,
+            "self_sync": _Service(),
+            "audit_sink": _Service(),
+        },
+        storage={"db": _DB()},
+    )
+
+    result = await stop_services(rt)
+
+    assert result == {"stopped": True}
+    assert stopped == ["worker", "service", "service", "db"]
+    assert rt.extras["services_started"] is False
+    assert rt.extras["worker_task"] is None
+
+    assert await stop_services(rt) == {
+        "stopped": False,
+        "reason": "services_not_started",
+    }
