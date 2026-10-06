@@ -31,3 +31,10 @@ class EventBus:
         sub = asyncio.Queue(maxsize=100)
         self._async_subs.append(sub)
         return sub
+
+    def unsubscribe_async(self, sub: asyncio.Queue) -> None:
+        """Desregistra un consumidor async para permitir reinicios limpios."""
+        try:
+            self._async_subs.remove(sub)
+        except ValueError:
+            pass
