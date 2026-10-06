@@ -20,6 +20,17 @@ async def test_event_bus_async_subscription_can_be_removed():
     assert sub not in bus._async_subs
 
 
+def test_event_bus_sync_subscription_can_be_removed():
+    bus = EventBus()
+    sub = bus.subscribe()
+    assert sub in bus._sync_subs
+
+    bus.unsubscribe(sub)
+    bus.unsubscribe(sub)
+
+    assert sub not in bus._sync_subs
+
+
 @pytest.mark.asyncio
 async def test_self_model_sync_stop_removes_subscription_and_task():
     bus = EventBus()
