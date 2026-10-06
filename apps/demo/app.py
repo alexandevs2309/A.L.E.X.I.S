@@ -274,7 +274,7 @@ class OfficialRuntime:
         context = getattr(mission, "context", {}) or {}
         return {
             **self.payload(mission),
-            "goal_verified": bool(goal_is_confirmed(verification)),
+            "goal_verified": bool(goal_is_confirmed(verification, mission)),
             "goal_verification": (
                 verification.to_dict() if verification is not None else None
             ),

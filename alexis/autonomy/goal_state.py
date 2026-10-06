@@ -23,12 +23,63 @@ from __future__ import annotations
 from alexis.contracts import MissionState
 
 
-def goal_is_confirmed(verification) -> bool:
+#: Grados de evidencia que pueden sostener un criterio cumplido. `uncertainty`,
+#: `assumption` e `inference` NO pueden: son exactamente lo contrario de una prueba.
+#: Un `trusted=True` con uno de estos grados es una contradicción, y se trata como tal.
+TRUSTWORTHY_GRADES = frozenset({"evidence", "fact"})
+
+#: Una evidencia que autoriza un objetivo tiene que venir de una HERRAMienta que MIRA.
+#: Sin el prefijo `tool:` no es una observación: es una declaración, y una declaración no
+#: prueba nada por sí sola. Esta es la razón por la que la persistencia no puede
+#: reautorizar por su cuenta: la fuente tiene que ser verificable por su forma, no por un
+#: booleano que el almacenamiento pueda cambiar.
+TOOL_SOURCE_PREFIX = "tool:"
+
+
+def _evidence_provenance_is_sound(evaluation) -> bool:
+    """¿La evidencia que sostiene este criterio es una observación de herramienta real?
+
+    Exige DOS cosas, y las dos son estructurales:
+
+    1. `source` empieza por `tool:` — lo que declara haber observado el mundo. Un claim
+       del modelo, una nota del criterio o una etiqueta inventada no la tienen.
+    2. Su grado es `evidence` o `fact` — una incertidumbre, una suposición o una
+       inferencia no pueden sostener un `satisfied`, diga lo que diga su `trusted`.
+
+    El `trusted` se sigue exigiendo (es el contrato de §5.3), pero ya no es lo ÚNICO que
+    se mira: por sí solo era un booleano que cualquiera podía escribir.
+    """
+    for evidence in getattr(evaluation, "evidence", []) or []:
+        if not getattr(evidence, "trusted", False):
+            continue
+        source = str(getattr(evidence, "source", "") or "")
+        grade = str(getattr(evidence, "grade", "") or "")
+        if source.startswith(TOOL_SOURCE_PREFIX) and grade in TRUSTWORTHY_GRADES:
+            return True
+    return False
+
+
+def goal_is_confirmed(verification, mission=None) -> bool:
     """¿Esta verificación autoriza `COMPLETED`? Se revalida, no se trusts.
 
-    Exige que sea una `GoalVerification` real, que diga `verified=True`, que tenga al menos
-    un criterio, y que **todos** los criterios estén `satisfied` con al menos una evidencia
-    fiable. Un objeto con la bandera puesta y la lista vacía no pasa.
+    Exige, en este orden:
+
+    1. que sea una `GoalVerification` real y diga `verified=True`;
+    2. que tenga al menos un criterio y **todos** estén `satisfied`;
+    3. que cada criterio se sostenga con evidencia **fíable Y de procedencia sana**
+       (`trusted` + `source` de herramienta + grado `evidence`/`fact`);
+    4. si se le pasa la misión, que la verificación **sea de esa misión**: mismo
+       `mission_id`, mismo objetivo y mismos criterios (§11). Sin este paso, la
+       verificación de la misión A satisfied a la B.
+
+    El punto 3 es el que cierra el ataque de persistencia: una fila manipulada puede
+    escribir `trusted: true`, pero no puede hacer que un `source` inventado parezca una
+    observación de herramienta ni que una `uncertainty` sea una prueba. Y el punto 4 es el
+    que impide reutilizar una verificación entre misiones.
+
+    `mission` es opcional para no romper los llamadores que sólo preguntan por la forma
+    del objeto; donde importa —la invariante de `Mission`, `settle()` y la restauración
+    desde la fila— se pasa siempre.
     """
     if verification is None:
         return False
@@ -43,7 +94,13 @@ def goal_is_confirmed(verification) -> bool:
         status = getattr(evaluation, "status", None)
         if getattr(status, "value", status) != "satisfied":
             return False
-        if not any(getattr(e, "trusted", False) for e in getattr(evaluation, "evidence", []) or []):
+        if not _evidence_provenance_is_sound(evaluation):
+            return False
+
+    if mission is not None:
+        from alexis.cognition.goal_verification import subject_matches
+
+        if not subject_matches(verification, mission):
             return False
     return True
 
@@ -68,7 +125,7 @@ def settle(mission, verification) -> MissionState:
     if verification is not None:
         mission.goal_verification = verification
 
-    if goal_is_confirmed(verification):
+    if goal_is_confirmed(verification, mission):
         # También en el context: sin esto la fila persistida no lleva la verificación y
         # al recuperarla no se podría reconstruir un `completed` legítimo (§5.5).
         mission.context["goal_verification"] = verification.to_dict()

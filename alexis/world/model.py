@@ -878,12 +878,24 @@ class WorldModel:
             # señal NO es una lista de capabilities: es lo que la tool devolvió de verdad.
             # `fs.read` entrega `content`; `fs.stat` sólo metadatos. Se registra el hecho
             # observado, no la intención de la tool.
+            #
+            # `content_observed` significa contenido CON OBSERVACIÓN ÚTIL, no contenido
+            # presente: un fichero vacío o en blanco se registra como observado con
+            # contenido vacío, y quien decide si eso satisface el objetivo lo hace con
+            # `content_length`. La coherencia entre las tres capas está en
+            # `_check_content_observed`, que exige contenido real; aquí sólo se registra
+            # el hecho de que la tool devolvió la cadena, sin juzgar si sirve.
+            from alexis.cognition.goal_verification import is_meaningful_content
+
             content = output.get("content")
             if isinstance(content, str):
                 attributes["content_observed"] = True
                 attributes["content_length"] = len(content)
+                attributes["content_meaningful"] = is_meaningful_content(content)
             else:
                 attributes["content_observed"] = False
+                attributes["content_length"] = None
+                attributes["content_meaningful"] = False
             observed.append(
                 self.upsert(
                     WorldEntity(

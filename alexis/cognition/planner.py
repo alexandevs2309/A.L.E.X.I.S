@@ -32,8 +32,34 @@ _FAMILY_PREFERRED = {
     "read": ("fs.read", "research.filesystem", "fs.stat"),
     "analyze": ("fs.read", "fs.stat", "research.filesystem"),
     "existence": ("fs.stat", "research.filesystem"),
-    "transform": ("fs.read", "fs.write"),
+    "transformation": ("fs.read", "fs.write"),
+    # Comparar o analizar varios ficheros no escribe nada: sólo observa, y observa TODO
+    # lo que el objetivo nombra.
+    "comparison": ("fs.read",),
+    "analysis-multi": ("fs.read",),
 }
+
+#: P0 §11 — las rutas que un objetivo nombra, en ORDEN y con la palabra que las
+#: introduce ya validada. Es la MISMA extracción que usa `criteria.py` para construir el
+#: contrato, y a propósito: el defecto que cerró este commit era que el planner tomaba la
+#: primera ruta con `extract_workspace_path` (que no mira la palabra previa) mientras los
+#: criterios usaban `_all_safe_paths` (que sí). De ahí que "compara notas.txt con
+#: otros.txt" produjera un plan sobre un fichero y un criterio sobre otro: el plan y el
+#: contrato hablaban de recursos distintos y la misión no podía cerrarse nunca.
+#:
+#: Una sola representación para criterios, planner y verificación: si divergen, el
+#: sistema se contradice a sí mismo.
+def objective_targets(objective: str) -> list[str]:
+    """Rutas del workspace que nombra el objetivo, en orden de aparición.
+
+    Filtra por `_PATH_LEAD_WORDS` exactamente como lo hace la derivación de criterios, de
+    modo que "informe final.txt" no produzca una ruta inventada en ninguna de las dos
+    capas.
+    """
+    from alexis.cognition.criteria import all_objective_paths
+
+    return all_objective_paths(objective)
+
 
 #: P0 §11 — un objetivo TRANSFORMACIONAL nombra dos rutas: una de la que se parte y otra
 #: que se produce. "crea salida.txt con un resumen de notas.txt" no es una escritura de
@@ -50,13 +76,14 @@ _TRANSFORM_HINTS = (
 def _transform_paths(objective: str) -> tuple[str, str]:
     """(entrada, salida) de un objetivo transformacional, o `("", "")` si no lo es.
 
-    Reutiliza la clasificación semántica de `criteria.py`: si el contrato de la misión
-    exige `content_observed` de una ruta y `file_exists` de otra, el plan tiene que hacer
-    exactamente eso. Una sola fuente de verdad para decidir qué es entrada y qué salida.
+    Se apoya en la MISMA clasificación semántica y los MISMOS criterios que usa la
+    verificación: si el contrato exige `content_observed` de una ruta y `file_exists` de
+    otra, el plan tiene que hacer exactamente eso. Una sola fuente de verdad.
     """
     from alexis.cognition.criteria import classify_objective_semantics, criteria_for_objective
 
-    if classify_objective_semantics(objective) != "transformation":
+    semantics = classify_objective_semantics(objective)
+    if semantics not in ("transformation", "comparison"):
         return "", ""
     criteria = criteria_for_objective(objective)
     source = ""
@@ -76,19 +103,44 @@ def _transform_paths(objective: str) -> tuple[str, str]:
 def _objective_family(objective: str, intent: str) -> str:
     """Familia de FORMA del plan, derivada de la intención y de señales léxicas.
 
-    `transform` gana a `write`: si el objetivo tiene entrada y salida, el plan tiene que
-    abarcar ambos. Un objetivo que empieza por un verbo de creación no es una
-    escritura aislada cuando además nombra de dónde sale lo que hay que escribir.
+    §11 — la familia se decide con la MISMA clasificación semántica que construye el
+    contrato. Antes se-fiaba en `classify_objective_intent`, que es el clasificador de
+    filesystem y no conoce las operaciones entre ficheros: declaraba `unsupported` a
+    "copia notas.txt a copia.txt" y la misión caía a la plantilla universal, mientras que
+    el contrato sí reconocía la transformación. Plan y criterios decían cosas distintas.
+
+    `transform` y `comparison` ganan a `write`/`read`: si el objetivo tiene entrada y
+    salida, o dos entradas que relacionar, el plan tiene que abarcar ambas.
 
     Los verbos de síntesis ganan a la lectura (el objetivo pide conclusiones, no solo
     leer). `unsupported` devuelve la plantilla declarada como fallback.
     """
+    from alexis.cognition.criteria import classify_objective_semantics
+
+    semantics = classify_objective_semantics(objective)
+    if semantics in ("transformation", "comparison", "analysis-multi"):
+        return semantics
+    if semantics == "creation":
+        return "write"
+    if semantics == "modification":
+        return "write"
+    if semantics == "destructive":
+        return "remove"
+    if semantics == "existence":
+        return "existence"
+    if semantics == "analysis":
+        return "analyze"
+    if semantics == "read":
+        return "read"
+
+    # Sin señal semántica que obligue (`query`): se decide como lo hacía antes, con la
+    # intención de filesystem y las pistas léxicas. Un objetivo sin ruta comprobable sigue
+    # teniendo una FORMA de plan —"revisa el proyecto entero" es una síntesis— y decidirlo
+    # aquí, en vez de inventar una familia nueva, es lo que mantiene el comportamiento
+    # honesto que el resto del sistema ya espera.
     folded = (objective or "").strip().lower()
     if intent == "unsupported":
         return "unsupported"
-    source, target = _transform_paths(objective or "")
-    if source and target:
-        return "transform"
     if intent == "write":
         return "write"
     if intent == "destructive":
@@ -271,10 +323,58 @@ class Planner:
         if capability is None:
             return None
 
-        target = extract_workspace_path(objective) or None
+        # §11: el target del plan sale del MISMO extractor que usa el contrato.
+        _paths = objective_targets(objective)
+        target = _paths[0] if _paths else None
         args = {"path": target} if target else {}
 
-        if family == "transform":
+        if family in ("comparison", "analysis-multi"):
+            # §11 — comparar A con B exige observar A **y** B. El plan recorre las dos
+            # rutas del contrato, en el mismo orden en que el contrato las nombra: plan y
+            # verificación hablan de los mismos recursos o el sistema se contradice.
+            read_capability = (
+                _pick_capability(list(selection.selected), catalog, ("fs.read", "research.filesystem"))
+                or "fs.read"
+            )
+            steps: list[PlanStep] = []
+            previous: list[str] = []
+            for index, path in enumerate(_paths):
+                # El id tiene que pasar el `_SAFE_ID` del PlanValidator (`[a-z0-9_]`): un guion
+                # haría que el plan se rechazara a sí mismo en la validación.
+                step_id = "research" if index == 0 else f"research_{index + 1}"
+                steps.append(
+                    PlanStep(
+                        step_id,
+                        f"Leer {path} para compararlo con el resto",
+                        "research",
+                        RiskLevel.LOW,
+                        "researcher",
+                        list(previous),
+                        capability=read_capability,
+                        proposed_by=PLANNED_OBJECTIVE_DRIVEN,
+                        rationale=(
+                            "§11: una comparación exige evidencia de TODOS los ficheros "
+                            "que nombra el objetivo, no sólo del primero"
+                        ),
+                        args={"path": path},
+                    )
+                )
+                previous = [step_id]
+            steps.append(
+                PlanStep(
+                    "analyze",
+                    "Sintetizar conclusiones a partir de lo observado en todos los ficheros",
+                    "analyze",
+                    RiskLevel.LOW,
+                    "reasoner",
+                    list(previous),
+                    capability="cognition.analyze",
+                    proposed_by=PLANNED_OBJECTIVE_DRIVEN,
+                    rationale="§11: la conclusión se construye sobre la evidencia de todos",
+                )
+            )
+            return steps
+        if family == "transformation":
             # P0 §11 — el plan tiene que ENCADENAR la transformación: primero se observa
             # la entrada, después se produce la salida, y sólo entonces se verifica de
             # forma independiente. El paso de lectura declara `depends_on` vacío y el de

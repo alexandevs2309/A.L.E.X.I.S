@@ -1369,6 +1369,7 @@ class CognitiveRuntime:
             # estado lo decide `settle()`, que es la única autoridad. Sin verificador
             # inyectado la misión queda en NEEDS_VERIFICATION, nunca en COMPLETED.
             goal = self.verify_goal(mission, knowledge)
+            confirmed = _goal_confirmed(goal, mission)
             return self._settle(
                 StepOutcome(
                     action=decision.action,
@@ -1376,10 +1377,10 @@ class CognitiveRuntime:
                     decision=decision,
                     done=True,
                     mission_state=self._settled_state(mission, goal),
-                    verdict=Verdict.SUCCESS if _goal_confirmed(goal) else Verdict.INSUFFICIENT_EVIDENCE,
+                    verdict=Verdict.SUCCESS if confirmed else Verdict.INSUFFICIENT_EVIDENCE,
                     verdict_reason=(
                         f"objetivo verificado: {goal.reason}"
-                        if _goal_confirmed(goal)
+                        if confirmed
                         else (
                             goal.reason
                             if goal is not None
@@ -2156,15 +2157,47 @@ class CognitiveRuntime:
         devuelve `success=True` sin haber producido el efecto —o que escribe en otro
         sitio— falla aquí igual, que es justo lo que `success` no distingue.
 
-        Devuelve `None` si el paso no tiene contrato comprobable, y entonces se conserva
-        el criterio anterior (el tool no falló), que queda escrito en el KnowledgeState.
+        Devuelve `None` cuando el paso NO tiene contrato comprobable, y hay dos motivos distintos
+        para eso, que no se pueden tratar igual:
+
+        · El paso NO ES EJECUTABLE (`understand`, `analyze`, `respond`). Sus criterios son
+          texto que declara una intención —"construir la respuesta sobre el resultado
+          verificado"— y no un predicado. No hay efecto observable que juzgar, así que no
+          se inventa un veredicto. Es lo que ya hace `step_criteria_for` al devolver `[]`
+          para esos pasos, y el sistema lo ha hecho así desde que existe Req #7.
+
+        · El paso ES ejecutable (`execute`, `research`) y sus criterios no se pueden
+          comprobar. Esto es un fallo del contrato, no una ausencia: el paso SÍ sabía lo que debía conseguir y no lo expresa de forma verificable. Un skill o
+          un plan del modelo pueden escribir "el informe queda redactado y correcto" en
+          lugar de un predicado. Aprobarlo sería aprobar por descuido y volver al
+          `tool.success` que §11 acaba de cerrar.
+
+        La distinción importa: el primero no tiene nada que cumplir; el segundo tiene un
+        contrato que no se puede auditing. Sólo el segundo es un contrato incumplido.
         """
-        criteria = [
-            c for c in (getattr(step, "success_criteria", None) or [])
-            if parse_predicate(c) is not None
-        ]
-        if not criteria:
+        from alexis.cognition.planner import _EXECUTABLE_STEP_ACTIONS
+
+        declared = list(getattr(step, "success_criteria", None) or [])
+        if not declared:
             return None
+
+        criteria = [c for c in declared if parse_predicate(c) is not None]
+        if not criteria:
+            if str(getattr(step, "action", "") or "") not in _EXECUTABLE_STEP_ACTIONS:
+                # Paso no ejecutable con criterios en prosa: no hay contrato verificable
+                # que juzgar, y tampoco hay efecto en el mundo que comprobar.
+                return None
+            # Paso ejecutable con un contrato que no se sabe leer: fail-closed.
+            return _StepContract(
+                satisfied=False,
+                reason=(
+                    f"el paso '{getattr(step, 'id', '?')}' declara {len(declared)} "
+                    f"criterio/s de éxito y ninguno es comprobable con el vocabulario de "
+                    f"verificación ({', '.join(repr(c) for c in declared)}). Un contrato "
+                    f"que no se puede verificar no se da por cumplido: no se elimina, no "
+                    f"se ignora y no se aprueba por descuido"
+                ),
+            )
 
         output = result.output if isinstance(result.output, dict) else {}
         for criterion in criteria:
@@ -2204,8 +2237,10 @@ class CognitiveRuntime:
                 f"(la herramienta devolvió {sorted(output)})"
             )
         if name == "content_observed":
+            from alexis.cognition.goal_verification import is_meaningful_content
+
             content = output.get("content")
-            if isinstance(content, str) and content:
+            if is_meaningful_content(content):
                 return True, ""
             return False, (
                 f"la lectura de {target} no devolvió contenido: existir no es haber leído "
@@ -2400,10 +2435,15 @@ def _normalize_args(args: dict) -> dict:
     return normalized
 
 
-def _goal_confirmed(goal) -> bool:
+def _goal_confirmed(goal, mission=None) -> bool:
+    """¿Esta verificación autoriza el cierre? Si se le pasa la misión, exige IDENTIDAD.
+
+    El vínculo con la misión no es opcional donde importa: sin él, una verificación
+   fabricada para otra misión autorizaría el cierre de ésta (§11).
+    """
     from alexis.autonomy.goal_state import goal_is_confirmed
 
-    return goal_is_confirmed(goal)
+    return goal_is_confirmed(goal, mission)
 
 
 def _brief(output: Any, limit: int = 160) -> str:

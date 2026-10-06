@@ -362,34 +362,109 @@ def test_ataque_09_una_fila_completed_sin_verificacion_no_carga_completed(tmp_pa
 
 
 def test_ataque_09b_una_fila_con_verificacion_legitima_si_carga_completed():
-    """El reverso: una fila con verificación válida SÍ se restaura como completada."""
+    """El reverso: una fila con verificación válida SÍ se restaura como completada.
+
+    §11: la verificación tiene que ser **de la misma misión** que la fila. Este test
+    usaba antes la verificación de una misión con otro objetivo yCriteria distintos, y
+    ahora eso es justo lo que se rechaza —el defecto que el audit encontró—. Se corrige
+    para que la fila sea realmente legítima: se verifica la MISMA misión que luego se
+    persiste, con el mundo real detrás.
+    """
     import json
 
-    mission = _mission()
-    ver = GoalVerification(
-        objective=mission.goal.objective,
-        evaluations=[
-            CriterionEvaluation(
-                criterion="file_exists:notas.txt",
-                status=CriterionStatus.SATISFIED,
-                reason="ok",
-            )
-        ],
-        verified=True,
-        reason="objetivo verificado",
-    )
-    # Se revalida con evidencia fiable, así que se construye desde el mundo real.
     world = _observed("notas.txt", exists=True, content="hola")
-    ver_real = GoalVerifier(world=world).verify(
-        _mission("Comprueba si notas.txt existe", ["file_exists:notas.txt"])
-    )
+    mission = _mission("Comprueba si notas.txt existe", ["file_exists:notas.txt"])
+    ver_real = GoalVerifier(world=world).verify(mission)
     assert ver_real.verified is True
     settle(mission, ver_real)
+    assert mission.state is MissionState.COMPLETED
 
     fila = mission_to_row(mission)
-    assert json.loads(fila["context"])["goal_verification"]["verified"] is True
+    guardada = json.loads(fila["context"])["goal_verification"]
+    assert guardada["verified"] is True
+    # Y la verificación lleva su vínculo: sin él, la fila no se restauraría.
+    assert guardada["subject"]["mission_id"] == mission.id
+
     restaurada = mission_from_row(fila)
     assert restaurada.state is MissionState.COMPLETED
+    # Aunque se restaura, queda MARCADA como pendiente de revalidación: el almacenamiento
+    # afirma, el runtime comprueba. `mission_from_row` no puede dar luz verde por sí solo.
+    assert restaurada.goal_verification is not None
+    assert restaurada.goal_verification.pending_revalidation is True
+
+
+def test_ataque_09c_una_fila_no_puede_reautorizar_solo_por_persistir():
+    """§11 — la fila NO es autoridad: una verificación sin vínculo con la misión se rechaza.
+
+    Aquí la verificación es perfectamente válida y tiene evidencia con `source` de
+    herramienta, pero es de OTRA misión. Es el ataque que el audit reportó como
+    CRITICAL-2, y ahora no reconstruye `COMPLETED`.
+    """
+    import json
+
+    world = _observed("notas.txt", exists=True, content="hola")
+    # Misión A: existe y se verifica de verdad.
+    a = _mission("Comprueba si notas.txt existe", ["file_exists:notas.txt"])
+    ver_a = GoalVerifier(world=world).verify(a)
+    assert ver_a.verified is True
+
+    # Misión B: otro objetivo, otros criterios, NUNCA ejecutada.
+    b = _mission("Analiza el archivo notas.txt y dime qué contiene")
+    fila = mission_to_row(b)
+    fila["state"] = MissionState.COMPLETED.value
+    datos = json.loads(fila["context"])
+    datos["goal_verification"] = json.loads(json.dumps(ver_a.to_dict()))
+    fila["context"] = json.dumps(datos, ensure_ascii=False)
+
+    restaurada = mission_from_row(fila)
+    assert restaurada.state is not MissionState.COMPLETED, (
+        "la verificación de otra misión no puede completar ésta"
+    )
+    assert restaurada.state is MissionState.NEEDS_VERIFICATION
+
+
+def test_ataque_09d_la_evidencia_persistida_necesita_provenance_verificable():
+    """§11 — `trusted: true` solo no basta: la procedencia tiene que ser de herramienta.
+
+    Un `source` que no sea una observación (`modelo`, `criterio`) o un grado que no sea
+    prueba (`uncertainty`, `assumption`, `inference`) no pueden sostener un `satisfied`,
+    por muy `trusted` que el almacenamiento lo escriba.
+    """
+    import json
+
+    base = _mission("Comprueba si notas.txt existe", ["file_exists:notas.txt"])
+    world = _observed("notas.txt", exists=True, content="hola")
+    ver = GoalVerifier(world=world).verify(base)
+    assert ver.verified is True
+
+    for source, grade in (
+        ("modelo", "evidence"),
+        ("criterio", "fact"),
+        ("tool:fs.read", "uncertainty"),
+        ("tool:fs.read", "assumption"),
+        ("tool:fs.read", "inference"),
+    ):
+        fila = mission_to_row(base)
+        fila["state"] = MissionState.COMPLETED.value
+        datos = json.loads(fila["context"])
+        forjada = json.loads(json.dumps(ver.to_dict()))
+        for evaluacion in forjada["criteria"]:
+            evaluacion["evidence"] = [
+                {
+                    "evidence_id": "x",
+                    "source": source,
+                    "grade": grade,
+                    "detail": "d",
+                    "trusted": True,
+                }
+            ]
+        datos["goal_verification"] = forjada
+        fila["context"] = json.dumps(datos, ensure_ascii=False)
+
+        restaurada = mission_from_row(fila)
+        assert restaurada.state is not MissionState.COMPLETED, (
+            f"source={source} grade={grade} no puede sostener un completed"
+        )
 
 
 # =========================================================================== #
