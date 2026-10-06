@@ -952,6 +952,8 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
                         self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            finally:
+                EVENTS.unsubscribe(sub)
 
         # -- GET ------------------------------------------------------------ #
         def do_GET(self):
