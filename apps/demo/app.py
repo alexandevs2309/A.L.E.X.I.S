@@ -1282,7 +1282,8 @@ def start_services(rt: OfficialRuntime) -> dict:
         async def _worker_loop():
             await rt.worker.loop()
 
-        asyncio.run_coroutine_threadsafe(_worker_loop(), rt.loop)
+        worker_task = asyncio.run_coroutine_threadsafe(_worker_loop(), rt.loop)
+        rt.extras["worker_task"] = worker_task
         worker_started = True
         print("[cola] worker de misiones activo (FIFO persistente en PostgreSQL)")
 
@@ -1301,12 +1302,67 @@ def start_services(rt: OfficialRuntime) -> dict:
         )
         print("[audit] sink de model.routed activo (audit_log)")
 
+    rt.extras["self_sync"] = self_sync
+    rt.extras["audit_sink"] = audit_sink
+    rt.extras["services_started"] = True
+
     return {
         "self_sync": self_sync,
         "worker_started": worker_started,
         "recovered": recovered,
         "audit_sink": audit_sink,
+        "worker_task": rt.extras.get("worker_task"),
     }
+
+
+async def _cancel_concurrent_future(future) -> None:
+    if future is None or future.done():
+        return
+    future.cancel()
+    await asyncio.gather(asyncio.wrap_future(future), return_exceptions=True)
+
+
+async def stop_services(rt: OfficialRuntime, *, worker_timeout: float = 5.0) -> dict:
+    """Apaga los servicios iniciados por start_services.
+
+    El orden es inverso al arranque: primero deja de producir trabajo, luego detiene
+    observadores del bus y por último cierra la persistencia. Es idempotente.
+    """
+    if not rt.extras.get("services_started"):
+        return {"stopped": False, "reason": "services_not_started"}
+
+    worker = rt.worker
+    worker_task = rt.extras.get("worker_task")
+    if worker is not None:
+        worker.stop()
+
+    if worker_task is not None and not worker_task.done():
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(worker_task)),
+                timeout=worker_timeout,
+            )
+        except asyncio.TimeoutError:
+            await _cancel_concurrent_future(worker_task)
+
+    self_sync = rt.extras.get("self_sync")
+    if self_sync is not None:
+        await self_sync.stop()
+
+    audit_sink = rt.extras.get("audit_sink")
+    if audit_sink is not None:
+        await audit_sink.stop()
+
+    db = rt.storage.get("db")
+    if db is not None:
+        await db.close()
+
+    rt.extras["worker_task"] = None
+    rt.extras["self_sync"] = None
+    rt.extras["audit_sink"] = None
+    rt.extras["services_started"] = False
+    return {"stopped": True}
+
 
 
 def create_app(runtime: OfficialRuntime, presentation: Any = None) -> ThreadingHTTPServer:
