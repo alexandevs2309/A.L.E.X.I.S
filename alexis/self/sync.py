@@ -24,7 +24,10 @@ class SelfModelSync:
         self.resolve_mission = resolve_mission  # () -> Mission | None
         self.aux = aux or (lambda: {})  # () -> dict(tools, commitments, lessons, memory_items, verification)
         self._sub = None
+        self._bus = None
         self._task = None
+        self._loop = None
+        self._persist_futures = set()
         self._current_action = None
         #: Lecciones que autorizó la frontera de aprendizaje (P0 §5.6.5). Acumuladas por
         #: evento `mission.experience`; aquí no se decide nada, sólo se recuerda lo ya
@@ -100,7 +103,9 @@ class SelfModelSync:
         loop = getattr(self, "_loop", None)
         if loop is None:
             return
-        asyncio.run_coroutine_threadsafe(self._persist_now(topic), loop)
+        future = asyncio.run_coroutine_threadsafe(self._persist_now(topic), loop)
+        self._persist_futures.add(future)
+        future.add_done_callback(self._persist_futures.discard)
 
     async def _persist_now(self, topic: str) -> None:
         try:
@@ -184,9 +189,40 @@ class SelfModelSync:
         )
 
     def attach(self, bus, loop):
+        if self._task is not None:
+            return self
         self._sub = bus.subscribe_async()
+        self._bus = bus
         self._loop = loop
         self._task = asyncio.run_coroutine_threadsafe(self._consume(), loop)
+        return self
+
+    async def stop(self) -> None:
+        """Detiene el consumidor y cualquier persistencia pendiente."""
+        task = self._task
+        self._task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wrap_future(task)
+            except asyncio.CancelledError:
+                pass
+
+        pending = list(self._persist_futures)
+        for future in pending:
+            future.cancel()
+        if pending:
+            await asyncio.gather(
+                *(asyncio.wrap_future(future) for future in pending),
+                return_exceptions=True,
+            )
+        self._persist_futures.clear()
+
+        if self._sub is not None and self._bus is not None:
+            self._bus.unsubscribe_async(self._sub)
+        self._sub = None
+        self._bus = None
+        self._loop = None
 
     async def _consume(self):
         while True:
