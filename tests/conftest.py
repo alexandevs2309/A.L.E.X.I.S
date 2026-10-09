@@ -9,6 +9,7 @@ DSN por defecto del proceso ya es la de test. La DSN de desarrollo queda disponi
 `ALEXIS_DEV_DATABASE_URL` únicamente para comprobar que el aislamiento funciona.
 """
 
+import asyncio
 import os
 import pathlib
 import sys
@@ -72,3 +73,36 @@ async def db(test_dsn: str):
         yield database
     finally:
         await database.close()
+
+
+@pytest.fixture(autouse=True)
+async def _drain_pending_asyncio_tasks():
+    """Limpieza cross-test: entierra las tareas que un test dejó en background.
+
+    Sin esto, una tarea en background creada por un test (consumidores del EventBus,
+    pools de DB, workers) se destruye durante el test SIGUIENTE, y con `-W error` el
+    fallo se atribuye al test inocente en vez de al que fugó la tarea. No cambia la lógica
+    de ningún test: sólo garantiza que cada test entierre a sus muertos.
+
+    Se cancela lo que quede vivo en el loop del test. Los loops en BACKGROUND (los que
+   某些 módulos abren con `new_event_loop()` + hilo) no son alcanzables desde aquí: los
+    detiene el teardown de esos módulos con `stop_services()`.
+    """
+    import asyncio
+
+    yield
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        return
+    pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        try:
+            await asyncio.gather(*pending, return_exceptions=True)
+        except asyncio.CancelledError:
+            pass
+    # Cede un ciclo para que los callbacks de cierre se procesen aquí,
+    # no en el test siguiente.
+    await asyncio.sleep(0)

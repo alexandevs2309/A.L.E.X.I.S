@@ -226,5 +226,15 @@ class SelfModelSync:
 
     async def _consume(self):
         while True:
-            item = await self._sub.get()
+            try:
+                item = await self._sub.get()
+            except asyncio.CancelledError:
+                # Apagado ordenado (`stop()`): salir sin ruido es lo esperado.
+                return
+            except RuntimeError:
+                # El loop se cerró mientras esta tarea esperaba en la cola: `Queue.get()`
+                # re-programa su getter con `call_soon` y eso levanta "Event loop is
+                # closed" contra un loop que ya no existe. Salir limpio evita que un
+                # cierre normal se reporte como tarea destruida pendiente.
+                return
             self.apply_event(item.get("topic", ""), item.get("payload"))

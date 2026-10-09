@@ -472,11 +472,16 @@ async def test_13_un_sink_roto_no_altera_el_outcome():
     bus = EventBus()
     router = _router(bus, FakeProvider("p"))
     registro.attach(bus, asyncio_loop())
-    resp = await router.complete(ModelRequest(task=ModelTask.REASON), correlation=pre_mission())
-    import asyncio as aio
+    try:
+        resp = await router.complete(ModelRequest(task=ModelTask.REASON), correlation=pre_mission())
+        import asyncio as aio
 
-    await aio.sleep(0.05)
-    assert resp.outcome is ModelOutcome.REAL, "el sink roto no degrada la decisión"
+        await aio.sleep(0.05)
+        assert resp.outcome is ModelOutcome.REAL, "el sink roto no degrada la decisión"
+    finally:
+        # Sin esto el consumidor del sink sigue vivo cuando el loop de este test se
+        # cierra, y la tarea huérfana se reporta en el test SIGUIENTE (`-W error`).
+        await registro.stop()
 
 
 def asyncio_loop():

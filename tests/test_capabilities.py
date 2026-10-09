@@ -39,12 +39,13 @@ def test_enabled_capabilities_are_honest():
     assert "perception.clap" in enabled_ids
     assert "autonomy.gates" in enabled_ids
     assert "autonomy.queue" in enabled_ids
+    # browser.research pasó de "missing" a implementada (tool propia, sin JavaScript).
+    assert "browser.research" in enabled_ids
     # Faltantes (missing) NO están habilitadas
     assert "git.read" not in enabled_ids
     assert "git.commit" not in enabled_ids
     assert "git.push" not in enabled_ids
     assert "terminal.run" not in enabled_ids
-    assert "browser.research" not in enabled_ids
     assert "api.http" not in enabled_ids
     assert "mcp.run" not in enabled_ids
     assert "vision.screen" not in enabled_ids

@@ -279,10 +279,15 @@ def build_catalog(enable_available=True) -> CapabilityRegistry:
                 description="Subprocess con whitelist (pendiente)",
             ),
             CapabilitySpec(
-                id="browser.research", sphere="web", network=True, side_effects=False,
+                id="browser.research", sphere="web", network=True, side_effects=True,
                 trust_domain="web", sandbox_profile="browser-sandbox", default_risk="medium",
-                plans_action="browser", status="missing",
-                description="Investigación web headless (pendiente)",
+                plans_action="browser", status="available",
+                description=(
+                    "Investigación web: búsqueda pública + extracción de texto plano. "
+                    "Sólo lectura (network_read), sin JavaScript ni cookies; el contenido es "
+                    "dato no confiable. Verificación: source_count. Requiere aprobación: no. "
+                    "Aislamiento de red: nivel de aplicación, NO de kernel (docs/SECURITY.md)."
+                ),
             ),
             CapabilitySpec(
                 id="api.http", sphere="integration", network=True, side_effects=False,

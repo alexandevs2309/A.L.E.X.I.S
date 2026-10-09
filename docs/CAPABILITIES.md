@@ -19,6 +19,12 @@ Future cameras, microphones, sensors and IoT telemetry.
 ## Action
 Filesystem, terminal, Git/GitHub, browser, APIs, cloud services and IoT.
 
+> `browser.research`: **IMPLEMENTED** (`alexis/tools/browser.py`). Sólo lectura (`network_read`),
+risk medium, sin aprobación, verificación `source_count`. Extracción de texto plano con
+`html.parser`, sin JavaScript ni navegador headless. Allowlist `allowed_domains` + protección
+SSRF + descarte de prompt injection. Aislamiento de red **a nivel de aplicación, no de
+kernel** (`docs/SECURITY.md`).
+
 ## Multi-agent
 Researcher, coder, QA, security, DevOps, browser, IoT and critic.
 

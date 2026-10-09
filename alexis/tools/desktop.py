@@ -278,23 +278,30 @@ def cursor_open(*, launcher: subprocess.Popen | None = None, new_window: bool = 
 
 def _run_tts_coro(factory):
     """Ejecuta la corutina de síntesis aunque ya haya un event loop corriendo
-    (el executor de ALEXIS corre dentro del loop; `asyncio.run()` directo crashea)."""
+    (el executor de ALEXIS corre dentro del loop; `asyncio.run()` directo crashea).
+
+    La factoría se invoca UNA sola vez: llamar a `factory()` dentro del `try` y de
+    nuevo en el `except` creaba una corrutina huérfana (la primera nunca se awaited),
+    lo que emitía `RuntimeWarning: coroutine was never awaited` y rompía `-W error`.
+    """
     import asyncio
 
     try:
-        return asyncio.run(factory())
+        asyncio.get_running_loop()
     except RuntimeError:
-        import threading
+        return asyncio.run(factory())
 
-        box = {}
+    import threading
 
-        def _runner():
-            box["r"] = asyncio.run(factory())
+    box = {}
 
-        thread = threading.Thread(target=_runner, daemon=True)
-        thread.start()
-        thread.join()
-        return box["r"]
+    def _runner():
+        box["r"] = asyncio.run(factory())
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    return box["r"]
 
 
 def tts_speak(text: str, provider=None) -> dict:

@@ -41,7 +41,7 @@ from alexis.tools.registry import ToolRegistry  # noqa: E402
 from alexis.tools.testrunner import (  # noqa: E402
     ALLOWED_RUNNERS,
     FORBIDDEN_KEYS,
-    TestRunnerTool,
+    TestRunnerTool as _TestRunnerTool,
     build_test_tools,
     parse_pytest_counts,
 )
@@ -73,7 +73,7 @@ FAILING = {
 
 
 def _tool(root, **over):
-    return TestRunnerTool(root, **over)
+    return _TestRunnerTool(root, **over)
 
 
 def _executor(root):

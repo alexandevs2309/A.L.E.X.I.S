@@ -376,8 +376,17 @@ async def test_24_gemini_live_devuelve_real():
         assert resp.outcome is ModelOutcome.DEGRADED
         assert resp.is_real is False
         assert resp.fallback_used is True
-        assert "429" in str(resp.fallback_error) or resp.error, \
-            f"una degradación debe decir POR QUÉ: {resp.fallback_error}"
+        # El motivo de la degradación es lo que hay que comprobar, NO un código HTTP
+        # concreto: una caída legítima puede ser 429, pero también 500, 503 o timeout, y
+        # exigir un código fijo hacía que este test fallara cuando el sistema se
+        # comportaba bien. Se exige lo que el contrato sí garantiza: una explicación
+        # no vacía, y que identifique al proveedor que falló
+        # (`router.complete` compone `f"{provider.id}: {type(exc).__name__}: {exc}"`).
+        # Si el proveedor de contingencia fallara también, el motivo llega en `error`.
+        motivo = resp.fallback_error or resp.error
+        assert motivo, f"una degradación debe decir POR QUÉ: {resp.fallback_error!r}"
+        assert "gemini" in str(motivo), \
+            f"el motivo debe identificar al proveedor que falló: {motivo!r}"
     assert elapsed < 30000
     assert key not in str(resp.to_dict()), "la clave no puede viajar en la respuesta"
     assert key not in str(resp.audit_event(ModelTask.REASON))

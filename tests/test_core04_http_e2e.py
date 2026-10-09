@@ -100,6 +100,35 @@ def oficial(tmp_path_factory):
         # El worker duerme `poll` segundos entre misiones: hay que darle un ciclo para
         # que salga del `while`, o el `stop()` no lo alcanza a tiempo.
         time.sleep(rt.worker.poll + 0.2)
+    # Los observadores que encendió `start_services` (self-sync, audit sink) consumen el
+    # bus en tareas propias: sin detenerlas sobreviven al cierre del loop y se reportan
+    # como "Task was destroyed but it is pending" en el test SIGUIENTE. Se detienen por
+    # el MISMO camino que usa producción (`stop_services`), no con parches.
+    try:
+        asyncio.run_coroutine_threadsafe(
+            app_module.stop_services(rt, worker_timeout=5.0), loop
+        ).result(timeout=20)
+    except Exception:  # noqa: BLE001 — el cierre no debe enmascarar el resultado
+        pass
+    # Drenaje explícito de observadores: `stop_services` limpia `extras`, pero cualquier
+    # sync/sink que se haya adjuntado ANTES queda con su tarea viva en este loop, y al
+    # cerrar el loop se reporta como "Task was destroyed but it is pending" en el test
+    # SIGUIENTE (con `-W error` el fallo aparece donde no está la causa).
+    async def _drain_observers():
+        current = asyncio.current_task()
+        for task in asyncio.all_tasks(loop):
+            if task is current or task.done():
+                continue
+            name = task.get_coro().__qualname__ if hasattr(task, "get_coro") else ""
+            if any(consumer in str(name) for consumer in ("_consume", "SelfModelSync", "AuditSink", "GoalTracker", "SkillPipeline")):
+                task.cancel()
+        await asyncio.sleep(0)
+
+    try:
+        asyncio.run_coroutine_threadsafe(_drain_observers(), loop).result(timeout=10)
+    except Exception:  # noqa: BLE001 — el drenaje no debe enmascarar el resultado
+        pass
+
     db = rt.storage.get("db")
     if db is not None:
         try:

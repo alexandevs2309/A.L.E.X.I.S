@@ -87,6 +87,21 @@ class ClaimGuard:
         )
 
 
+def _declared_confidence(content: Any, *, default: float) -> float:
+    """Confianza que la propia tool declara para su salida (p. ej. la web = 0.6).
+
+    Una herramienta que sabe cuánto pesa lo que devuelve lo dice, en vez de que el store lo
+    adivine por `trusted`. El valor NUNCA sube del default, y para contenido NO confiable el
+    techo es 0.6: declarar 0.99 no convierte una web en conocimiento confiable.
+    """
+    if isinstance(content, dict):
+        value = content.get("confidence")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            ceiling = default if default >= 0.7 else 0.6
+            return max(0.0, min(float(value), ceiling))
+    return default
+
+
 class EvidenceStore:
     """Colecciona claims de una misión aplicando siempre el guard."""
 
@@ -113,7 +128,7 @@ class EvidenceStore:
                 text=_text_of(obs.content),
                 source=f"observation:{obs.source}",
                 evidence_ids=[],
-                confidence=0.7 if obs.trusted else 0.4,
+                confidence=_declared_confidence(obs.content, default=0.7 if obs.trusted else 0.4),
             )
         )
 
