@@ -365,3 +365,85 @@ async def test_every_task_is_routable(task):
     router = ModelRouter([FakeProvider("all")])
     resp = await router.complete(_req(task))
     assert resp.outcome is ModelOutcome.REAL
+
+
+# ----------------------------------------------------------------------
+# Propagación del motivo de degradación (P1) — determinista, sin red
+# ----------------------------------------------------------------------
+#
+# El fallo que motivó esta sección: `test_24_gemini_live_devuelve_real` exigía el
+# código `429` como prueba de que una degradación estaba explicada. Un 500, un 503 o
+# un timeout son igual de legítimos, y con esa aserción el test fallaba mientras el
+# sistema se comportaba bien.
+#
+# Estos tests fijan el contrato REAL —que ya existe en producción, ver
+# `router.complete`— sin depender de la disponibilidad de ningún proveedor externo:
+# el router es el de verdad y sólo se sustituye el proveedor, que es la parte no
+# determinista. Sin skips, sin xfail y sin aserciones condicionales.
+
+
+# Motivos tomados de `_HTTP_REASONS` (`providers/http_base.py`): son los textos que el
+# adaptador produce de verdad, para que el test no valide una cadena inventada.
+_HTTP_FALLOS = {
+    429: "cuota o rate limit alcanzado (429) — reintentar más tarde o usar otro provider",
+    503: "servicio no disponible (503)",
+    500: "error del proveedor (500)",
+}
+
+
+@pytest.mark.parametrize("codigo,motivo", sorted(_HTTP_FALLOS.items()))
+async def test_degradacion_propaga_el_motivo_http(codigo, motivo):
+    """Un fallo HTTP del proveedor queda íntegro en `fallback_error`."""
+    router = ModelRouter([FakeProvider("gemini", fail=True, error=motivo), EchoModel()])
+    resp = await router.complete(_req())
+
+    assert resp.outcome is ModelOutcome.DEGRADED
+    assert resp.is_real is False
+    assert resp.fallback_used is True
+    # El motivo viaja COMPLETO, no resumido ni normalizado a otro código.
+    assert resp.fallback_error == f"gemini: ModelProviderError: {motivo}"
+    assert str(codigo) in resp.fallback_error
+    # `error` describe el fallo de ESTA respuesta: `echo` respondió bien, así que no
+    # hay error que registrar aquí. El motivo del salto vive en `fallback_error`.
+    assert resp.error is None
+    assert resp.fallback_from == "gemini"
+
+
+async def test_degradacion_propaga_el_timeout():
+    """Un timeout deja constancia Y dice qué se agotó.
+
+    `asyncio.TimeoutError` no lleva texto, así que sin contexto el motivo quedaba como
+    `gemini: TimeoutError: ` — correcto pero inútil para diagnosticar. El router añade
+    el deadline aplicable, de modo que el motivo identifica proveedor, causa y espera.
+    """
+    lento = FakeProvider("gemini", delay=0.5)
+    router = ModelRouter([lento, EchoModel()])
+    resp = await router.complete(_req(deadline_ms=30))
+
+    assert resp.outcome is ModelOutcome.DEGRADED
+    assert resp.is_real is False
+    assert resp.fallback_error == "gemini: TimeoutError: deadline agotado (30 ms)"
+    assert "gemini" in resp.fallback_error
+    assert "TimeoutError" in resp.fallback_error
+    # El deadline que se agota es el del proveedor, no el pedido: `effective_deadline_ms`
+    # toma el más restrictivo de ambos, y es ese el que impose `asyncio.wait_for`.
+    assert "30 ms" in resp.fallback_error
+    assert resp.error is None
+async def test_unavailable_si_todo_falla_conserva_el_motivo_en_error():
+    """El contrato de UNAVAILABLE es DISTINTO y no debe cambiar: ahí el motivo va en `error`.
+
+    Con provider de contingencia no hay respuesta que degradar, así que `fallback_error`
+    se queda a `None` y el motivo viaja en `error`. Fijar esta distinción evita que una
+    "armonización" futura mueva el motivo de campo y rompa a quien lo lea.
+    """
+    router = ModelRouter(
+        [FakeProvider("gemini", fail=True, error=_HTTP_FALLOS[503])],
+        allow_degraded=False,
+    )
+    resp = await router.complete(_req())
+
+    assert resp.outcome is ModelOutcome.UNAVAILABLE
+    assert resp.is_degraded is False
+    assert "servicio no disponible (503)" in resp.error
+    assert "gemini" in resp.error
+    assert resp.fallback_error is None

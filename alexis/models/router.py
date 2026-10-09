@@ -245,7 +245,17 @@ class ModelRouter:
                 self._audit(request, response, correlation=correlation)
                 return response
             except (asyncio.TimeoutError, ModelProviderError) as exc:
-                last_error = f"{provider.id}: {type(exc).__name__}: {exc}"
+                if isinstance(exc, asyncio.TimeoutError):
+                    # `asyncio.TimeoutError` no lleva texto. Sin esto, una degradación por
+                    # deadline quedaba registrada como "gemini: TimeoutError: ", que no dice
+                    # qué proveedor se agotó ni cuánto se esperó: el motivo era technically
+                    # correcto y operativamente inútil.
+                    last_error = (
+                        f"{provider.id}: TimeoutError: deadline agotado "
+                        f"({provider.effective_deadline_ms(request)} ms)"
+                    )
+                else:
+                    last_error = f"{provider.id}: {type(exc).__name__}: {exc}"
                 continue
             except Exception as exc:  # noqa: BLE001 — un provider roto no tumba el Core
                 last_error = f"{provider.id}: {type(exc).__name__}: {exc}"
