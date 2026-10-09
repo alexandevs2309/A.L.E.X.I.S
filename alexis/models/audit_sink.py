@@ -86,7 +86,18 @@ class AuditSink:
 
     async def _consume(self):
         while True:
-            item = await self._sub.get()
+            try:
+                item = await self._sub.get()
+            except asyncio.CancelledError:
+                # Apagado ordenado (`stop()`): salir sin ruido es lo esperado.
+                return
+            except RuntimeError:
+                # El loop se cerró mientras esta tarea esperaba en la cola. `Queue.get()`
+                # re-programa su getter con `call_soon` y eso levanta "Event loop is
+                # closed" cuando el loop ya no existe. Sin este catch, el interpreter
+                # la reporta como excepción ignorada y `-W error` convierte un cierre
+                # ordenado en un fallo de test que no tiene nada que ver.
+                return
             if item.get("topic") != self.topic:
                 continue
             await self.handle(item.get("payload") or {})

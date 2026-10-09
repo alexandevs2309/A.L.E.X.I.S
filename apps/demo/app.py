@@ -78,6 +78,7 @@ from alexis.models.router import ModelRouter
 from alexis.security.policy import PolicyEngine
 from alexis.security.sandbox import SandboxRunner
 from alexis.self.model import SelfModel
+from alexis.tools.browser import build_browser_tools
 from alexis.tools.desktop import build_desktop_tools
 from alexis.tools.filesystem import build_filesystem_tools
 from alexis.tools.testrunner import build_test_tools
@@ -110,6 +111,7 @@ TOOL_CAP_MAP = {
     "binance.open": "desktop.tools",
     "cursor.open": "desktop.tools",
     "tts.speak": "tts.speak",
+    "browser.research": "browser.research",
 }
 SANDBOX_PROFILE_MAP = {
     "fs.read": "sandbox-project",
@@ -122,6 +124,9 @@ SANDBOX_PROFILE_MAP = {
     "binance.open": "host-delegated",
     "cursor.open": "host-delegated",
     "tts.speak": "host-delegated",
+    # Perfil de red declarado. NO confiere aislamiento de kernel: es la etiqueta que
+    # autoriza el egress a nivel de aplicación (docs/SECURITY.md).
+    "browser.research": "browser-sandbox",
 }
 
 WORKSPACE_README = (
@@ -469,6 +474,10 @@ def build_official_runtime(
     STATE: dict[str, Any] = {"mission_id": None, "verification": None}
 
     EVENTS = EventBus()
+
+    # browser.research se registra DESPUÉS de EVENTS porque su `announce` publica ahí.
+    # Registrarlo antes capturaría un EVENTS todavía no definido (UnboundLocalError).
+    TOOLS.register_all(build_browser_tools(announce=EVENTS.publish))
 
     # --- Runtime y cola --------------------------------------------------- #
     RUNTIME = AlexisRuntime(

@@ -36,10 +36,48 @@ _CAPABILITY_TOOL = {
     # P0 §5.4: sin esta entrada, un paso `action=test` con `capability=execute.test`
     # llegaba al executor sin tool y moría con "acción 'test' no mapeada a ninguna tool".
     "execute.test": "execute.test",
+    # VISION §16/§38: la research web tiene tool propia. Sin esta entrada, un paso con
+    # `capability=browser.research` moría con "acción no mapeada a ninguna tool".
+    "browser.research": "browser.research",
 }
 
 #: Capabilities cuyo `path` vive dentro del sandbox del proyecto.
 _SANDBOX_CAPABILITY_PREFIXES = ("fs.", "research.", "verification.")
+
+
+#: Qué permiso declarado por una tool exige qué capability. Las tools expresan sus
+#: necesidades como banderas (`permissions`), no como ids de capability, así que aquí se
+#: traduce una a otra una sola vez y en un solo sitio.
+_PERMISSION_TO_CAPABILITY = {
+    "write": "fs.write",
+    "delete": "fs.remove",
+    "read": "fs.read",
+    "execute": "execute.test",
+}
+
+
+def _required_capabilities(tool) -> list[str]:
+    """Capabilities que la tool exige para poder ejecutarse.
+
+    `capability_id` es la declaración autoritativa y tiene PRECEDENCIA: si existe, se usa
+    sola. Las banderas de `permissions` son una aproximación (una tool de escritura marca
+    también `read` porque lee antes de escribir) y, sumadas a un `capability_id` correcto,
+    exigirían de más: `fs.write` pediría además `fs.read` y `fs.remove` pediría `fs.write`.
+    Sólo se recurren a las banderas cuando la tool no declara `capability_id`.
+
+    Una tool que no declara nada no exige nada: ése es el caso de retrocompatibilidad.
+    """
+    capability_id = getattr(tool, "capability_id", None)
+    if capability_id:
+        return [str(capability_id)]
+    permissions = getattr(tool, "permissions", None) or {}
+    if not isinstance(permissions, dict):
+        return []
+    return [
+        capability
+        for flag, capability in _PERMISSION_TO_CAPABILITY.items()
+        if permissions.get(flag) is True
+    ]
 
 
 def write_placeholder_content(objective: str) -> str:
@@ -298,12 +336,34 @@ class SandboxExecutor:
                 error=denial,
                 observations=[Observation(f"tool.{tool_name}", {"status": "out_of_perimeter"}, trusted=True)],
             )
+        # Mínimo privilegio: se comprueba lo que la TOOL exige, no sólo lo que el paso
+        # declaró. Va después del perímetro porque es la frontera más específica.
+        denial = self._permission_denial(mission, step, tool)
+        if denial:
+            return ExecutionResult(
+                success=False,
+                error=denial,
+                observations=[
+                    Observation(
+                        f"tool.{tool_name}",
+                        {"status": "permission_denied", "requires": _required_capabilities(tool)},
+                        trusted=True,
+                    )
+                ],
+            )
         try:
             output = await tool.handler(final_args)
         except Exception as exc:  # noqa: BLE001 — el error debe terminar el paso, no la misión
             output = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         ok = isinstance(output, dict) and output.get("ok") is True
-        observation = Observation(f"tool.{tool_name}", {"args": final_args, **output} if isinstance(output, dict) else output, trusted=True)
+        # Una tool que declara su salida no confiable (p. ej. la web) NO nace `trusted=True`:
+        # sin esto el contenido remoto entraría al prompt saltándose el filtro de contenido
+        # no confiable (regla 9). El flag viaja en la propia salida de la tool.
+        observation = Observation(
+            f"tool.{tool_name}",
+            {"args": final_args, **output} if isinstance(output, dict) else output,
+            trusted=not (isinstance(output, dict) and output.get("untrusted") is True),
+        )
         if not ok:
             return ExecutionResult(
                 success=False,
@@ -328,6 +388,31 @@ class SandboxExecutor:
         if path:
             return {"path": path}
         return {"path": self.default_path} if allow_default else {}
+
+    def _permission_denial(self, mission, step, tool) -> str | None:
+        """Mínimo privilegio: la tool no puede exigir más de lo que el envelope concede.
+
+        `PolicyEngine` juzga lo que el PASO declara; aquí se juzga lo que la TOOL exige. La
+        diferencia importa: un paso `action="execute"` sin `capability` explícita se
+        resuelve a una tool de escritura, y el envelope podía no haber concedido esa
+        capability. Sin esta frontera, "least privilege" dependía de que el plan declarase
+        bien su capability en vez de comprobarlo (regla 13 de VISION.md).
+
+        Semántica de "sin restricciones": igual que la policy, un envelope que NO declara
+        capabilities no restringe (compatibilidad con las composiciones legacy); en cuanto
+        declara alguna, la de la tool tiene que estar entre ellas.
+        """
+        declared = list(getattr(getattr(mission, "envelope", None), "capabilities", []) or [])
+        required = _required_capabilities(tool)
+        if not required or not declared:
+            return None
+        missing = [cap for cap in required if cap not in declared]
+        if missing:
+            return (
+                f"permiso denegado: la tool '{tool.name}' requiere {missing} y el envelope "
+                f"de la misión sólo concede {declared}"
+            )
+        return None
 
     def _perimeter_denial(self, step, tool_name: str, args: dict) -> str | None:
         """Última frontera: el path que se va a ejecutar debe estar en el perímetro.
@@ -521,6 +606,8 @@ class SandboxExecutor:
             resolved_tool = "fs.stat" if intent in {"write", "destructive"} else "fs.read"
         elif action == "execute":
             resolved_tool = "fs.remove" if intent == "destructive" else ("fs.write" if intent == "write" else "fs.read")
+        elif action == "browser":
+            resolved_tool = "browser.research"
         else:
             resolved_tool = self.action_map.get(action)
         tool_name = override or resolved_tool
