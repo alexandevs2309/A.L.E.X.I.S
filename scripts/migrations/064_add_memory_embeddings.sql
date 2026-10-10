@@ -1,8 +1,13 @@
 -- Búsqueda semántica (vector) en la memoria episódica. MINDMAP §4, tipo Episodic.
 --
--- Por qué una migración aparte y no sólo el CREATE TABLE de `observations`: la tabla ya
--- existe en las bases desplegadas, y `CREATE TABLE IF NOT EXISTS` no añade columnas a una
--- tabla que ya está. La columna tiene que venir por ALTER.
+-- `Database.migrate()` ejecuta este fichero DESPUÉS de `schema.SQL`, así que la columna
+-- queda creada tanto en una base nueva (por `schema.SQL`, que la declara también) como en
+-- una ya desplegada (por esta migración, que es la que puede añadir columnas a una tabla
+-- existente: `CREATE TABLE IF NOT EXISTS` no las añade).
+--
+-- La duplicación con `schema.py` es deliberada y no una forgotura: `schema.SQL` es
+-- idempotente y describe el estado completo de una base nueva; este fichero es el
+-- historial para las que ya existían.
 --
 -- NULLABLE a propósito, y no es un detalle: la columna empieza a `NULL` para todas las
 -- observaciones existentes. `PostgresMemoryProvider` ordena por distancia de coseno

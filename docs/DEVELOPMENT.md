@@ -267,3 +267,56 @@ scripts/e2e_modelo_real.sh 8117
 Cada llamada aparece en el stream como `model.routed` con `outcome` explícito
 (`real` / `degraded` / `unavailable`), `provider`, `model` y `latency_ms`. Si el
 provider real falla y se recurre al respaldo, `fallback_error` explica por qué.
+## 8. Migraciones de base de datos
+
+`Database.migrate()` hace dos cosas, en este orden:
+
+1. Aplica `alexis/storage/schema.py` (`schema.SQL`). Es **idempotente** y describe el
+   estado completo de una base **nueva**: ahí viven todas las tablas y columnas del núcleo.
+2. Aplica los ficheros de `scripts/migrations/*.sql` **en orden numérico**, y sólo los que
+   no estén ya en `migrations_applied`. El registro se hace en la misma transacción que el
+   SQL: si el `INSERT` de registro fallara después de aplicar, la migración se reaplicaría
+   en el siguiente arranque.
+
+Si una migración falla, `migrate()` **se detiene**, devuelve el nombre y el motivo en el
+resumen, y no aplica las siguientes. Seguir dejaría el esquema a medias.
+
+### Cómo añadir una migración
+
+Crear un fichero en `scripts/migrations/` con nombre secuencial
+(`065_...`, `070_...`). `Database.migrate()` lo descubre y lo aplica solo: no hay lista
+que mantener sincronizada a mano.
+
+Requisitos del fichero:
+
+- **`IF NOT EXISTS` en todo lo que cree.** Sin eso, una migración ya aplicada a mano
+  rompe el arranque.
+- **Nada de `DROP TABLE` sin justificar.** Una migración que elimina tablas que el código
+  consulta no es un cambio de esquema, es una eliminación de datos, y un arranque no debe
+  decidir eso solo.
+
+### Migraciones en cuarentena
+
+`alexis/storage/db.py` declara `QUARANTINED_MIGRATIONS`: migraciones que `migrate()` **no
+aplica**, con el motivo escrito. Hoy contiene `063_skills_consolidation.sql`, que borra
+`skill_candidates`, `skill_versions` y `skill_performance` — las tres las consulta
+`alexis/storage/repositories.py`. Aplicarla automáticamente dejaría el Skill System con
+*"relation does not exist"*.
+
+Para desbloquear una migración en cuarentena hay que **primero** migrar el código que usa
+las tablas viejas, y quitar la entrada de la lista en el mismo commit. El resumen de
+`migrate()` expone `quarantined`, así que no es un silencio.
+
+### Doble fuente: qué NO se duplica
+
+`schema.SQL` y las migraciones se solapan sólo en un caso deliberado: una columna añadida
+después de existir la tabla (`observations.embedding`). `schema.SQL` la declara para bases
+nuevas; la migración 064 la añade a las ya desplegadas. Las tablas que NACEN de una
+migración (`goals`, `schedule_rules`, `skills`) **no** están en `schema.SQL`: meterlas
+devolvería el problema de dos fuentes de verdad que este sistema elimina.
+
+### Comprobar
+
+```bash
+pytest tests/test_migrations.py -q
+```

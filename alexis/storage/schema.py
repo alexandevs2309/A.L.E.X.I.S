@@ -84,6 +84,15 @@ CREATE TABLE IF NOT EXISTS executions (
 );
 CREATE INDEX IF NOT EXISTS ix_executions_task ON executions(task_id);
 
+-- Control de migraciones. `Database.migrate()` ejecuta `schema.SQL` y después aplica,
+-- en orden y una sola vez, los ficheros de `scripts/migrations/`. Sin esta tabla no hay
+-- forma de saber cuáles se aplicaron: `schema.SQL` es idempotente y una migración que se
+-- reaplica sobre datos reales puede no serlo.
+CREATE TABLE IF NOT EXISTS migrations_applied (
+    migration_name TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS observations (
     id BIGSERIAL PRIMARY KEY,
     mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
@@ -94,13 +103,17 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE INDEX IF NOT EXISTS ix_observations_mission ON observations(mission_id, created_at);
 
--- Búsqueda semántica de memoria (scripts/migrations/064). Va AQUÍ, y no sólo en el
--- fichero .sql, por una razón concreta: `Database.migrate()` ejecuta únicamente este
--- `SQL`. Una migración que sólo existe en scripts/migrations/ sería un documento, no
--- una migración: la columna no se crearía nunca al arrancar.
+-- Búsqueda semántica de memoria. Se declara AQUÍ y TAMBIÉN en la migración 064, y es
+-- deliberado: este `SQL` describe el estado completo de una base nueva y es idempotente;
+-- la migración es el historial para bases ya desplegadas, donde un `CREATE TABLE IF NOT
+-- EXISTS` no añadiría la columna. Los dos caminos convergent en el mismo sitio.
 --
 -- NULLABLE: las observaciones ya escritas quedan sin vector y el provider cae a
 -- coincidencia de términos, que es exactamente el comportamiento anterior.
+--
+-- Lo que NO está aquí y sí en `scripts/migrations/`: `goals`, `schedule_rules` y `skills`.
+-- Pertenecen a las migraciones que las crean; meterlas en el esquema base volvería a
+-- tener dos fuentes de verdad para lo mismo.
 ALTER TABLE observations
     ADD COLUMN IF NOT EXISTS embedding vector(384);
 
