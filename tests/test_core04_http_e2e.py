@@ -220,6 +220,44 @@ def _await_state(base, mission_id, wanted, *, timeout=POLL_TIMEOUT_S):
     )
 
 
+def _await_persisted_state(oficial, mission_id, esperado, *, timeout=10.0, intervalo=0.1):
+    """Espera a que la FILA en PostgreSQL alcance el estado que ya ve la API.
+
+    Hace falta porque las dos fuentes no tienen la misma consistencia:
+
+    - `GET /missions/{id}` lee el objeto vivo de `rt.running`, que el worker muta en el
+      momento en que `settle()` fija el estado terminal. Devuelve 'completed' de inmediato.
+    - `mission_repo().get()` lee la fila, que sólo se escribe cuando `_finalize` llama a
+      `_commit`. Entre ambas cosas hay una ventana real, ya reconocida en el propio runtime
+      (`OfficialRuntime.mission_detail`: "una misión running puede no tener todavía su fila
+      actualizada, y el repo iría por detrás").
+
+    Comparar ambas en el instante en que la primera ya cambió hace fallar el test sin que
+    haya ningún defecto: no es que falte esperar a que la misión termine, es que la
+    persistencia va un instante por detrás del estado en memoria. Por eso la espera es
+    sobre la fila, no sobre la API: esperar la API no arreglaría nada, porque ya devuelve
+    el estado final.
+    """
+    import asyncio
+
+    repo = oficial.mission_repo()
+    assert repo is not None
+    limite = time.monotonic() + timeout
+    visto = None
+    while time.monotonic() < limite:
+        fila = asyncio.run_coroutine_threadsafe(repo.get(mission_id), oficial.loop).result(
+            timeout=timeout
+        )
+        visto = fila is not None and fila.state.value
+        if visto == esperado:
+            return fila
+        time.sleep(intervalo)
+    pytest.fail(
+        f"la fila persistida de {mission_id} no alcanzó {esperado!r} en {timeout}s; "
+        f"la API ya lo había servido. Último estado en PostgreSQL: {visto!r}"
+    )
+
+
 # ---------------------------------------------------------------------- #
 # 0. start_services: un solo arranque para producción y tests
 # ---------------------------------------------------------------------- #
@@ -419,13 +457,12 @@ def test_missions_crea_persiste_y_se_lee_por_id(servidor, oficial):
     _, lista = _get(servidor, "/missions")
     assert mission_id in {m["id"] for m in lista}
 
-    # Y la fila está en PostgreSQL, no en un dict de memoria.
+    # Y la fila está en PostgreSQL, no en un dict de memoria. La fila se consulta con
+    # espera propia: la API sirve el estado en memoria y el repo va un instante por detrás
+    # (ver `_await_persisted_state`), así que comparar sin esperar sería comparar dos
+    # relojes distintos.
     assert oficial.mission_repo() is not None
-    import asyncio
-
-    fila = asyncio.run_coroutine_threadsafe(
-        oficial.mission_repo().get(mission_id), oficial.loop
-    ).result(timeout=10)
+    fila = _await_persisted_state(oficial, mission_id, cuerpo["state"])
     assert fila is not None, "la misión debe estar persistida"
     assert fila.state.value == cuerpo["state"]
 
