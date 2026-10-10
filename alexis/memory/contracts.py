@@ -18,6 +18,10 @@ class MemoryQuery:
     )
     limit: int = 10
     token_budget: int = 4000
+    #: Vector de la consulta. Si viene, la recuperación ordena por distancia de coseno
+    #: contra `observations.embedding` y cae a coincidencia de términos para lo que no
+    #: tenga vector. `None` mantiene el comportamiento léxico de siempre.
+    query_embedding: list[float] | None = None
 
 
 @dataclass
@@ -30,6 +34,10 @@ class MemoryItem:
     mission_id: str | None = None
     created_at: str | None = None
     trusted: bool = False
+    #: Similitud 0..1 calculada en PostgreSQL. `None` = este item no tiene vector y su
+    #: puntuación viene de términos. La distinción importa: una fila sin embedding no es
+    #: "poco relevante", es "no medida en la misma escala".
+    semantic_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +49,7 @@ class MemoryItem:
             "mission_id": self.mission_id,
             "created_at": self.created_at,
             "trusted": self.trusted,
+            "semantic_score": self.semantic_score,
         }
 
 

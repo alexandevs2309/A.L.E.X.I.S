@@ -56,6 +56,7 @@ from alexis.contracts import (
 from alexis.learning.experience import Experience, LearningBoundary
 from alexis.learning.reflection import build_reflection
 from alexis.memory.contracts import MemoryQuery
+from alexis.memory.embeddings import NullEmbeddingProvider
 from alexis.models.correlation import for_mission
 from alexis.models.provider import ModelOutcome, ModelRequest, ModelTask
 from alexis.tools.filesystem import extract_workspace_path
@@ -292,6 +293,7 @@ class CognitiveRuntime:
         max_stalls: int = 2,
         decision_max_tokens: int = 2048,
         decision_deadline_ms: int = 60000,
+        embedder=None,
     ):
         self.policy = policy
         #: P0 requisito 2: el catálogo real viaja al contexto de decisión.
@@ -305,6 +307,9 @@ class CognitiveRuntime:
         self.evidence = evidence or EvidenceStore()
         self.model_router = model_router
         self.memory = memory
+        #: Provider de embeddings para la búsqueda semántica de memoria. Opcional y
+        #: degradado: sin él, `recall()` sigue funcionando por coincidencia de términos.
+        self._embedder = embedder or NullEmbeddingProvider()
         self.self_model = self_model
         self.world = world
         self.plan_validator = plan_validator
@@ -707,8 +712,14 @@ class CognitiveRuntime:
         query_text = " ".join(
             [mission.goal.objective or "", *knowledge.known[-3:], *knowledge.unknown[-3:]]
         )
+        # El vector de la consulta se pide ANTES de recuperar, y si el provider falla se
+        # sigue con `None`: eso devuelve la consulta al camino léxico de siempre. La
+        # búsqueda semántica no puede ser un requisito para decidir.
+        vector = await self._embedding_de(query_text)
         try:
-            context = await self.memory.retrieve(MemoryQuery(text=query_text, limit=5))
+            context = await self.memory.retrieve(
+                MemoryQuery(text=query_text, limit=5, query_embedding=vector)
+            )
         except Exception as exc:  # noqa: BLE001 — la memoria no puede tumbar el runtime
             LOGGER.warning("cognitive: la memoria falló (%s); sigo sin contexto previo", exc)
             return None
@@ -724,6 +735,22 @@ class CognitiveRuntime:
                 f"({', '.join(context.sources[:3])})"
             )
         return context
+
+    async def _embedding_de(self, text: str) -> list[float] | None:
+        """Vector de la consulta, o `None`. Nunca propaga: un fallo aquí degrada a léxico.
+
+        Se resuelve por dos vías, y en este orden: un atributo del propio memory (quien
+        encapsula la consulta conoce su representation) y, si no, el provider de
+        embeddings con el que se construyó el runtime.
+        """
+        provider = getattr(self.memory, "embedding_provider", None) or self._embedder
+        if provider is None:
+            return None
+        try:
+            return await provider.embed(text)
+        except Exception as exc:  # noqa: BLE001 — sin embedding se decide igual
+            LOGGER.warning("cognitive: el embedding de la consulta falló (%s); uso términos", exc)
+            return None
 
     def options(
         self,

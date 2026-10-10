@@ -78,6 +78,7 @@ from alexis.models.router import ModelRouter
 from alexis.security.policy import PolicyEngine
 from alexis.security.sandbox import SandboxRunner
 from alexis.self.model import SelfModel
+from alexis.memory.embeddings import HashEmbeddingProvider
 from alexis.tools.browser import build_browser_tools
 from alexis.tools.desktop import build_desktop_tools
 from alexis.tools.filesystem import build_filesystem_tools
@@ -590,6 +591,11 @@ def build_official_runtime(
     print(f"[cognitive] ModelPlanner={RUNTIME.plan_planner_mode} ({_planner_reason}); "
           f"plan por reglas disponible como suelo")
 
+    #: Un único provider de embeddings para leer y para escribir: si fueran dos, el
+    #: vector con el que se escribió una observación no sería el mismo con el que se
+    #: recupera, y la búsqueda semántica devolvería ruido sin que nada fallara.
+    EMBEDDINGS = HashEmbeddingProvider()
+
     RUNTIME.cognitive = CognitiveRuntime(
         policy=RUNTIME.policy,
         gate=RUNTIME.gate,
@@ -597,8 +603,9 @@ def build_official_runtime(
         verifier=RUNTIME.verifier,
         execute=_cognitive_execute,
         model_router=MODEL_ROUTER,
+        embedder=EMBEDDINGS,
         memory=(
-            PostgresMemoryProvider(storage["db"])
+            PostgresMemoryProvider(storage["db"], embedding_provider=EMBEDDINGS)
             if storage.get("db") is not None
             else InProcessMemoryProvider(RUNTIME.memory)
         ),

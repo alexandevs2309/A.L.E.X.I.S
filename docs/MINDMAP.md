@@ -39,10 +39,10 @@ ALEXIS
 │   │  Procedural        COMPLETE    tabla skill_versions + plan_from_skill()
 │   │  Project Context   COMPLETE    missions.goal + world_edges
 │   │  Knowledge Graph   PARTIAL     world_edges (grafo de enlaces); sin recorrido
-│   │  Vector Memory     PARTIAL     pgvector instalado, sin embeddings ni consulta
+│   │  Vector Memory     PARTIAL     pgvector + columna `observations.embedding`
 │   │  Preferences       MISSING     módulo User Model (futuro, fuera del CORE)
 │   │
-│   └── (los 7 tipos se conservan; los 2 PARTIAL y el MISSING son features futuras)
+│   └── (los 7 tipos se conservan; los PARTIAL y el MISSING son features futuras)
 │
 ├── 5. WORLD MODEL
 │   ├── Person

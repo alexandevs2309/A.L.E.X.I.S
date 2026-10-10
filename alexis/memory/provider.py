@@ -70,6 +70,21 @@ class MemoryProvider(ABC):
     async def retrieve(self, query: MemoryQuery) -> MemoryContext: ...
 
 
+def _similarity(distance: Any) -> float | None:
+    """Distancia de coseno de pgvector (`<=>`, 0..2) como similitud 0..1.
+
+    `None` cuando la distancia es `NULL`, que es lo que pgvector devuelve para una fila
+    sin embedding. Se distingue de 0.0 a propósito: "no medido" no es "medido como nulo".
+    """
+    if distance is None:
+        return None
+    try:
+        valor = float(distance)
+    except (TypeError, ValueError):
+        return None
+    return round(max(0.0, min(1.0 - valor, 1.0)), 4)
+
+
 def _in_scope(item: MemoryItem, mission_id: str | None) -> bool:
     """¿Este recuerdo pertenece a la consulta?
 
@@ -93,14 +108,30 @@ def _select(items: list[MemoryItem], query: MemoryQuery, provider_id: str) -> Me
             continue
         text = f"{item.source} {item.content}"
         score = relevance(query_terms, text)
-        if score <= 0.0:
+        if score <= 0.0 and item.semantic_score is None:
+            # Sin coincidencia de términos, pero medido en el espacio vectorial: es
+            # relevante. Descartarlo aquí sería la búsqueda semántica decorativa, que es
+            # exactamente lo que se quiere evitar.
             continue
         item.score = round(score, 3)
         scored.append(item)
     # El `id` actúa de desempate: sin él, dos recuerdos con la misma puntuación y la misma
     # fecha dependían del orden de llegada, y el mismo conjunto podía recuperar distinto
     # texto en dos ejecuciones.
-    scored.sort(key=lambda i: (i.score, i.created_at or "", i.id), reverse=True)
+    #: Sin embedding, esto es un filtro léxico y se aplica como antes. Con embedding, la
+    #: similitud va en `semantic_score` y la distancia por defecto de pgvector pone los
+    #: `NULL` AL FINAL, así que las observaciones sin vector no se cuelan por delante de
+    #: las que sí lo tienen.
+    scored.sort(
+        key=lambda i: (
+            i.semantic_score is not None,
+            i.semantic_score or 0.0,
+            i.score,
+            i.created_at or "",
+            i.id,
+        ),
+        reverse=True,
+    )
 
     # `limit` y `token_budget` son las DOS cotas del contrato. Sólo se cumplía `limit`:
     # con `token_budget=100` se entregaban 2500 tokens. Ahora el presupuesto recorta por
@@ -164,42 +195,48 @@ class InProcessMemoryProvider(MemoryProvider):
 class PostgresMemoryProvider(MemoryProvider):
     """Lee de la tabla `observations` (ya persistida) a través de la base de datos.
 
-    Trae una ventana acotada de observaciones recientes y puntúa en Python: es simple,
-    determinista y no exige embeddings ni infraestructura nueva.
+    Dos rutas, y la segunda no sustituye a la primera:
+
+    - **Semántica** (si `MemoryQuery.query_embedding` viene y la fila tiene vector): la
+      distancia de coseno la calcula PostgreSQL con el índice HNSW, y el resultado trae
+      `semantic_score`.
+    - **Léxica** (siempre): coincidencia de términos en Python. Es el fallback de todo:
+      fila sin vector, consulta sin embedding, o provider de embeddings caído.
+
+    La ruta léxica no se elimina por añadir la vectorial. Las observaciones ya escritas
+    tienen `embedding IS NULL` y así seguirán hasta que haya un backfill; si la búsqueda
+    vector fuera la única, dejaría de devolverlas sin avisar.
     """
 
     id = "postgres_memory"
 
-    def __init__(self, db, *, scan: int = 200):
+    def __init__(self, db, *, scan: int = 200, embedding_provider=None):
         self.db = db
         self.scan = scan
+        #: Opcional. Si se inyecta, `retrieve()` genera el vector de la consulta cuando
+        #: el llamante no lo trajo. Se usa para escribir también: `store_embedding()`.
+        self.embedding_provider = embedding_provider
 
     async def retrieve(self, query: MemoryQuery) -> MemoryContext:
+        vector = await self._embedding_de(query)
+
         # El filtro de misión va en el SQL, no después: traer 200 filas de todas las
         # misiones para descartar en Python es gastar la base de datos para no hacer nada.
         params: dict[str, Any] = {"limit": self.scan}
-        if query.mission_id is None:
-            rows = await self.db.fetch(
-                """
-                SELECT mission_id, source, content, trusted, created_at
-                FROM observations
-                ORDER BY id DESC
-                LIMIT %(limit)s
-                """,
-                params,
-            )
-        else:
+        if query.mission_id is not None:
+            # Antes de componer el SQL, no después: si el parámetro falta, PostgreSQL
+            # rechaza la consulta (no devuelve filas de más), que es el fallo ruidoso
+            # correcto. Lo contrario —filtrar en Python— sí sería una fuga silenciosa.
             params["mission_id"] = query.mission_id
-            rows = await self.db.fetch(
-                """
-                SELECT mission_id, source, content, trusted, created_at
-                FROM observations
-                WHERE mission_id = %(mission_id)s
-                ORDER BY id DESC
-                LIMIT %(limit)s
-                """,
-                params,
-            )
+        if vector is None:
+            # Sin embedding no se cambia la consulta. Es el camino léxico de siempre,
+            # byte a byte: así el fallback es de verdad el mismo, no una aproximación.
+            params["embedding"] = None
+            rows = await self.db.fetch(self._sql(query, semantic=False), params)
+        else:
+            params["embedding"] = "[" + ",".join(str(v) for v in vector) + "]"
+            rows = await self.db.fetch(self._sql(query, semantic=True), params)
+
         items = [
             MemoryItem(
                 id=f"obs-{row['mission_id']}-{index}",
@@ -209,10 +246,55 @@ class PostgresMemoryProvider(MemoryProvider):
                 mission_id=row["mission_id"],
                 created_at=str(row["created_at"]),
                 trusted=bool(row["trusted"]),
+                semantic_score=_similarity(row.get("distance")),
             )
             for index, row in enumerate(rows)
         ]
         return _select(items, query, self.id)
+
+    async def _embedding_de(self, query: MemoryQuery) -> list[float] | None:
+        """Vector de la consulta: el del llamante o, si falta, el del provider inyectado."""
+        if query.query_embedding is not None:
+            return query.query_embedding
+        provider = self.embedding_provider
+        if provider is None:
+            return None
+        return await provider.embed(query.text)
+
+    @staticmethod
+    def _sql(query: MemoryQuery, *, semantic: bool) -> str:
+        """SQL de recuperación. El filtro de misión y el orden semántico se componen aquí.
+
+        Con embedding, `ORDER BY embedding <=> $vector` pone los `NULL` al final (ASC), de
+        modo que lo no vectorizado nunca desplaza a lo medido. Sin embedding, el orden
+        sigue siendo `id DESC`: la ventana más reciente, como antes.
+        """
+        where = ""
+        if query.mission_id is not None:
+            where = "WHERE mission_id = %(mission_id)s"
+        if semantic:
+            select = ("SELECT mission_id, source, content, trusted, created_at,\n"
+                      "       embedding <=> %(embedding)s::vector AS distance")
+            order = "ORDER BY embedding <=> %(embedding)s::vector ASC"
+        else:
+            select = "SELECT mission_id, source, content, trusted, created_at, NULL AS distance"
+            order = "ORDER BY id DESC"
+        return f"{select}\nFROM observations\n{where}\n{order}\nLIMIT %(limit)s"
+
+    async def store_embedding(self, observation_id: int, vector: list[float]) -> None:
+        """Escribe el vector de una observación existente.
+
+        Es una operación aparte y explícita: nadie rellena embeddings por sorpresa. El
+        backfill de las observaciones ya escritas es un trabajo consciente, no un efecto
+        secundario de una consulta.
+        """
+        await self.db.execute(
+            "UPDATE observations SET embedding = %(embedding)s::vector WHERE id = %(id)s",
+            {
+                "id": observation_id,
+                "embedding": "[" + ",".join(str(v) for v in vector) + "]",
+            },
+        )
 
 
 class NullMemoryProvider(MemoryProvider):

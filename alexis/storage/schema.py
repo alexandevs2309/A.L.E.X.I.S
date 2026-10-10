@@ -94,6 +94,19 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE INDEX IF NOT EXISTS ix_observations_mission ON observations(mission_id, created_at);
 
+-- Búsqueda semántica de memoria (scripts/migrations/064). Va AQUÍ, y no sólo en el
+-- fichero .sql, por una razón concreta: `Database.migrate()` ejecuta únicamente este
+-- `SQL`. Una migración que sólo existe en scripts/migrations/ sería un documento, no
+-- una migración: la columna no se crearía nunca al arrancar.
+--
+-- NULLABLE: las observaciones ya escritas quedan sin vector y el provider cae a
+-- coincidencia de términos, que es exactamente el comportamiento anterior.
+ALTER TABLE observations
+    ADD COLUMN IF NOT EXISTS embedding vector(384);
+
+CREATE INDEX IF NOT EXISTS ix_observations_embedding
+    ON observations USING hnsw (embedding vector_cosine_ops);
+
 CREATE TABLE IF NOT EXISTS verifications (
     id BIGSERIAL PRIMARY KEY,
     mission_id TEXT NOT NULL REFERENCES missions(id) ON DELETE CASCADE,
