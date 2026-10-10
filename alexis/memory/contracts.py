@@ -50,6 +50,10 @@ class MemoryContext:
     sources: list[str] = field(default_factory=list)
     token_estimate: int = 0
     provider: str = "none"
+    #: Hubo recuerdos relevantes que NO cabían en `limit` o `token_budget`. Sin esto, un
+    #: contexto recortado es indistinguible de uno que no tenía nada más que dar, y el
+    #: sistema no puede saber si está perdiendo contexto o no.
+    truncated: bool = False
 
     def as_prompt_lines(self) -> list[str]:
         """Contexto como líneas de datos para el prompt.
@@ -72,4 +76,5 @@ class MemoryContext:
             "sources": list(self.sources),
             "token_estimate": self.token_estimate,
             "provider": self.provider,
+            "truncated": self.truncated,
         }

@@ -70,24 +70,66 @@ class MemoryProvider(ABC):
     async def retrieve(self, query: MemoryQuery) -> MemoryContext: ...
 
 
+def _in_scope(item: MemoryItem, mission_id: str | None) -> bool:
+    """¿Este recuerdo pertenece a la consulta?
+
+    `MemoryQuery.mission_id` es un límite de aislamiento, no una pista de búsqueda. Con
+    una misión indicada, sólo valen los recuerdos de ESA misión. Antes el campo no se
+    usaba: una consulta de la misión `MIA` devolvía observaciones de `MISION-SECRETA`, y
+    el `PostgresMemoryProvider` además traía las 200 filas más recientes sin filtrar nada.
+
+    Para una búsqueda global el llamante deja `mission_id = None`, que es explícito.
+    """
+    if mission_id is None:
+        return True
+    return item.mission_id == mission_id
+
+
 def _select(items: list[MemoryItem], query: MemoryQuery, provider_id: str) -> MemoryContext:
     query_terms = terms(query.text)
     scored: list[MemoryItem] = []
     for item in items:
+        if not _in_scope(item, query.mission_id):
+            continue
         text = f"{item.source} {item.content}"
         score = relevance(query_terms, text)
         if score <= 0.0:
             continue
         item.score = round(score, 3)
         scored.append(item)
-    scored.sort(key=lambda i: (i.score, i.created_at or ""), reverse=True)
-    selected = scored[: query.limit]
-    token_estimate = sum(len(i.content.split()) for i in selected)
+    # El `id` actúa de desempate: sin él, dos recuerdos con la misma puntuación y la misma
+    # fecha dependían del orden de llegada, y el mismo conjunto podía recuperar distinto
+    # texto en dos ejecuciones.
+    scored.sort(key=lambda i: (i.score, i.created_at or "", i.id), reverse=True)
+
+    # `limit` y `token_budget` son las DOS cotas del contrato. Sólo se cumplía `limit`:
+    # con `token_budget=100` se entregaban 2500 tokens. Ahora el presupuesto recorta por
+    # orden de relevancia, que es el mismo orden en que se pide leerlos.
+    selected: list[MemoryItem] = []
+    used = 0
+    for item in scored:
+        cost = len(item.content.split())
+        if len(selected) >= query.limit:
+            break
+        if used + cost > query.token_budget:
+            continue
+        selected.append(item)
+        used += cost
+
+    # Un presupuesto que deja el contexto VACÍO es peor que uno que se excede: el decisor
+    # recibiría "no hay memoria relevante" cuando sí la hay, y esa mentira es más dañina que
+    # un contexto grande. Se entrega el mejor recuerdo aunque no quepa, y `truncated` dice
+    # que se recortó.
+    if not selected and scored:
+        selected = [scored[0]]
+        used = len(scored[0].content.split())
+
     return MemoryContext(
         items=selected,
         sources=sorted({i.source for i in selected}),
-        token_estimate=token_estimate,
+        token_estimate=used,
         provider=provider_id,
+        truncated=len(selected) < len(scored),
     )
 
 
@@ -133,15 +175,31 @@ class PostgresMemoryProvider(MemoryProvider):
         self.scan = scan
 
     async def retrieve(self, query: MemoryQuery) -> MemoryContext:
-        rows = await self.db.fetch(
-            """
-            SELECT mission_id, source, content, trusted, created_at
-            FROM observations
-            ORDER BY id DESC
-            LIMIT %(limit)s
-            """,
-            {"limit": self.scan},
-        )
+        # El filtro de misión va en el SQL, no después: traer 200 filas de todas las
+        # misiones para descartar en Python es gastar la base de datos para no hacer nada.
+        params: dict[str, Any] = {"limit": self.scan}
+        if query.mission_id is None:
+            rows = await self.db.fetch(
+                """
+                SELECT mission_id, source, content, trusted, created_at
+                FROM observations
+                ORDER BY id DESC
+                LIMIT %(limit)s
+                """,
+                params,
+            )
+        else:
+            params["mission_id"] = query.mission_id
+            rows = await self.db.fetch(
+                """
+                SELECT mission_id, source, content, trusted, created_at
+                FROM observations
+                WHERE mission_id = %(mission_id)s
+                ORDER BY id DESC
+                LIMIT %(limit)s
+                """,
+                params,
+            )
         items = [
             MemoryItem(
                 id=f"obs-{row['mission_id']}-{index}",

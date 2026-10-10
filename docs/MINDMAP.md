@@ -29,14 +29,15 @@ ALEXIS
 │   ├── Recovery
 │   └── Stop Conditions
 │
-├── 4. MEMORY
-│   ├── Episodic
-│   ├── Semantic
-│   ├── Procedural
-│   ├── Project Context
-│   ├── Preferences
-│   ├── Knowledge Graph
-│   └── Vector Memory
+├── 4. MEMORY            [PARTIAL — solo Observaciones]
+│   ├── Observations     [IMPLEMENTADO: postgres + in-process, round-trip]
+│   ├── Episodic         [no implementado como tipo propio]
+│   ├── Semantic         [no implementado]
+│   ├── Procedural       [no implementado]
+│   ├── Project Context  [no implementado]
+│   ├── Preferences      [no implementado]
+│   ├── Knowledge Graph  [no implementado]
+│   └── Vector Memory    [no implementado]
 │
 ├── 5. WORLD MODEL
 │   ├── Person

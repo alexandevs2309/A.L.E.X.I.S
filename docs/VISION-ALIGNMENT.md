@@ -38,7 +38,7 @@ Nothing is marked complete on the strength of a doc, a class name, or a passing 
 | §4.6 | Completion requires independent verification | `IMPLEMENTED` | `Mission.__setattr__` refuses `COMPLETED` without a confirming `GoalVerification` (`354a388`) |
 | §5 | Self Model | `PARTIAL` | `alexis/self/model.py`; learned state persists (`93c6930`). Missing: goals, commitments, skills, health, model_state |
 | §7 | World Model | `PARTIAL` | `alexis/world/model.py` — entities, scopes, staleness, conflicts, provenance, persistence. Only FILE/TEST domains; no projects, devices or time |
-| §8 | Memory | `PARTIAL` | Episodic + working implemented (`alexis/memory/provider.py`). Semantic/procedural/project/skill memory absent |
+| §8 | Memory | `PARTIAL` *(confirmado 2026-10-10)* | Recuperación contextual real antes de decidir, con `token_budget`, aislamiento por misión y contenido no confiable persistido saneado; 27 pruebas. Faltan los tipos semántica/procedural/proyecto/preferencias/grafo/vector de `MINDMAP.md` §4 |
 | §11 | Success criteria | `IMPLEMENTED` | `GoalVerifier` checks tool-observed predicates against real observations; a model assertion is never enough |
 | §13 | Replanning and recovery | `IMPLEMENTED` | Deterministic filter (`loop.py`), plus dynamic replanning via `ModelTask.PLAN` with a validated overlay (`31ab3b8`) |
 | §17 | Capability system | `PARTIAL` | 30 specs, **15 with a real adapter**. Each declares inputs, outputs, side effects, risk, sandbox profile, verification |

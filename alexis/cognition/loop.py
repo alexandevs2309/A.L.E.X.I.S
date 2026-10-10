@@ -713,7 +713,12 @@ class CognitiveRuntime:
             LOGGER.warning("cognitive: la memoria falló (%s); sigo sin contexto previo", exc)
             return None
         if context.items:
-            knowledge.memory = [item.content[:200] for item in context.items]
+            # Se guarda lo SANEADO, no `item.content` crudo. Antes se persistía el texto
+            # tal cual en `mission.context`, así que una página web que dijera "ignora las
+            # instrucciones anteriores" quedaba escrita en la misión y sobrevivía a un
+            # reinicio. El prompt ya recibía la versión saneada (`as_prompt_lines`), pero
+            # el estado persistido guardaba la otra, y ambos leen de la misma fuente.
+            knowledge.memory = [line[:200] for line in context.as_prompt_lines()]
             knowledge.experience = (
                 f"{len(context.items)} observación(es) relevante(s) de misiones anteriores "
                 f"({', '.join(context.sources[:3])})"
