@@ -807,6 +807,35 @@ presencia real (cierra F0-Presence pendiente).
 
 ---
 
+## 15-bis. Integridad de los argumentos que propone el modelo (2026-10-10)
+
+El modelo elige **qué paso** ejecutar y puede refinar el **valor** de las claves que ese
+paso ya declara. No puede **introducir claves nuevas**, y no puede borrar las que el paso
+declaraba.
+
+Sin esa regla, `_ask_model()` hacía `args=dict(data.get("args") or {})` y ocurrían dos
+fallos reales, ambos demostrados:
+
+1. El modelo añadía claves que el paso no declaraba. Un paso de `fs.write` con
+   `{"contenido": ...}` recibía `{"path": "nota.txt"}` y la herramienta obedecía: **el
+   Core validaba un paso y ejecutaba otro**.
+2. Cuando el modelo no proponía args, **los del paso se perdían** — porque
+   `_step_decision()` no los copiaba a la `Decision`. Un paso que decía
+   `{"path": "notas.txt"}` acababa ejecutándose sin argumentos.
+
+La causa raíz era la segunda: sin args en la decisión no había nada sobre qué filtrar.
+
+Las claves descartadas se registran en `Decision.rejected`. Un descarte silencioso haría
+imposible reconstruir por qué se ejecutó algo, que es justo lo que la auditoría exige.
+
+**Alcance del límite**: sigue siendo una decisión del modelo (`proposed_by == "model"`) y
+el perímetro del executor no cambia. El workspace continúa siendo la frontera de
+seguridad; lo que se cierra aquí es la diferencia entre **el paso validado** y **el paso
+ejecutado**.
+
+Cubierto por `tests/test_cognition_model_args.py` (7 tests), con contrapruebas que
+verifican que los tests detectan cada mitad de la reversión.
+
 ## 16. Seguridad: invariantes que NO cambian
 
 1. El **modelo no otorga permisos**: propone; `CapabilitySelector` + `EnvelopeBuilder`

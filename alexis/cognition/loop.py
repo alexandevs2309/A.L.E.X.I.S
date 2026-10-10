@@ -1146,6 +1146,10 @@ class CognitiveRuntime:
             capability=step.capability,
             step_id=step.id,
             description=step.description,
+            # Los args del paso viajan a la decisión. Antes no lo hacían, y era la raíz
+            # de dos fallos: la decisión no tenía sobre qué filtrar lo que propusiera el
+            # modelo, y cuando el modelo no proponía args, los del paso se perdían.
+            args=dict(step.args or {}),
         )
 
     def _replan_decision(self, knowledge: KnowledgeState, because: str) -> Decision:
@@ -1299,12 +1303,32 @@ class CognitiveRuntime:
                 rejected=[{"proposed": {k: v for k, v in data.items() if k != "claims"}}],
             )
 
+        # Los args del modelo se ACOTAN a lo que el paso ya declara.
+        #
+        # Antes: `args=dict(data.get("args") or {})`. Eso producía dos fallos opuestos y
+        # ambos reales:
+        #  1. El modelo PODÍA añadir claves que el paso no declaraba. Un paso de
+        #     `fs.write` con `{"contenido": ...}` recibía `{"path": "nota.txt"}` y la
+        #     herramienta obedecía: el Core validaba un paso y ejecutaba otro.
+        #  2. Cuando el modelo NO proponía args, se perdían los del paso. Un paso que
+        #     decía `{"path": "notas.txt"}` acababa ejecutándose sin ninguno.
+        #
+        # Lo que el modelo SÍ puede hacer es refinar el VALOR de una clave declarada
+        # ("usa informe.md en vez de notas.txt"), que es un ajuste legítimo dentro del
+        # mismo paso. El perímetro del executor sigue siendo la frontera de seguridad.
+        base_args = dict(match.args or {})
+        propuestos = data.get("args")
+        propuestos = dict(propuestos) if isinstance(propuestos, dict) else {}
+        descartados = {k: v for k, v in propuestos.items() if k not in base_args}
+        aplicados = {k: v for k, v in propuestos.items() if k in base_args}
+        args_finales = {**base_args, **aplicados}
+
         chosen = Decision(
             action=match.action,
             rationale=str(data.get("rationale") or match.rationale),
             capability=match.capability,
             tool=match.tool,
-            args=dict(data.get("args") or {}),
+            args=args_finales,
             step_id=match.step_id,
             description=match.description,
             diagnosis=match.diagnosis,
@@ -1312,6 +1336,16 @@ class CognitiveRuntime:
             cognition_outcome="real",
             model_meta=meta,
         )
+        if descartados:
+            # No se descartan en silencio: una clave quitada sin registro es exactamente
+            # lo que hace imposible reconstruir por qué se ejecutó algo.
+            chosen.rejected = list(chosen.rejected or []) + [{
+                "reason": (
+                    "el modelo propuso claves de argumento que el paso no declara; "
+                    "se descartan para que lo ejecutado sea lo validado"
+                ),
+                "args": descartados,
+            }]
         if match.action is NextAction.ASK_USER:
             question = str(data.get("question") or "").strip()
             if not question:
