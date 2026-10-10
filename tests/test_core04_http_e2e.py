@@ -485,11 +485,11 @@ def test_get_missions_por_id_es_lectura_sin_efectos(servidor, oficial):
         repetida = _get(servidor, f"/missions/{mission_id}")[1]
         assert repetida == primera, "una lectura no puede cambiar lo que devuelve"
 
-    import asyncio
-
-    fila = asyncio.run_coroutine_threadsafe(
-        oficial.mission_repo().get(mission_id), oficial.loop
-    ).result(timeout=10)
+    # La fila se lee con la misma espera que en el test anterior, y por el mismo motivo:
+    # la API sirve el objeto vivo y el repo va un instante por detrás. Aquí la comparación
+    # es doble (estado y resultados), y ambas viajan en la misma escritura, así que
+    # esperar al estado basta para que los resultados también estén persistidos.
+    fila = _await_persisted_state(oficial, mission_id, "completed")
     assert fila.state.value == "completed"
     assert list(fila.results) == primera["results"]
     # Y no se encoló nada nuevo: la misión sigue asentada, no re-ejecutada.
