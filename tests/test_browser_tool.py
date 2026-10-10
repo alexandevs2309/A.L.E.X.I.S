@@ -45,7 +45,7 @@ def make_tool(*, pages=None, results=None, announce=None, **kw):
     async def search_fn(query, timeout=None):
         return [dict(r) for r in results]
 
-    async def fetch_fn(url, timeout=None):
+    async def fetch_fn(url, timeout=None, allowed_domains=None):
         page = pages.get(url)
         if isinstance(page, Exception):
             raise page
@@ -160,7 +160,7 @@ def test_check_url_allowlist_de_dominios():
 async def test_fuente_fuera_de_allowlist_se_omite_sin_descargar():
     descargadas = []
 
-    async def fetch_fn(url, timeout=None):
+    async def fetch_fn(url, timeout=None, allowed_domains=None):
         descargadas.append(url)
         return PAGE
 
@@ -180,7 +180,7 @@ async def test_fuente_fuera_de_allowlist_se_omite_sin_descargar():
 async def test_ssrf_no_se_descarga():
     descargadas = []
 
-    async def fetch_fn(url, timeout=None):
+    async def fetch_fn(url, timeout=None, allowed_domains=None):
         descargadas.append(url)
         return PAGE
 
@@ -256,7 +256,7 @@ async def test_timeout_se_captura_y_no_propaga():
 async def test_timeout_por_peticion_al_descargador():
     vistos = []
 
-    async def fetch_fn(url, timeout=None):
+    async def fetch_fn(url, timeout=None, allowed_domains=None):
         vistos.append(timeout)
         raise TimeoutError("timeout de descarga")
 
@@ -365,7 +365,7 @@ def test_no_hay_dependencias_de_navegador_headless():
 # --- Utilidades de los dobles ---------------------------------------------- #
 
 
-async def _text(url, timeout=None):
+async def _text(url, timeout=None, allowed_domains=None):
     """Descargador doble: devuelve siempre la misma página."""
     return PAGE
 
@@ -396,7 +396,7 @@ async def test_sin_dependencias_inyectadas_usa_http_pero_no_llama_en_test(monkey
 
 @pytest.mark.asyncio
 async def test_sin_peticiones_si_no_hay_resultados():
-    async def fetch_fn(url, timeout=None):
+    async def fetch_fn(url, timeout=None, allowed_domains=None):
         raise AssertionError("no debería descargar sin resultados")
 
     out = await BrowserResearchTool(search_fn=_results([]), fetch_fn=fetch_fn).handler(

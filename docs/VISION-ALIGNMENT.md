@@ -8,7 +8,9 @@ be *registered* as `PLANNED`/`MISSING`/`UNAVAILABLE`, and rule 4 forbids marking
 complete without real implementation and tests. A 2000-line target document with no
 reconciliation would do the opposite of both rules: it would let aspiration read as fact.
 
-**Verification date**: 2026-10-03 · commit `354a388` · **1354 deterministic tests passing**.
+**Verification date**: 2026-10-10 · commit `e8b6c82` + correcciones de cierre · **1628 deterministic tests passing** (`-W error`, con PostgreSQL). Sin `ALEXIS_DATABASE_URL` sólo pasan 1505: **123 se omiten** y la persistencia no queda demostrada.
+
+> **Nota**: las tablas §16/§20 de este documento son el inventario histórico de 2026-10-03. La re-auditoría vigente de los 22 requisitos P0 está en `docs/P0-COGNITIVE-CORE-GAP-ANALYSIS.md` §8. Varias capacidades que aquí figuran como `MISSING` ya existen (`browser.research` está `available` con tool propia; `health_monitor.py` y `critic.py` están implementados).
 
 ## How to read the statuses
 
@@ -55,18 +57,18 @@ Listed so they are not mistaken for absent by accident, nor for present by optim
 | Vision § | Capability | Status | Where it would live |
 |---|---|---|---|
 | §6 | User Model | `MISSING` | New model alongside `alexis/self/` |
-| §9, §10 | Goal management & decomposition | `MISSING` | Above `MissionEngine`; nothing manages goals beyond one mission |
+| §9, §10 | Goal management & decomposition | `IMPLEMENTED` | `alexis/autonomy/goal_state.py` + `GoalTracker`;Scheduler en `alexis/autonomy/` |
 | §14 | Causal reasoning | `MISSING` | `diagnose_failure` classifies failure kinds; it does not build causal chains |
 | §15 | Experiment engine | `CONTRACT` | `alexis/experiments/engine.py` — interface only |
-| §16 | Autonomous research | `MISSING` | `browser.research` is registered `missing` in the catalog |
+| §16 | Autonomous research | `IMPLEMENTED` | `browser.research`: tool propia (`alexis/tools/browser.py`), allowlist + SSRF por salto + descarte de prompt injection, 61 tests |
 | §18, §19 | Capability discovery & tool creation | `MISSING` | No inspection→evaluation→approval→registration pipeline |
-| §20, §21 | Skill system & learning lifecycle | `MISSING` | `alexis/learning/system.py` appends experiences. Reflection→lesson→skill→version does not exist |
+| §20, §21 | Skill system & learning lifecycle | `PARTIAL` | `alexis/learning/system.py` persiste lessons/observations/reflections en `self_learnings`; la reflection ya es durable |
 | §25 | Resource budgets | `PARTIAL` | Cost and time budgets exist per mission; no token/call/disk budgets |
 | §26 | Commitment manager | `MISSING` | — |
 | §27 | Scheduler | `CONTRACT` | `alexis/autonomy/scheduler.py`, 51 lines: an interface, not a running scheduler |
 | §28 | Event & trigger engine | `PARTIAL` | `EventBus` is real and is how missions report; nothing consumes external events to *originate* work |
 | §29, §30 | Self-health & model quality monitoring | `MISSING` | No degradation detection, no provider history |
-| §31 | Independent criticism (ModelCritic) | `MISSING` | `PlanValidator` is deterministic validation, not a critic |
+| §31 | Independent criticism (ModelCritic) | `IMPLEMENTED` | `alexis/cognition/critic.py` |
 | §33 | Uncertainty engine | `PARTIAL` | Confidence and uncertainty are tracked in `KnowledgeState`; not a first-class subsystem |
 | §34 | Operational explainability | `PARTIAL` | Structured decision metadata exists; not surfaced as a first-class audit view |
 | §45, §46 | Sub-agents & multi-agent | `MISSING` | `AgentRegistry` is a registry; no delegation with scoped authority |

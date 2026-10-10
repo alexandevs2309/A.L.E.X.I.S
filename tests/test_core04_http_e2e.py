@@ -27,6 +27,7 @@ ningún proveedor, ni de un puerto fijo (puerto efímero), ni del workspace real
 (tmp por módulo).
 """
 
+import asyncio
 import ast
 import json
 import pathlib
@@ -272,7 +273,7 @@ def test_start_services_arranca_los_servicios_oficiales(oficial):
     """
     from apps.demo import app as app_module
 
-    # Idempotente en lo que importa: volver a llamarlo no rompe el runtime.
+    # Idempotente: la garantía se demuestra en tests/test_runtime_lifecycle.py.
     arrancado = app_module.start_services(oficial)
 
     assert arrancado["worker_started"] is True, "sin worker, nada se ejecuta"

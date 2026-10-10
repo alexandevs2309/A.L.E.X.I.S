@@ -30,7 +30,7 @@ import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Awaitable, Callable
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 from alexis.security.untrusted import detect_injection, sanitize_untrusted
 from alexis.tools.registry import Tool
@@ -45,6 +45,9 @@ MAX_TIMEOUT = 120.0
 DEFAULT_TIMEOUT = 60.0
 MAX_TEXT_BYTES = 10 * 1024
 MAX_QUERY_CHARS = 512
+#: Tope de saltos de redirección. Un límite bajo no es paranoia: sin él, un servidor
+#: que manda 302 en bucle convierte cada consulta en N peticiones salientes.
+MAX_REDIRECTS = 5
 SCHEMES = frozenset({"http", "https"})
 ALLOWED_PORTS = frozenset({None, 80, 443})
 
@@ -125,15 +128,26 @@ def _host_is_public(host: str) -> bool:
 
 
 def check_url(url: str, allowed_domains: list[str] | None = None) -> tuple[bool, str]:
-    """`(permitida, razón)`. Se llama ANTES de descargar cada URL."""
+    """`(permitida, razón)`. Se llama ANTES de descargar cada URL.
+
+    Esta función es TOTAL: nunca lanza. La razón es que desde que las redirecciones se
+    siguen aquí, la URL a validar la elige un atacante (va en la cabecera `Location`), y
+    una excepción en este punto dejaría la descarga a medias en vez de rechazar el
+    destino. `urlparse(...).port` lanza `ValueError` con puertos fuera de rango o no
+    numéricos, así que se captura explícitamente en lugar de confiar en el parseo.
+    """
     try:
         parts = urlparse(url)
     except ValueError as exc:
         return False, f"URL inválida: {exc}"
     if parts.scheme not in SCHEMES:
         return False, f"esquema no permitido: {parts.scheme or '(vacío)'}"
-    if parts.port not in ALLOWED_PORTS:
-        return False, f"puerto no permitido (sólo 80/443): {parts.port}"
+    try:
+        port = parts.port
+    except ValueError as exc:
+        return False, f"puerto inválido: {exc}"
+    if port not in ALLOWED_PORTS:
+        return False, f"puerto no permitido (sólo 80/443): {port}"
     host = (parts.hostname or "").lower()
     if not _host_is_public(host):
         return False, f"host no público (red local/metadatos): {host or '(vacío)'}"
@@ -142,6 +156,15 @@ def check_url(url: str, allowed_domains: list[str] | None = None) -> tuple[bool,
         if not any(host == d or host.endswith(f".{d}") for d in wanted):
             return False, f"dominio fuera de allowed_domains: {host}"
     return True, ""
+
+
+class FetchBlocked(RuntimeError):
+    """Un destino —el inicial o el de una redirección— no pasó `check_url`.
+
+    Deliberadamente NO es un error genérico: quien lo captura necesita distinguir "el
+    destino se rechazó por política" de "la descarga falló", porque sólo el primero es un
+    intento de acceso que conviene registrar y no reintentar.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -203,21 +226,80 @@ async def http_search(query: str, timeout: float = DEFAULT_TIMEOUT) -> list[dict
     return [{"url": url, "title": title, "snippet": ""} for url, title in parser.links]
 
 
-async def http_fetch(url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
-    """Descarga el HTML de una URL. Cliente nuevo por petición: sin cookies ni sesión."""
+async def http_fetch(
+    url: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    allowed_domains: list[str] | None = None,
+) -> str:
+    """Descarga el HTML de una URL. Cliente nuevo por petición: sin cookies ni sesión.
+
+    Las redirecciones se siguen AQUÍ, una a una, y NO con `follow_redirects=True`.
+
+    Por qué no se delega en el cliente: una redirección es un destino de red NUEVO. La
+    URL inicial la autorizó quien la pidió; la que acaba en `Location` la eligió el
+    servidor al que acabamos de conectar, y ese servidor no es de fiar — responder 302
+    hacia `169.254.169.254` o hacia un host fuera de la allowlist es el ataque más
+    barato contra un buscador. Con `follow_redirects=True` el cliente decide a dónde ir
+    y esa decisión no pasa por `check_url()`: se comprobó que acababa conectando a la IP
+    de metadatos pese a estar marcada como no pública. Así que cada salto se valida con
+    la MISMA política antes de abrir la conexión siguiente, y un destino rechazado no se
+    contacta ni se devuelve.
+
+    `allowed_domains` viaja aquí a propósito: sin él, la allowlist sólo filtraría la
+    puerta de entrada y cualquier redirect la convertiría en decorativa.
+    """
     import httpx
 
+    permitido, razon = check_url(url, allowed_domains)
+    if not permitido:
+        raise FetchBlocked(f"destino bloqueado: {razon}")
+
     async with httpx.AsyncClient(
-        follow_redirects=True,
+        follow_redirects=False,  # los saltos se validan uno a uno más abajo
         timeout=timeout,
         headers={"User-Agent": "ALEXIS-research/0.3 (static text only)"},
         cookies={},
     ) as client:
-        response = await client.get(url)
-        if response.status_code != 200:
-            raise RuntimeError(f"HTTP {response.status_code}")
-        encoding = response.charset_encoding or "utf-8"
-        return response.text[:MAX_TEXT_BYTES * 4]  # margen para el tag-stripping
+        actual = url
+        for salto in range(MAX_REDIRECTS + 1):
+            try:
+                response = await client.get(actual)
+            except httpx.RemoteProtocolError as exc:
+                # httpx construye SIEMPRE la request de redirección, incluso con
+                # `follow_redirects=False` (sólo la guarda en `response.next_request`).
+                # Un `Location` corrupto lo revienta ahí, antes de que este módulo pueda
+                # mirarlo. Es un rechazo de destino disfrazado de error de red, y quien
+                # llama debe poder distinguirlo.
+                raise FetchBlocked(f"redirección malformada (salto {salto + 1}): {exc}") from exc
+            if not response.is_redirect:
+                if response.status_code != 200:
+                    raise RuntimeError(f"HTTP {response.status_code}")
+                encoding = response.charset_encoding or "utf-8"
+                return response.text[:MAX_TEXT_BYTES * 4]  # margen para el tag-stripping
+
+            # Un 3xx sin `Location` no lleva a ninguna parte: no se reintenta a ciegas.
+            location = response.headers.get("location") or ""
+            if not location.strip():
+                raise RuntimeError(f"HTTP {response.status_code} sin cabecera Location")
+
+            # `urljoin` contra la URL actual: una `Location` relativa ("/otra") es
+            # legítima y debe resolverse sobre el origen, no rechazarse ni tratarse como
+            # absoluta. `urljoin` puede lanzar `ValueError` con referencias malformadas
+            # (`http://[::1` → IPv6 sin cerrar) y el `Location` lo elige el servidor
+            # remoto: sin capturarlo, un Location corrupto tumbaría la descarga en vez
+            # de rechazarse.
+            try:
+                siguiente = urljoin(actual, location.strip())
+            except ValueError as exc:
+                raise FetchBlocked(f"redirección inválida (salto {salto + 1}): {exc}") from exc
+            permitido, razon = check_url(siguiente, allowed_domains)
+            if not permitido:
+                raise FetchBlocked(
+                    f"redirección bloqueada (salto {salto + 1} hacia {siguiente}): {razon}"
+                )
+            actual = siguiente
+
+    raise RuntimeError(f"demasiadas redirecciones (más de {MAX_REDIRECTS})")
 
 
 # --------------------------------------------------------------------------- #
@@ -367,7 +449,15 @@ class BrowserResearchTool:
                 discarded.append({"url": url, "stage": "policy", "reason": reason})
                 continue
             try:
-                html = await self.fetch_fn(url, timeout)
+                # `domains` viaja al descargador: sin él, cada salto de redirección se
+                # validaría contra una allowlist vacía, es decir, contra ninguna.
+                html = await self.fetch_fn(url, timeout, domains)
+            except FetchBlocked as exc:
+                # Destino prohibido por política. Se descarta y, sobre todo, NO se
+                # reintenta: reintentar un destino que la política rechazó es
+                # exactamente lo que el sistema no debe hacer por su cuenta.
+                discarded.append({"url": url, "stage": "policy", "reason": str(exc)})
+                continue
             except Exception as exc:  # noqa: BLE001 — una fuente caída no tumba la búsqueda
                 discarded.append({
                     "url": url, "stage": "fetch",
@@ -445,9 +535,11 @@ def build_browser_tools(**over: Any) -> list[Tool]:
 
 __all__ = [
     "ALLOWED_ARGS",
+    "MAX_REDIRECTS",
     "MAX_SOURCES",
     "MAX_TEXT_BYTES",
     "BrowserResearchTool",
+    "FetchBlocked",
     "build_browser_tools",
     "check_url",
     "html_to_text",

@@ -1239,6 +1239,30 @@ def start_services(rt: OfficialRuntime) -> dict:
     """
     from alexis.self.sync import SelfModelSync
 
+    # Idempotencia. Arrancar dos veces crearía un segundo worker, un segundo SelfModelSync
+    # y un segundo AuditSink: tres consumidores más del mismo bus escribiendo en el mismo
+    # PostgreSQL. `stop_services()` ya era idempotente; aquí faltaba la garantía simétrica,
+    # y `test_core04_http_e2e.py` afirmaba en un comentario que repetirla no rompía nada
+    # mientras ninguna prueba lo comprobara.
+    #
+    # Se devuelve el estado YA en marcha en lugar de relanzar: quien llama (test o
+    # producción) recibe la misma forma de retorno y puede afirmar sobre una sola
+    # instancia, en vez de tener que distinguir dos caminos.
+    #
+    # OJO con la simetría: `stop_services()` CIERRA la base de datos, así que es
+    # terminal para ese runtime, no una pausa. "Parar y volver a arrancar" no es una
+    # operación soportada sobre el mismo objeto: tras un stop hay que construir un runtime
+    # nuevo, que es lo que hacen la fixture y `main()`. La guarda no cambia ese contrato.
+    if rt.extras.get("services_started"):
+        return {
+            "self_sync": rt.extras.get("self_sync"),
+            "worker_started": rt.extras.get("worker_task") is not None,
+            "recovered": [],
+            "audit_sink": rt.extras.get("audit_sink"),
+            "worker_task": rt.extras.get("worker_task"),
+            "already_started": True,
+        }
+
     # CORE-07: antes de encender nada, el Self Model recupera lo que aprendió en
     # ejecuciones anteriores. Sin esto, `SelfModel(...)` nacía vacío y toda lección,
     # auto-observación y reflexión verificadas se perdían al reiniciar.
@@ -1323,6 +1347,7 @@ def start_services(rt: OfficialRuntime) -> dict:
         "recovered": recovered,
         "audit_sink": audit_sink,
         "worker_task": rt.extras.get("worker_task"),
+        "already_started": False,
     }
 
 

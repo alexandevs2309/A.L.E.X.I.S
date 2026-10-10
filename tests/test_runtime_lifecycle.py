@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 from types import SimpleNamespace
 
 import pytest
@@ -128,3 +129,78 @@ async def test_stop_services_stops_worker_observers_and_database():
         "stopped": False,
         "reason": "services_not_started",
     }
+
+
+# ---------------------------------------------------------------------- #
+# P1-3: `start_services()` es idempotente
+# ---------------------------------------------------------------------- #
+
+
+def _runtime_minimo():
+    """Runtime con la forma que `start_services`/`stop_services` tocan.
+
+    Se construye aquí, y no con el runtime real del E2E, porque `stop_services` **cierra
+    la base de datos**: parar los servicios de un runtime compartido deja al resto de los
+    tests sinalmacén de misiones, y el daño se manifiesta lejos de su causa.
+    """
+    from apps.demo import app as app_module
+
+    class _DB:
+        async def close(self):
+            pass
+
+    class _Service:
+        def __init__(self):
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+
+    rt = SimpleNamespace(
+        worker=None,
+        extras={
+            "services_started": True,
+            # Una `Future` real: `stop_services` la cancela/espera como a una real.
+            "worker_task": concurrent.futures.Future(),
+            "self_sync": _Service(),
+            "audit_sink": _Service(),
+        },
+        storage={"db": _DB()},
+        events=EventBus(),
+        loop=None,
+        runtime=None, tools=None, running=None, state=None, self_model=None,
+        enabled_capabilities=[],
+    )
+    return rt, app_module
+
+
+def test_arrancar_sobre_servicios_ya_encendidos_no_crea_duplicados():
+    """La guarda evita un segundo worker, sync y audit sink.
+
+    Sin ella, cada llamada añadía otro consumidor del mismo bus. El runtime ya llega
+    encendido aquí, que es exactamente la condición que se quiere proteger.
+    """
+    rt, app_module = _runtime_minimo()
+
+    resultado = app_module.start_services(rt)
+
+    assert resultado["already_started"] is True
+    # Lo que estaba en marcha sigue siendo lo único en marcha.
+    assert rt.extras["worker_task"] is resultado["worker_task"]
+    assert rt.extras["services_started"] is True
+
+
+def test_arrancar_tres_veces_es_la_misma_operacion():
+    rt, app_module = _runtime_minimo()
+
+    seen = [app_module.start_services(rt) for _ in range(3)]
+
+    assert [r["already_started"] for r in seen] == [True, True, True]
+    assert len({id(r["worker_task"]) for r in seen}) == 1
+
+
+# `stop_services()` cierra la base de datos y `start_services()` no la reabre: parar es
+# TERMINAL para un runtime, no una pausa. Por eso aquí NO hay un test de "parar y volver a
+# arrancar" sobre el mismo objeto: no es una operación soportada, y una prueba que la
+# fingiera daría una garantía falsa. La terminalidad está documentada en `start_services`
+# y la fixture `oficial` construye un runtime nuevo, que es el camino real.

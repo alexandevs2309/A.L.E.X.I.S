@@ -36,6 +36,14 @@ LOGGER = logging.getLogger("alexis.models.audit_sink")
 #: Evento del bus que este sink consume.
 TOPIC_MODEL_ROUTED = "model.routed"
 
+#: Tope de tiempo para drenar lo pendiente al apagar. Sin él, un `stop()` durante un
+#: atasco de base de datos bloquearía el apagado indefinidamente.
+_DRAIN_TIMEOUT_S = 5.0
+#: Inactividad que cierra el drenaje: la cola ya está vacía.
+_DRAIN_IDLE_S = 0.5
+#: Umbral a partir del cual un acumulamiento se avisa (no se descarta).
+_WARN_PENDING = 500
+
 #: Campos de procedencia que el sink copia a `details`. Son los que
 #: `ModelResponse.audit_event()` produce; el sink no los inventa ni los recalcula.
 PROVENANCE_FIELDS = (
@@ -76,11 +84,17 @@ class AuditSink:
     # ------------------------------------------------------------------ #
 
     def attach(self, bus, loop) -> "AuditSink":
-        """Se suscribe al bus oficial y empieza a consumir. Devuelve `self`."""
+        """Se suscribe al bus oficial y empieza a consumir. Devuelve `self`.
+
+        `critical=True` es obligatorio aquí, y no una preferencia: este consumidor es el
+        ÚNICO camino de `model.routed` a `audit_log`. Con la cola acotada del bus, una
+        saturación descartaba el registro de auditoría de una decisión de modelo sin
+        dejar rastro (medido: 50 de 150). Con `critical=True` la entrega es sin pérdida.
+        """
         if self._task is not None:
             return self
         self._bus = bus
-        self._sub = bus.subscribe_async()
+        self._sub = bus.subscribe_async(critical=True)
         self._task = loop.create_task(self._consume())
         return self
 
@@ -101,9 +115,29 @@ class AuditSink:
             if item.get("topic") != self.topic:
                 continue
             await self.handle(item.get("payload") or {})
+            self._warn_if_backed_up()
 
     async def stop(self) -> None:
-        """Detiene el consumo. Para tests y para un apagado ordenado."""
+        """Detiene el consumo tras **drenar** lo pendiente. Para tests y apagado.
+
+        Antes cancelaba la tarea directamente, lo que descartaba en silencio todo lo que
+        ya estaba aceptado en la cola: esos eventos no se habían perdido, se habían
+        DEJADO de persistir. Aquí primero se drena con un tope de tiempo y después se
+        cancela. Lo que no se logre drenar dentro del tope se registra de forma visible;
+        no se declara éxito en silencio.
+        """
+        if self._sub is not None and self._task is not None and not self._task.done():
+            pendientes = self._sub.qsize()
+            if pendientes:
+                await asyncio.wait_for(self._drain(), timeout=_DRAIN_TIMEOUT_S)
+                restantes = self._sub.qsize()
+                if restantes:
+                    LOGGER.warning(
+                        "audit_sink: %d eventos sin persistir tras %.1fs de drenaje; "
+                        "el registro de auditoría queda incompleto de forma visible",
+                        restantes,
+                        _DRAIN_TIMEOUT_S,
+                    )
         task = self._task
         self._task = None
         if task is not None and not task.done():
@@ -116,6 +150,31 @@ class AuditSink:
             self._bus.unsubscribe_async(self._sub)
         self._sub = None
         self._bus = None
+
+    async def _drain(self) -> None:
+        """Consume lo pendiente sin bloquear el apagado más de `_DRAIN_TIMEOUT_S`."""
+        while True:
+            try:
+                item = await asyncio.wait_for(self._sub.get(), timeout=_DRAIN_IDLE_S)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                return
+            if item.get("topic") != self.topic:
+                continue
+            await self.handle(item.get("payload") or {})
+
+    def _warn_if_backed_up(self) -> None:
+        """Un acumulamiento sostenido es un problema observable, no un detalle.
+
+        Con `critical=True` la cola no tiene cota, así que nada se pierde; lo que podría
+        agotarse es la memoria si la base de datos deja de ir al ritmo. Eso se avisa.
+        """
+        pending = self._sub.qsize() if self._sub is not None else 0
+        if pending >= _WARN_PENDING:
+            LOGGER.warning(
+                "audit_sink: %d eventos sin persistir; la escritura va más lenta que "
+                "la producción. La entrega sigue sin pérdida, pero la memoria crece.",
+                pending,
+            )
 
     # ------------------------------------------------------------------ #
     # Escritura

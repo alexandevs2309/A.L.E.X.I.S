@@ -62,6 +62,10 @@ uno parcial, porque produce falsos positivos (el sistema *parece* cumplirlo).
 
 ### Resumen
 
+Este bloque es el **histórico de §2** (2026-09-25). El veredicto vigente está en **§8**,
+re-auditado contra el código actual. No se borra el original: sin él no se puede ver qué
+cambió ni con qué evidencia.
+
 | Veredicto | Cantidad | Requisitos |
 |---|---|---|
 | COMPLETE | 11 | 5, 8, 9, 10, 11, 12, 14, 15, 16, 17, 20 |
@@ -679,3 +683,55 @@ requisitos a medias, entre ellos el 6 (secuencia fija) y el 7 (faltan campos por
 Conviven dos esquemas: estos incrementos (§5.1–§5.5) y el §13 que añadieron los commits
 posteriores para lo que aquí es §5.7. Un «§13» no significa nada para quien lea
 `plan_ejecution.md`. Pendiente de unificar en una sola tabla de incrementos.
+
+---
+
+## 8. Re-auditoría de los 22 requisitos (2026-10-10, commit `e8b6c82` + correcciones de cierre)
+
+Motivo: §2 tenía siete semanas y declaraba `PARTIAL` o `MISSING` en capacidades que ya
+existen. Un criterio de cierre que se evalúa contra una línea base equivocada no es un
+criterio. Cada veredicto de aquí está anclado a un fichero o a una prueba; donde no se
+pudo probar, se declara `PARTIAL` **aunque la implementación exista**.
+
+Medido con `ALEXIS_DATABASE_URL` configurada y el contenedor `alexis-pg-a1` en pie: sin
+esa variable, **123 pruebas se omiten** y una suite verde no demostraría persistencia.
+
+### Cerrados desde §2 (antes `PARTIAL` / `MISSING`)
+
+| # | Cambio | Evidencia verificada |
+|---|---|---|
+| 1 | Intent Engine `COMPLETE` | `IntentKind.COMMAND` existe (`alexis/cognition/contracts.py:39`) y está en el conjunto de kinds `:55` |
+| 4 | World Model `COMPLETE` | `WorldRepository` (`alexis/storage/repositories.py:294`) persiste; hay E2E con DB real: `test_world_determinism_recovery.py::test_04_e2e_proceso_a_persiste_y_proceso_b_reconstruye(db)` |
+| 7 | Dynamic Planning `COMPLETE` | `PlanStep` tiene `objective` y `success_criteria` (`alexis/contracts.py`, campos 19-20 del dataclass) |
+| 13 | Ask User `COMPLETE` | `runtime.resume_from_clarification` + ciclo completo con reinicio: `test_p0_13_ask_user.py::test_25/test_26` |
+| 18 | Persistence `COMPLETE` | **decisiones**: el loop cognitivo graba (`alexis/cognition/loop.py:1644`) en `mission.context["decisions"]`, serializado entero (`serialization.py:40`). **reflexión**: `self_learnings` acepta `'reflection'` (`schema.py:44`) y `SelfModelPersistence.save()` persiste `reflections` (`persistence.py:61,79`) |
+| 19 | Recovery `COMPLETE` | Reanudación que no reinicia, con DB real: `test_s3_s4.py::test_checkpoint_resumes_not_restarts(db)` |
+| 21 | Behavioral Tests `COMPLETE` | El test de *false success* que §5.9 declaraba "hoy inexistente" existe: `test_p0_requisito11_verificacion_semantica.py::test_a2_sin_lectura_la_mision_no_cierra_aunque_el_archivo_exista` |
+| 22 | End-to-End `COMPLETE` | Mismo test: la misión **no** se reporta completada sin evidencia. El "sigue fallando" de §2 ya no aplica |
+| 23 | Ejecución real de tests | `execute.test` con `status="base"` (`catalog.py:187`), tool y sandbox reales |
+
+### Abiertos (se conservan; no se rebajan criterios)
+
+| # | Veredicto | Evidencia |
+|---|---|---|
+| 2 | `PARTIAL` | Existe `Context` (`cognition/context.py:80`), pero el objeto de contexto cognitivo **no se persiste como tal**; lo que viaja es `mission.context` |
+| 3 | `PARTIAL` | `alexis/security/policy.py` **no consulta** el Self Model: sigue sin participar en la decisión de autorización |
+| 6 | `PARTIAL` | El planner usa el objetivo (47 referencias) y tiene `plan_from_skill`, pero **no se ha demostrado** que la secuencia de pasos sea derivada del objetivo y no una plantilla |
+
+### Cierre de §5.9
+
+Los tres puntos que §5.9 pedía para cerrar P0:
+
+1. *Test de `false success` a nivel de objetivo* → **existe** (`test_a2`, ver #21/#22).
+2. *Test de recuperación del loop cognitivo a mitad de misión* → **existe** (`test_s3_s4::test_checkpoint_resumes_not_restarts`, ver #19).
+3. *Re-auditar los 22 requisitos* → **este apartado**.
+
+### Cifras vigentes
+
+- Suite obligatoria: **1628 passed, 4 deselected, 0 failed** con `-W error` y PostgreSQL.
+- Sin `ALEXIS_DATABASE_URL`: 1505 passed, **123 skipped**. La persistencia **no** está
+  demostrada en esa ejecución.
+
+### Estado
+
+**16 COMPLETE · 3 PARTIAL (2, 3, 6) · 0 BROKEN · 0 MISSING.**
