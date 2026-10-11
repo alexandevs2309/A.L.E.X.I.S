@@ -99,6 +99,42 @@ Lo que evita es que la confirmación se repita en cada llamada, y eso lo decide 
 aprobanación, no la tool. Una preferencia persistente que autoriza exfiltración de
 credenciales es exactamente el tipo de atajo que un control explícito existe para impedir.
 
+> ### ⚠️ LIMITACIÓN CONOCIDA: `git.push` no puede ejecutarse dentro del sandbox
+>
+> Verificado el 2026-10-11, durante la auditoría de la Fase 1. `git.push` está declarada
+> `status="available"` en el catálogo y sus pruebas pasan, pero **no puede hacer su
+> trabajo**:
+>
+> ```
+> $ git push https://host/x.git master
+> error: cannot fork() for remote-http: Resource temporarily unavailable
+> ```
+>
+> **Causa:** `SandboxRunner` aplica `RLIMIT_NPROC = 16` (`security/sandbox.py:31`). En
+> Linux ese límite cuenta los procesos **del usuario entero**, no los del sandbox, y un
+> usuario con más de 16 procesos abiertos no puede bifurcar. El fork inicial del proceso
+> sí ocurre —los límites se aplican en el hijo, después—, por eso el comando arranca y
+> falla al bifurcar su helper `remote-http`.
+>
+> **Consecuencia doble, y por eso importa conocerla:**
+>
+> 1. `git.push` es una capability declarada y **no operativa** en el sandbox. Es la
+>    divergencia entre catálogo y realidad que este repo se exige no tener.
+> 2. El comportamiento **depende de la carga de la máquina**: con pocos procesos, el push
+>    funcionaría; con muchos, no. Y `setrlimit` va envuelto en un
+>    `try/except (ValueError, OSError): pass`, así que si el sistema lo rechaza, el límite
+>    desaparece **en silencio** y el sandbox queda sin esa defensa sin avisar.
+>
+> **No es una regresión de la validación de remoto.** Con la validación desactivada, el
+> destino señuelo sigue recibiendo 0 peticiones — por el límite de procesos, no por la
+> validación. Son dos barreras independientes y la segunda está de paso. Lo que sí está
+> probado es que la validación rechaza **antes de lanzar el proceso** (`rejected=True` con
+> el motivo de la dirección), y que `git.push` exige aprobación explícita en los tres
+> niveles de autonomía con cualquier valor de `auto_approve` —que ninguna regla consulta.
+>
+> **Pendiente de decidir:** subir `RLIMIT_NPROC`, sacar `git.push` del sandbox, o
+> devolverlo a `status="missing"`. Ninguna de las tres se ha aplicado.
+
 **Límite honesto:** la validación dice a qué dirección puede publicar *esta* tool. No
 impide que otra tool abra un socket, y no sustituye un namespace de red.
 
