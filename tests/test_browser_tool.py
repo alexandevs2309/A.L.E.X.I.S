@@ -8,6 +8,7 @@ que prometiera red real no probaría la tool, probaría su networking.
 from __future__ import annotations
 
 import asyncio
+import socket
 
 import pytest
 
@@ -66,6 +67,44 @@ def _basic():
 @pytest.fixture
 def basic():
     return _basic()
+
+
+#: IP pública de ejemplo para el resolvedor de test. No se conecta a ella nunca en este
+#: fichero: los destinos que se descargan de verdad son locales y pasan por otro camino.
+IP_PUBLICA_TEST = "93.184.216.34"
+
+
+@pytest.fixture(autouse=True)
+def dominios_ficticios_resuelven(monkeypatch):
+    """Hace que los dominios de ejemplo resuelvan a una IP pública.
+
+    Desde que `check_url` RESUELVE en vez de mirar sólo la sintaxis, un host que no
+    existe se rechaza —y está bien que se rechace: no se conecta a lo que no se ha
+    podido comprobar—. Los dominios `*.example.com` de estos tests no existen, así que
+    sin este fixture fallarían por una razón que no es la que están probando.
+
+    No se toca la política: aquí no hay nada sobre allowlist, SSRF ni redirecciones. Se
+    sustituye el ENTORNO —el DNS—, no el código bajo prueba. El comportamiento de
+    "no resuelve ⇒ se bloquea" tiene su propio test, en `test_browser_dns_rebinding.py`.
+    """
+    real = socket.getaddrinfo
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        nombre = host.decode() if isinstance(host, (bytes, bytearray)) else str(host)
+        # `a.example.com`, `sub.example.com`… No `.example`: son sufijos reales bajo
+        # `example.com`, y un filtro mal escrito daría verde por la razón equivocada.
+        # `a.example.com`, `sub.example.com`, `example.com` y `a.com`. Este último no es
+        # un nombre de ejemplo sino un host real que en esta red no resuelve, y se usa
+        # aquí como "alguna web". No se sustituye el DOWNLOAD: cuando estos tests
+        # descargan de verdad es contra un servidor local registrado, que pasa por otro
+        # camino. Aquí sólo se evita que la validación los rechace por un DNS que no es
+        # lo que se está probando.
+        limpio = nombre.rstrip(".").lower()
+        if limpio.endswith(".example.com") or limpio in ("example.com", "a.com"):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (IP_PUBLICA_TEST, port or 0))]
+        return real(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
 # --- Contrato de la tool ---------------------------------------------------- #

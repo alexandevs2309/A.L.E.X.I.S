@@ -85,10 +85,14 @@ class _Servidor:
 
 @pytest.fixture
 def url_registrada(monkeypatch):
-    """Deja pasar por `check_url` únicamente los URLs de los servidores de test.
+    """Deja pasar únicamente los URLs de los servidores de test.
 
     Se anotan a medida que se crean. Cualquier otro destino —incluidos los que un
     servidor de test intentaría redirigir— pasa por la política real intacta.
+
+    Relaja DOS puertas por el mismo motivo: `check_url` (la política) y `resolve_public`
+    (la resolución que además se conecta). Desde que la validación resuelve la dirección,
+    relajar sólo la primera dejaría el bucle cerrado contra el propio servidor de test.
     """
     permitidos: set[str] = set()
     real = check_url
@@ -103,7 +107,11 @@ def url_registrada(monkeypatch):
         partes = urlparse(url)
         return f"{partes.scheme}://{partes.netloc}".rstrip("/")
 
-    def check_url_de_test(url, allowed_domains=None):
+    def check_url_de_test(url, allowed_domains=None, *, resuelto=None):
+        # `resuelto` es la resolución que `http_fetch` ya hizo y va a fijar. Se acepta
+        # para no romper la firma, pero NO se usa: este doble delega íntegro en la
+        # implementación real, que es lo que garantiza que esquema, puertos, allowlist y
+        # clasificación de IP sigan ejecutándose de verdad aquí.
         try:
             if _origin(url) in permitidos:
                 return True, ""
@@ -112,6 +120,24 @@ def url_registrada(monkeypatch):
         return real(url, allowed_domains)
 
     monkeypatch.setattr(browser_mod, "check_url", check_url_de_test)
+
+    # `resolve_public` es la MISMA política aplicada a la resolución que se conecta, así
+    # que tiene que relajarse por el mismo motivo y en las mismas condiciones: un servidor
+    # de test vive en loopback, que la política prohibe. Se relaja EXACTAMENTE lo mismo
+    # que `check_url` —los orígenes anotados— y nada más: `check_url_de_test` delega en
+    # la implementación real para todo lo demás, y aquí se hace igual.
+    # Se relaja por ORIGEN (host:puerto), nunca por host suelto: este mismo fichero
+    # comprueba que una redirección a `127.0.0.1` SÍ se bloquea, así que si la
+    # relajación fuera por host, ese test dejaría de comprobar nada.
+    real_resolve = browser_mod.resolve_public
+
+    def resolve_de_test(host, puerto=None):
+        candidato = f"http://{host}:{puerto}" if puerto else f"http://{host}"
+        if candidato in permitidos:
+            return [host], ""
+        return real_resolve(host, puerto)
+
+    monkeypatch.setattr(browser_mod, "resolve_public", resolve_de_test)
 
     class Registro:
         def anota(self, *urls: str) -> None:

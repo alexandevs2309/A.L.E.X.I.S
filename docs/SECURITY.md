@@ -67,34 +67,68 @@ Currently, network egress is controlled at the **application level**. The contro
 - Therefore, any new network-capable tool must reuse `check_url()` and the injection screen rather than assuming the sandbox will stop it. The controls are per-tool and opt-in, not centrally enforced.
 - Any claim that `sandbox_profile` blocks network access would be incorrect. It does not: it only gates whether a tool is *permitted* to run with a network-enabled profile.
 
-## Known residual risk: DNS rebinding is NOT mitigated
+## DNS rebinding: MITIGATED at address level (2026-10-11)
 
-**This section states a limitation, not a control.** No claim of protection is made here.
+**This section states a control, and what it does not cover.** The claim is deliberately
+narrower than "SSRF is solved".
 
-`check_url()` validates the *string* of a URL. It does not resolve the name, and it does
-not pin the address the connection actually uses. A hostname that passes the check can
-resolve — at connection time — to a private, loopback or link-local address.
+`check_url()` used to validate the *string* of a URL: it did not resolve the name, and it
+did not pin the address the connection actually used. A hostname that passed the check
+could resolve — at connection time — to a private, loopback or link-local address. That
+was documented here as an unmitigated residual risk, and at the time it was accurate.
 
-Concretely, with `browser.research`: a domain that appears in search results (an ordinary
-situation, not an edge case) is accepted by `check_url()`; if its DNS later points at
-`169.254.169.254`, `httpx` connects there. The redirect correction above does **not** close
-this: it validates every hop, but each hop is still validated by name, not by address.
+It is no longer accurate. The control has three parts, and the third is the one that
+matters:
 
-**Why this is documented rather than fixed here:**
+1. **The name is resolved.** `resolve_public()` resolves the host and checks **every**
+   address returned. A literal IP is classified without any network call.
+2. **One bad address condemns the set.** If any resolved address is private, the whole
+   set is rejected. Keeping "the public one" would leave the internal one available for
+   whenever the attacker chose, because the final choice among addresses is the HTTP
+   client's, not this code's.
+3. **The connection is pinned.** `http_fetch()` resolves once, validates that result, and
+   connects to that address through a custom network backend. The connection does **not**
+   re-resolve, so there is no window between checking and connecting. TLS is unaffected:
+   httpcore applies it separately with `server_hostname=origin.host`, so SNI and `Host`
+   remain the real name.
 
-- Exploitation requires *both* an attacker-controlled hostname reaching the results (or the
-  allowlist) *and* a deployment where internal HTTP services are reachable from the ALEXIS
-  process. Neither condition is demonstrated in this repository.
-- The robust fix — resolve, validate every returned address, then pin the connection to it —
-  is non-trivial and belongs with the network-namespace work described below. Adding it
-  piecemeal without that would give the *appearance* of a guarantee.
+If DNS resolution **fails**, the destination is rejected. Failing open would reopen the
+very risk this closes: an attacker controls when their own DNS fails.
 
-**Acceptance conditions.** This risk is accepted for this version **only if** ALEXIS does
-not run with access to cloud instance metadata from the same network namespace, or the
-operator accepts that a hostile web domain could reach services on ports 80/443 of the
-host running ALEXIS. **If ALEXIS is deployed where `169.254.169.254` is reachable and holds
-instance credentials, this acceptance does not hold and the CORE must not be declared
-closed without address-level validation.** That is a deployment precondition, not a code
-defect, and it is the operator's to decide.
+**Contract change worth knowing:** `check_url()` now needs to resolve. A host that does
+not exist is therefore blocked — which is the point, but it means a transient DNS
+outage now stops the fetch instead of letting it through unverified. Existing tests that
+used fictitious domains had to be given a resolver (`tests/test_browser_tool.py`); no test
+was weakened to compensate.
 
-**How to close this properly (future work):** run each tool in a network namespace (`unshare(CLONE_NEWNET)`) with egress restricted to an allowlist; this needs either privileges or a user namespace, and is the reason the limitation is architectural rather than a defect.
+**What this does not cover:**
+
+- **The controls are per-tool and opt-in, still.** Nothing stops a future network-capable
+  tool from opening a socket unless it calls `resolve_public()` itself.
+  `browser.research` does; a new tool must too. There is no central enforcement.
+- **`allowed_domains` is checked before the name is resolved.** Deliberate: a host
+  outside the allowlist is rejected either way, so asking DNS about it would be a wasted
+  query and an unnecessary outbound leak.
+- **This is not network isolation.** It says which address this tool may connect to. It
+  does not constrain other processes, and it does not replace a network namespace.
+
+**Evidence:** `tests/test_browser_dns_rebinding.py` (12 tests). Four contrapruebas confirm
+the tests are sensitive to the control and not to its surroundings: removing the pin,
+removing the resolution, failing open, and accepting a mixed address set each fail
+exactly the test that should catch them.
+
+**Why it stayed open so long:** adding it piecemeal gives the *appearance* of a guarantee
+without closing it, which is worse than an honest "not mitigated". Validating the name
+without pinning the connection is exactly that — it stops the naive attack and leaves the
+one an attacker can time.
+
+**Recorded because it is the failure mode a green suite hides best:** an earlier version
+of the pinning test passed *with the pin removed*. It simulated the attacker's bad answer
+on the second DNS query, where the code's own fail-closed caught it — green for a reason
+unrelated to what it claimed to measure. The test was only honest once the bad answer
+moved to the query that actually opens the socket.
+
+**Still worth doing later:** run each tool in a network namespace (`unshare(CLONE_NEWNET)`)
+with egress restricted to an allowlist. That needs privileges or a user namespace, and it
+is defence in depth: this control decides the destination, the namespace constrains what
+can be reached at all.
