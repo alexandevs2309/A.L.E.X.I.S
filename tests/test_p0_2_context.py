@@ -257,6 +257,66 @@ def test_10_el_contexto_sobrevive_a_la_persistencia():
     assert ctx.has("envelope") and ctx.has("capabilities")
 
 
+async def test_10b_el_contexto_sobrevive_a_postgres_real(db):
+    """Req 2 cerrado por EVIDENCIA: el round-trip pasa por la base de datos.
+
+    `test_10` anterior recorría `mission_to_row` / `mission_from_row`, que es un round-trip
+    **en memoria**: demuestra que la serialización conserva el contexto, no que lo haga
+    la persistencia de verdad. El tramo que faltaba es `MissionRepository` → JSONB →
+    `MissionRepository.get()`, y no es equivalente: JSONB no es JSON. Reordena claves,
+    normaliza números y rechaza `NaN`/`Infinity`. Un `Context` puede pasar intacto por
+    `json.dumps` y perder algo al tocar Postgres.
+
+    Por eso la aserción es de **igualdad completa** y no de "dos claves presentes": se
+    compara el contexto entero antes y después de la base. Es estrictamente más fuerte que
+    la prueba anterior, y si algo se pierde durante el viaje el fallo dice exactamente
+    qué, en vez de pasar por una comprobación que no miraba los valores.
+
+    El objeto recuperado es otro —lo construye `mission_from_row` a partir de la fila—,
+    así que el original no puede estar haciéndose pasar por persistido.
+    """
+    from alexis.storage.repositories import MissionRepository
+
+    cognitive = _cognitive(catalog=build_catalog())
+    mission = _mission("lee el informe trimestral")
+    mission.context["conversation"] = ["lee el informe trimestral", "y resume el Q3"]
+
+    ctx = cognitive.build_context(mission, _knowledge())
+    esperado = ctx.to_dict()
+    assert esperado, "el contexto construido no puede estar vacío"
+
+    repo = MissionRepository(db)
+    await repo.upsert(mission)
+
+    # La fila existe de verdad, con el contexto dentro de la columna JSONB.
+    [fila] = await db.fetch(
+        "SELECT context FROM missions WHERE id = %(id)s", {"id": mission.id}
+    )
+    assert fila["context"] is not None
+    assert "context" in fila["context"], "la columna JSONB no lleva la clave 'context'"
+
+    recuperada = await repo.get(mission.id)
+    assert recuperada is not None, "la misión no se pudo releer de PostgreSQL"
+    assert recuperada is not mission, (
+        "repo.get() devolvió el MISMO objeto: el round-trip no habría pasado por la base"
+    )
+    ctx_recuperado = cognitive.context_of(recuperada)
+    assert ctx_recuperado is not None, (
+        "context_of() no reconstruyó nada desde la misión recuperada: el contexto no "
+        "sobrevivió al viaje por la base de datos"
+    )
+
+    # La igualdad completa. Si esto falla, el diff dice qué campo se perdió.
+    assert ctx_recuperado.to_dict() == esperado
+
+    # Y comprobaciones con nombre, para que el fallo se lea sin abrir un debugger.
+    assert ctx_recuperado.mission_id == mission.id
+    assert ctx_recuperado.version == esperado["version"]
+    assert ctx_recuperado.has("envelope")
+    assert ctx_recuperado.has("capabilities")
+    assert ctx_recuperado.has("conversation")
+
+
 def test_11_el_contexto_lleva_version():
     ctx = _full_context()
     assert ctx.version == CONTEXT_VERSION
