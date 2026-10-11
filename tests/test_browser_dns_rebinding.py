@@ -21,8 +21,10 @@ fue consultado y que el servidor local estaba escuchando. Si no hubo resolución
 test falla con un mensaje que lo dice, en vez de pasar en silencio.
 
 Se sustituye el RESOLVEDOR y se registra `socket.connect`: el DNS es el ENTORNO, y el
-entorno se sustituye igual que el reloj en un test de tiempo. `check_url` y
-`_host_is_public` siguen siendo la implementación real, sin tocar. Mismo patrón que
+entorno se sustituye igual que el reloj en un test de tiempo. `check_url`,
+`_host_is_public` y `fetch_text` siguen siendo la implementación real, sin tocar, y ahora
+viven en `alexis/tools/net.py`: el módulo del que este test importa es el que protege a
+toda tool que use la red, no sólo a `browser.research`. Mismo patrón que
 `test_browser_redirects.py`.
 
 Ningún test depende de DNS público, de internet ni de un destino real de metadatos: las
@@ -37,12 +39,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from alexis.tools import browser as browser_mod
-from alexis.tools.browser import (
+from alexis.tools import net as net_mod
+from alexis.tools.net import (
     FetchBlocked,
     _host_is_public,
     check_url,
-    http_fetch,
+    fetch_text,
 )
 
 # IP pública de ejemplo. Nunca se conecta a ella: sólo se usa como valor que
@@ -201,7 +203,7 @@ def puerto_de_test(monkeypatch, servidor):
     siguen siendo los reales.
     """
     monkeypatch.setattr(
-        browser_mod, "ALLOWED_PORTS", frozenset({None, 80, 443, servidor.puerto})
+        net_mod, "ALLOWED_PORTS", frozenset({None, 80, 443, servidor.puerto})
     )
     return servidor.puerto
 
@@ -297,7 +299,7 @@ async def test_un_nombre_que_resuelve_a_loopback_no_llega_a_conectarse(
     # servicio que no es público. Una versión anterior exigía una excepción y por eso
     # reportaba un fallo sin explicar nada; ahora el resultado se lee en las aserciones.
     try:
-        await http_fetch(f"http://portal.example:{puerto_de_test}/", timeout=5)
+        await fetch_text(f"http://portal.example:{puerto_de_test}/", timeout=5)
     except (FetchBlocked, OSError):
         pass
 
@@ -343,7 +345,7 @@ async def test_el_rebinding_entre_validacion_y_conexion_no_llega_a_la_ip_mala(
     # IP pública que no existe en la red de test, y esperar a que agote el plazo no
     # aporta señal —la señal está en `conexiones` y en `dns.llamadas`.
     try:
-        await http_fetch(f"http://rebind.example:{puerto_de_test}/", timeout=2)
+        await fetch_text(f"http://rebind.example:{puerto_de_test}/", timeout=2)
     except (FetchBlocked, OSError, Exception):
         pass
 

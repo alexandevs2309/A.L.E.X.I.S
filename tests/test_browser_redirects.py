@@ -26,7 +26,8 @@ from urllib.parse import urlparse
 
 import pytest
 
-from alexis.tools import browser as browser_mod
+from alexis.tools import browser as browser_mod  # noqa: F401 — superficie pública
+from alexis.tools import net as net_mod
 from alexis.tools.browser import (
     MAX_REDIRECTS,
     BrowserResearchTool,
@@ -95,7 +96,7 @@ def url_registrada(monkeypatch):
     relajar sólo la primera dejaría el bucle cerrado contra el propio servidor de test.
     """
     permitidos: set[str] = set()
-    real = check_url
+    real = net_mod.check_url
 
     def _origin(url: str) -> str:
         """`scheme://host:puerto` — sin ruta, query ni fragmento.
@@ -119,7 +120,11 @@ def url_registrada(monkeypatch):
             return real(url, allowed_domains)
         return real(url, allowed_domains)
 
-    monkeypatch.setattr(browser_mod, "check_url", check_url_de_test)
+    # Se parchea el módulo `net`, no `browser`: la política y el fijado se movieron allí
+    # al dejar de estar dentro de una tool concreta. Parchear `browser` seguiría
+    # importando el nombre pero NO cambiaría el que usa `fetch_text()`, que resuelve el
+    # suyo en su propio globals —el clásico parche que parece funcionar y no hace nada.
+    monkeypatch.setattr(net_mod, "check_url", check_url_de_test)
 
     # `resolve_public` es la MISMA política aplicada a la resolución que se conecta, así
     # que tiene que relajarse por el mismo motivo y en las mismas condiciones: un servidor
@@ -129,7 +134,7 @@ def url_registrada(monkeypatch):
     # Se relaja por ORIGEN (host:puerto), nunca por host suelto: este mismo fichero
     # comprueba que una redirección a `127.0.0.1` SÍ se bloquea, así que si la
     # relajación fuera por host, ese test dejaría de comprobar nada.
-    real_resolve = browser_mod.resolve_public
+    real_resolve = net_mod.resolve_public
 
     def resolve_de_test(host, puerto=None):
         candidato = f"http://{host}:{puerto}" if puerto else f"http://{host}"
@@ -137,7 +142,7 @@ def url_registrada(monkeypatch):
             return [host], ""
         return real_resolve(host, puerto)
 
-    monkeypatch.setattr(browser_mod, "resolve_public", resolve_de_test)
+    monkeypatch.setattr(net_mod, "resolve_public", resolve_de_test)
 
     class Registro:
         def anota(self, *urls: str) -> None:

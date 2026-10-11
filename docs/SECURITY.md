@@ -103,9 +103,25 @@ was weakened to compensate.
 
 **What this does not cover:**
 
-- **The controls are per-tool and opt-in, still.** Nothing stops a future network-capable
-  tool from opening a socket unless it calls `resolve_public()` itself.
-  `browser.research` does; a new tool must too. There is no central enforcement.
+- **Central enforcement is by default, not by sandbox.** `alexis/tools/net.py` is now the
+  single way out: `fetch_text()` resolves, validates and pins. `browser.py` delegates to
+  it and re-exports, so nothing else had to change.
+  `tests/test_network_guard.py` walks `alexis/` looking for raw network primitives and
+  **fails** if one appears in a file that is not in its registry, where every entry has to
+  state where its URL comes from. Forgetting the guard is therefore a red build, not a
+  code review comment nobody reads.
+  Four files are registered today, and only one of them handles a URL that a remote party
+  can choose: the two `perception/` bridges and the model providers take URLs from
+  operator configuration (`--url` flags, `.env`), which is misconfiguration rather than
+  attack. `browser.research` was the only one taking a URL from search results — and it
+  is now the one behind the door.
+- **The registry is a list, not a wall.** An entry can be added without a legitimate
+  reason. What the guard buys is that the addition is *visible in the diff*, next to the
+  question "where does this URL come from". Nobody was asking that before.
+- **The capabilities that would need this and do not exist yet** — `api.http`, `mcp.run`,
+  `iot.mqtt` — are declared `missing`. When they are written the guard will require them
+  to go through `net.py`; that is a design constraint on writing them, not a fix applied
+  afterwards.
 - **`allowed_domains` is checked before the name is resolved.** Deliberate: a host
   outside the allowlist is rejected either way, so asking DNS about it would be a wasted
   query and an unnecessary outbound leak.
