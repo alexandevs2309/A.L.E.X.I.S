@@ -1,5 +1,35 @@
 # ALEXIS — Auditoría Técnica v0.3
 
+> ## ⚠️ DOCUMENTO HISTÓRICO — 2026-09-21. NO DESCRIBE EL ESTADO ACTUAL.
+>
+> Esta auditoría tiene **casi un mes** y describe un ALEXIS que ya no existe. Se conserva
+> por lo que sí vale: **el método** y **la lista de lo que se descubrió entonces**, que
+> son la trazabilidad de por qué el CORE existe como está.
+>
+> **No cites sus tablas como estado actual.** Varias afirmaciones fueron ciertas el
+> 2026-09-21 y hoy son falsas. Se comprobó una por una el 2026-10-11:
+>
+> | Afirmación de esta auditoría | Estado real hoy |
+> |---|---|
+> | "`BasicVerifier` SIEMPRE devuelve `passed=True`" | La clase sigue existiendo, pero **el runtime oficial no la construye**: la verificación de verdad es `GoalVerifier` (+ `FilesystemVerifier`). Lo hay comprobado con un test que parsea el AST (`test_06_el_default_no_modifica_verification`), no con una búsqueda de texto |
+> | "No hay verificación independiente real" | `cognition/goal_verification.py` existe y es **obligatoria**: sin `goal_verified` una misión no puede cerrarse como `COMPLETED` |
+> | "No hay contratos `Task`, `TaskState`, `Checkpoint`" | Los tres existen en `alexis/contracts.py` |
+> | "`planner.py`: plantilla fija de 4 pasos" | El plan se deriva del objetivo y del catálogo real (`_plan_objective_driven`), con la plantilla universal sólo como fallback declarado |
+> | "No hay sandbox" | `alexis/security/sandbox.py` (`SandboxRunner`) |
+> | "No hay defensa contra prompt injection en código" | `alexis/security/untrusted.py` (`detect_injection`), con descarte en vez de saneamiento |
+> | "`AuditLog` NO conectado al runtime" | El runtime recibe `audit_repo` y escribe en `audit_log` |
+> | "Bus no durable; suscriptores no se limpian" | El bus ganó diagnZejez, suscripciones críticas y cierre explícito (`close()`/`is_closed()`) |
+> | "Sin persistencia de misión integrada al runtime" | Repositorios PostgreSQL para misión, tareas, ejecuciones, checkpoints, observaciones y auditoría |
+>
+> **Lo que sí sobrevive de esta auditoría**: la conclusión de fondo de que el CORE necesitaba
+> un ciclo canónico con verificación independiente antes de ampliarse. Esa tesis sigue
+> siendo correcta; lo que cambió fue que se implementó.
+>
+> Para el estado vigente, ver `docs/VISION-ALIGNMENT.md` y
+> `docs/P0-COGNITIVE-CORE-GAP-ANALYSIS.md` §8, que se re-auditaron el 2026-10-11.
+
+# ALEXIS — Auditoría Técnica v0.3
+
 **Fecha:** 2026-09-21
 **Alcance:** repositorio completo (código, infraestructura, documentación, tests).
 **Método:** inspección de código fuente, ejecución de tests, compilación de todo el árbol, análisis de uso cruzado de módulos, revisión de Docker/configuración. Nada fue implementado durante esta auditoría.

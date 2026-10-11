@@ -29,7 +29,7 @@ Nothing is marked complete on the strength of a doc, a class name, or a passing 
 
 | Vision § | Capability | Status | Evidence |
 |---|---|---|---|
-| §2 | Canonical loop | `PARTIAL` | `alexis/cognition/loop.py` — decide→policy→execute→observe→evaluate→replan→verify. Missing: reflection→learn→update as an automatic stage |
+| §2 | Canonical loop | `IMPLEMENTED` *(corregido 2026-10-11; decía `PARTIAL`)* | `alexis/cognition/loop.py` — decide→policy→execute→observe→evaluate→replan→verify, **y el epílogo reflection→experience→learning**, que la fila daba por ausente. Está cableado en el ciclo (`loop.py:2075-2156`): `build_reflection()` produce la reflexión, `_build_experience()` la convierte en experiencia y `LearningBoundary().evaluate()` decide si la lección merece la frontera de aprendizaje. La lección se propone en función de `goal_verified` y de la calidad de la evidencia, no de que el paso terminara. La afirmación anterior era correcta cuando se escribió y dejó de serlo al aterrizar el epílogo; nadie la actualizó |
 | §4.1 | Intelligence separate from capabilities | `IMPLEMENTED` | `alexis/cognition/planner_model.py` proposes; `PlanValidator` disposes; `PolicyEngine`/`AutonomyGate` authorize |
 | §4.2 | Data is not authority | `IMPLEMENTED` | Untrusted content is marked as data in every prompt path; `ClaimGuard` (`alexis/cognition/evidence.py`) never promotes a model claim to FACT |
 | §4.3 | Autonomy inside explicit authority | `IMPLEMENTED` | `MissionEnvelope`, `alexis/security/policy.py`, `alexis/autonomy/gates.py` |
