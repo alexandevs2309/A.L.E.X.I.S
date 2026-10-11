@@ -82,6 +82,7 @@ from alexis.memory.embeddings import HashEmbeddingProvider
 from alexis.tools.browser import build_browser_tools
 from alexis.tools.desktop import build_desktop_tools
 from alexis.tools.filesystem import build_filesystem_tools
+from alexis.tools.git import build_git_tools
 from alexis.tools.testrunner import build_test_tools
 from alexis.tools.registry import ToolRegistry
 from alexis.verification import FilesystemVerifier
@@ -412,6 +413,13 @@ def build_official_runtime(
     # P0 §5.4: execute.test tiene adaptador real; antes sólo existía en el catálogo.
     TOOLS.register_all(build_test_tools(WORKSPACE))
     TOOLS.register_all(build_desktop_tools())
+    # git.* (CORE): lectura acotada por whitelist de verbos, commit confinado al
+    # workspace y push con validación del remoto. Se registra con el UserRepository si
+    # hay base de datos: sólo lo usa git.commit para AVISAR cuando la granularidad
+    # preferida no encaja, nunca para autorizar.
+    TOOLS.register_all(build_git_tools(
+        WORKSPACE, user_repository=storage.get("user")
+    ))
     for t in TOOLS.list():
         cid = TOOL_CAP_MAP.get(t.name)
         if cid and CAPABILITIES.has(cid):

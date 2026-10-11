@@ -67,6 +67,41 @@ Currently, network egress is controlled at the **application level**. The contro
 - Therefore, any new network-capable tool must reuse `check_url()` and the injection screen rather than assuming the sandbox will stop it. The controls are per-tool and opt-in, not centrally enforced.
 - Any claim that `sandbox_profile` blocks network access would be incorrect. It does not: it only gates whether a tool is *permitted* to run with a network-enabled profile.
 
+## git.* — credenciales y validación de comandos
+
+`git.*` (`alexis/tools/git.py`) tiene dos propiedades de seguridad que conviene leer juntas,
+porque ninguna es evidente por su nombre.
+
+**No hay shell.** `SandboxRunner.run()` invoca con `create_subprocess_exec(*argv)`: una
+lista de argumentos, nunca una cadena. En ese modelo `;`, `&&`, `|` y `$( )` son texto
+inerte —no tienen nada que interpretar—. La whitelist de verbos de `git.read` es la
+segunda capa, no la primera: impide que a `git.read` le pidan `commit`, que quizá sea
+válido pero no es lectura. Los metacarácter se rechazan igualmente y con un motivo
+explicado en el mensaje, para que el intento quede en la traza en vez de ignorarse.
+
+**Las credenciales no las maneja este código.** No se leen, no se almacenan y no se
+registran. El entorno que el sandbox construye es fijo y sin secretos (`PATH`, `HOME`,
+`LANG`); quien autentica es git, con la configuración que ya tenga el repositorio, y lo
+que hace ALEXIS es no molestar en ella. Lo que sí se neutraliza es `GIT_TERMINAL_PROMPT`,
+para que un push sin credenciales falle en vez de quedarse esperando una entrada que
+nadie va a dar.
+
+**`git.push` valida el remoto, y esa comprobación no es opcional.** El sandbox NO aísla la
+red —su propio docstring lo dice— así que publicar abre un socket que ninguna otra capa
+vería. Sin la validación, un `origin` apuntando a `https://otro-host/x` recibe lo que el
+credential helper tuviera preparado: exfiltración de credenciales silenciosa. Por eso
+`git.push` resuelve el remoto y lo comprueba con `net.resolve_public()`, **la misma
+función que protege a `browser.research`**, y por qué es la misma y no una copia: dos
+implementaciones de la misma política se separan con el tiempo.
+
+La preferencia `auto_approve_git_push` **no salta esta comprobación**, ni ninguna otra.
+Lo que evita es que la confirmación se repita en cada llamada, y eso lo decide la capa de
+aprobanación, no la tool. Una preferencia persistente que autoriza exfiltración de
+credenciales es exactamente el tipo de atajo que un control explícito existe para impedir.
+
+**Límite honesto:** la validación dice a qué dirección puede publicar *esta* tool. No
+impide que otra tool abra un socket, y no sustituye un namespace de red.
+
 ## DNS rebinding: MITIGATED at address level (2026-10-11)
 
 **This section states a control, and what it does not cover.** The claim is deliberately

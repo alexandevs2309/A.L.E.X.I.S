@@ -42,6 +42,13 @@ RULES = [
         "reason": "riesgo '{risk}' requiere aprobación humana salvo delegación explícita",
     },
     {
+        "id": "git.push.requires_approval",
+        "when": {"field": "capability", "in": ["git.push"]},
+        "verdict": "require_approval",
+        "reason": "publicar en un remoto sale de esta máquina: requiere aprobación "
+                  "explícita siempre, y ninguna preferencia la salta",
+    },
+    {
         "id": "allow.within_envelope",
         "when": {},
         "verdict": "allow",
@@ -60,6 +67,13 @@ def _matches(rule_when, ctx) -> bool:
         return True
     field = rule_when["field"]
     value = ctx[field]
+
+    # Una lista explícita de capacidades. Sin esta rama, una regla escrita así
+    # (`{"field": "capability", "in": [...]}`) no fallaría nunca: la rama de `capability`
+    # sólo conocía `outside_envelope` y todo lo demás caía en el `return True` final, que
+    # es el peor fallo posible en un matcher — una regla que casa con todo.
+    if field == "capability" and isinstance(rule_when.get("in"), list):
+        return bool(value) and value in rule_when["in"]
 
     # Capacidad fuera del envelope (solo aplica si el envelope declara capabilities).
     if field == "capability" and rule_when.get("outside_envelope"):

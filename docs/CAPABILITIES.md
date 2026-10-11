@@ -19,6 +19,16 @@ Future cameras, microphones, sensors and IoT telemetry.
 ## Action
 Filesystem, terminal, Git/GitHub, browser, APIs, cloud services and IoT.
 
+> `git.read` / `git.commit` / `git.push`: **IMPLEMENTED** (`alexis/tools/git.py`).
+> `git.read` es sólo lectura y su whitelist de verbos (`status`, `log`, `diff`, `show`,
+> `ls-files`) no incluye ningún verbo que escriba — es la razón de que exista el módulo y
+> no tres llamadas más a `terminal`. `git.commit` (riesgo **high**, según catálogo)
+> confirma sólo ficheros dentro del workspace: el sandbox resuelve y comprueba cada ruta
+> antes de que git vea el nombre. `git.push` (riesgo **critical**) publica fuera de esta
+> máquina, exige aprobación explícita siempre y **valida el remoto resuelto** antes de
+> abrir el socket, porque el sandbox no aísla la red. Las credenciales no las ve el
+> código: van en la configuración que git ya tenga en el repositorio.
+>
 > `browser.research`: **IMPLEMENTED** (`alexis/tools/browser.py`). Sólo lectura (`network_read`),
 risk medium, sin aprobación, verificación `source_count`. Extracción de texto plano con
 `html.parser`, sin JavaScript ni navegador headless. Allowlist `allowed_domains` + protección

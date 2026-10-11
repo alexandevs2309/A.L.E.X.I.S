@@ -42,13 +42,10 @@ def test_enabled_capabilities_are_honest():
     # browser.research pasó de "missing" a implementada (tool propia, sin JavaScript).
     assert "browser.research" in enabled_ids
     # Faltantes (missing) NO están habilitadas
-    assert "git.read" not in enabled_ids
-    assert "git.commit" not in enabled_ids
-    assert "git.push" not in enabled_ids
+    assert "vision.screen" not in enabled_ids
     assert "terminal.run" not in enabled_ids
     assert "api.http" not in enabled_ids
     assert "mcp.run" not in enabled_ids
-    assert "vision.screen" not in enabled_ids
     assert "speech.stt" not in enabled_ids
     assert "iot.mqtt" not in enabled_ids
     assert "codex.run" not in enabled_ids
@@ -62,9 +59,12 @@ def test_missing_capabilities_registered_but_not_enabled():
     catalog = build_catalog()
     all_ids = {s.id for s in catalog.specs()}
     missing = {s.id for s in catalog.specs() if s.status == "missing"}
-    assert "git.read" in missing
-    assert "git.commit" in missing
-    assert len(missing) >= 10  # muchas capacidades futuras
+    assert "vision.screen" in missing
+    # git.* dejaron de ser `missing` al implementarse (2026-10-11). Estar `available` NO
+    # significa estar autorizado: `git.push` sigue exigiendo aprobación explícita por
+    # policy, y esa comprobación vive en `test_git_tools.py`.
+    assert "git.commit" not in missing and "git.push" not in missing
+    assert len(missing) >= 8  # muchas capacidades futuras
     assert all(catalog.has(cid) for cid in missing)
 
 

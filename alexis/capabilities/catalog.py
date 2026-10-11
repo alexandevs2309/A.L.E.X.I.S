@@ -257,20 +257,20 @@ def build_catalog(enable_available=True) -> CapabilityRegistry:
             CapabilitySpec(
                 id="git.read", sphere="project", network=False, side_effects=False,
                 trust_domain="git", sandbox_profile="sandbox-project", default_risk="low",
-                plans_action="read", status="missing", requires_input="repositorio/perímetro",
-                description="Leer repositorios git locales (pendiente)",
+                plans_action="read", status="available", requires_input="repositorio/perímetro",
+                description="Leer repositorios git locales (status/log/diff/show/ls-files, sólo lectura)",
             ),
             CapabilitySpec(
                 id="git.commit", sphere="project", network=False, side_effects=True,
                 trust_domain="git", sandbox_profile="sandbox-project", default_risk="high",
-                plans_action="commit", status="missing", requires_input="mensaje firmado",
-                description="Confirmar cambios (pendiente)",
+                plans_action="commit", status="available", requires_input="mensaje firmado",
+                description="Confirmar cambios del workspace; fuera del workspace se rechaza",
             ),
             CapabilitySpec(
                 id="git.push", sphere="project", network=True, side_effects=True,
                 trust_domain="git", sandbox_profile="network-observed", default_risk="critical",
-                plans_action="commit", status="missing",
-                description="Publicar cambios (pendiente, requiere approval)",
+                plans_action="commit", status="available",
+                description="Publicar en un remoto; exige aprobación y valida el destino",
             ),
             CapabilitySpec(
                 id="terminal.run", sphere="project", network=False, side_effects=True,

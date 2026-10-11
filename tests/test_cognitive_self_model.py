@@ -150,7 +150,7 @@ async def _drain(cognitive, mission, plan, limit=8):
 @pytest.mark.asyncio
 async def test_missing_capability_asks_user_before_executing_any_tool():
     mission = _mission("lee el repositorio git del proyecto")
-    plan = _plan(_step("leer_git", capability="git.read"))
+    plan = _plan(_step("leer_git", capability="vision.screen"))
     executor = _Executor()
     self_model = _self_model(
         mission,
@@ -164,9 +164,9 @@ async def test_missing_capability_asks_user_before_executing_any_tool():
     assert actions == ["ask_user"]
     assert executor.calls == []
     assert outcome.mission_state is MissionState.WAITING_CLARIFICATION
-    assert "git.read" in outcome.question
+    assert "vision.screen" in outcome.question
     assert "no las tengo" in outcome.question
-    assert any("no tengo la capability 'git.read'" in u for u in knowledge.unknown)
+    assert any("no tengo la capability 'vision.screen'" in u for u in knowledge.unknown)
 
 
 @pytest.mark.asyncio
@@ -193,12 +193,12 @@ async def test_partial_gap_executes_what_is_available_and_records_the_gap():
     mission = _mission("revisa el proyecto y luego lee el repo git")
     plan = _plan(
         _step("investigar", action="research", capability="research.filesystem"),
-        _step("leer_git", capability="git.read"),
+        _step("leer_git", capability="vision.screen"),
     )
     executor = _Executor()
     self_model = _self_model(
         mission,
-        capabilities=["research.filesystem", "git.read"],
+        capabilities=["research.filesystem", "vision.screen"],
         available=["research.filesystem"],
     )
     cognitive = _runtime(executor, self_model)
@@ -208,17 +208,17 @@ async def test_partial_gap_executes_what_is_available_and_records_the_gap():
     assert actions == ["research", "ask_user"]
     assert executor.calls == ["investigar"]
     assert "leer_git" not in executor.calls
-    assert any("no tengo la capability 'git.read'" in u for u in knowledge.unknown)
+    assert any("no tengo la capability 'vision.screen'" in u for u in knowledge.unknown)
     assert outcome.mission_state is MissionState.WAITING_CLARIFICATION
-    assert "git.read" in outcome.question
+    assert "vision.screen" in outcome.question
 
 
 @pytest.mark.asyncio
 async def test_a_dependent_step_is_not_executable_if_its_dependency_cannot_run():
-    """`responder` depende de `leer_git`: sin `git.read`, responder tampoco tiene sentido."""
+    """`responder` depende de `leer_git`: sin la capability, responder tampoco tiene sentido."""
     mission = _mission("analiza el historial del repositorio git")
     plan = _plan(
-        _step("leer_git", action="research", capability="git.read"),
+        _step("leer_git", action="research", capability="vision.screen"),
         _step(
             "responder",
             action="respond",
@@ -238,7 +238,7 @@ async def test_a_dependent_step_is_not_executable_if_its_dependency_cannot_run()
 
     assert actions == ["ask_user"]
     assert executor.calls == []
-    assert "git.read" in outcome.question
+    assert "vision.screen" in outcome.question
 
 
 @pytest.mark.asyncio
@@ -260,7 +260,7 @@ async def test_empty_self_brief_does_not_block_the_mission():
 @pytest.mark.asyncio
 async def test_without_self_model_behavior_is_unchanged():
     mission = _mission("lee el repositorio git")
-    plan = _plan(_step("leer_git", capability="git.read"))
+    plan = _plan(_step("leer_git", capability="vision.screen"))
     executor = _Executor()
     cognitive = _runtime(executor, None)
 
@@ -370,7 +370,7 @@ async def test_self_model_is_consulted_on_every_decision():
 
 
 def _sync(mission, available=("fs.read",)):
-    model = SelfModel(capabilities=list(available) + ["git.read"])
+    model = SelfModel(capabilities=list(available) + ["vision.screen"])
     model.update(mission, tools=[], memory_items=[], verification=None, available=list(available))
     sync = SelfModelSync(model, lambda: mission, aux=lambda: {"tools": [], "lessons": [], "memory_items": []})
     return model, sync
@@ -402,7 +402,7 @@ def test_self_model_records_the_ask_user_question():
 
     sync.apply_event(
         "cognition.step",
-        {"action": "ask_user", "question": "no tengo git.read", "decision": {"rationale": "me falta"}},
+        {"action": "ask_user", "question": "no tengo vision.screen", "decision": {"rationale": "me falta"}},
     )
 
     assert any("pregunté al usuario" in o["text"] for o in model.observations_about_self)
@@ -440,7 +440,7 @@ def test_presence_reflects_waiting_clarification():
 def test_self_model_does_not_claim_missing_capabilities():
     """Regresión: `available` por defecto era el catálogo completo (30), incluidas las `missing`.
 
-    Con eso el runtime creía tener `git.read` y nunca preguntaba.
+    Con eso el runtime creía tener la capability y nunca preguntaba.
     """
     from alexis.capabilities import build_catalog
 
@@ -451,6 +451,6 @@ def test_self_model_does_not_claim_missing_capabilities():
     honest = SelfModel(capabilities=all_ids, available=enabled_ids)
     legacy = SelfModel(capabilities=all_ids)
 
-    assert "git.read" not in honest.snapshot()["available_capabilities"]
-    assert "git.read" in honest.snapshot()["capabilities"]
-    assert "git.read" in legacy.snapshot()["available_capabilities"]
+    assert "vision.screen" not in honest.snapshot()["available_capabilities"]
+    assert "vision.screen" in honest.snapshot()["capabilities"]
+    assert "vision.screen" in legacy.snapshot()["available_capabilities"]
