@@ -694,7 +694,7 @@ criterio. Cada veredicto de aquí está anclado a un fichero o a una prueba; don
 pudo probar, se declara `PARTIAL` **aunque la implementación exista**.
 
 Medido con `ALEXIS_DATABASE_URL` configurada y el contenedor `alexis-pg-a1` en pie: sin
-esa variable, **123 pruebas se omiten** y una suite verde no demostraría persistencia.
+esa variable, **192 pruebas se omiten** y una suite verde no demostraría persistencia.
 
 ### Cerrados desde §2 (antes `PARTIAL` / `MISSING`)
 
@@ -714,9 +714,9 @@ esa variable, **123 pruebas se omiten** y una suite verde no demostraría persis
 
 | # | Veredicto | Evidencia |
 |---|---|---|
-| 2 | `PARTIAL` | Existe `Context` (`cognition/context.py:80`), pero el objeto de contexto cognitivo **no se persiste como tal**; lo que viaja es `mission.context` |
+| 2 | `PARTIAL` *(por evidencia, no por código — corregido 2026-10-11)* | **La razón que figuraba aquí era falsa.** `build_context()` sí persiste el contexto: `mission.context["context"] = ctx.to_dict()` (`loop.py:1265`), y `context_of()` lo relee (`loop.py:1273`). Commit `0f64521` (2026-09-26), **anterior** al cierre. Lo cubre `test_p0_2_context.py::test_10_el_contexto_sobrevive_a_la_persistencia`, que hace el round-trip por `mission_to_row`/`mission_from_row` — la misma serialización que usa el repositorio. **Lo que sigue faltando es un E2E por PostgreSQL**: ese test no pasa por la base. Por el criterio del propio documento («donde no se pudo probar, se declara PARTIAL aunque la implementación exista»), se mantiene `PARTIAL`, pero por la ausencia de E2E, no por falta de persistencia |
 | 3 | `PARTIAL` | `alexis/security/policy.py` **no consulta** el Self Model: sigue sin participar en la decisión de autorización |
-| 6 | `PARTIAL` | El planner usa el objetivo (47 referencias) y tiene `plan_from_skill`, pero **no se ha demostrado** que la secuencia de pasos sea derivada del objetivo y no una plantilla |
+| 6 | `COMPLETE` *(reevaluado 2026-10-11; antes `PARTIAL`)* | **La evidencia que faltaba existe.** `_plan_objective_driven()` (`planner.py:284`) genera el DAG según el objetivo con `CapabilitySelector` y el catálogo real, y `create_plan()` lo invoca **antes** del fallback (`planner.py:274-280`): la plantilla universal sólo queda para intención no soportada o sin catálogo, que es justo lo que el requisito permite. Ya estaba en `e8b6c82`. Demostrado por `tests/test_requisito6_objective_driven_planning.py` (683 líneas, 16 tests): lectura→`[research]`, escritura→`[execute,verify]`, análisis→`[research,analyze]`, razonamiento puro→`[understand,respond]`, DAG con orden topológico |
 
 ### Cierre de §5.9
 
@@ -728,13 +728,45 @@ Los tres puntos que §5.9 pedía para cerrar P0:
 
 ### Cifras vigentes
 
-- Suite obligatoria: **1628 passed, 4 deselected, 0 failed** con `-W error` y PostgreSQL.
-- Sin `ALEXIS_DATABASE_URL`: 1505 passed, **123 skipped**. La persistencia **no** está
+- Suite obligatoria (2026-10-10): **1628 passed, 4 deselected, 0 failed** con `-W error` y PostgreSQL.
+- Suite obligatoria (2026-10-11, tras las integraciones posteriores): **1719 passed, 4 deselected, 0 failed**.
+- Sin `ALEXIS_DATABASE_URL`: 1526 passed, **192 skipped** (y 1 fallo). La persistencia **no** está
   demostrada en esa ejecución.
+
+### Lo que la suite obligatoria NO cubre (2026-10-11)
+
+Los `4 deselected` de toda suite obligatoria **no están hoy omitidos: están fuera para
+siempre**, porque `-m "not external"` los salta siempre. Tres son proveedores cloud en
+vivo (`test_model_providers_cloud.py`, Gemini/OpenRouter), y su hueco es pequeño: el
+requisito 20 tiene 34 tests en `test_model_router.py` más 23 en el fichero cloud que sí
+corren.
+
+El cuarto no es pequeño:
+
+> **`test_27_external_un_modelo_real_propone_una_alternativa`**
+> (`test_core08b_dynamic_replan.py:831`)
+
+Es el único test que ejercita el replan **con un modelo de verdad**. Los 24 tests de
+replan que sí pasan usan modelos falsos. Es decir: **la ruta "el modelo propone una
+estrategia alternativa" no está verificada**, y es precisamente el reproche que este
+mismo documento le hace al requisito 12 («no genera una estrategia alternativa; cambia el
+paso, no la estrategia»).
+
+Consecuencia para el cierre: **el requisito 12 se declara `COMPLETE` en cuanto al
+comportamiento determinista, pero su rama más difícil no tiene evidencia de ejecución.**
+Se deja escrito aquí para que el próximo que lo lea no lo dé por demostrado. Cerrarlo de
+verdad exige una credencial de modelo en CI.
 
 ### Estado
 
-**16 COMPLETE · 3 PARTIAL (2, 3, 6) · 0 BROKEN · 0 MISSING.**
+**20 COMPLETE · 2 PARTIAL (2, 3) · 0 BROKEN · 0 MISSING.**
+
+> **Recuento corregido (auditoría independiente, 2026-10-11).** Esta cifra decía «16
+> COMPLETE · 3 PARTIAL», que no cuadraba con sus propias tablas: §2 dejó 11 COMPLETE y
+> §8 cerró 8 más, o sea 19, sobre 22 requisitos: 16+3=19 no cubre 22. Además el §8
+> reabrió el requisito 6 a `COMPLETE` por la evidencia de abajo, así que el total vigente
+> es **20 COMPLETE · 2 PARTIAL (2, 3)**. La cifra anterior estaba desactualizada respecto
+> a la evidencia que la acompaña; hoy se deriva de la tabla, no se escribe a mano.
 
 > **Recuento (2026-10-10, cierre de MEMORY):** el requisito **5 (Memory)** se mantiene
 > `COMPLETE`, ahora con la evidencia de que sus 7 tipos conceptuales están implementados de
@@ -742,4 +774,4 @@ Los tres puntos que §5.9 pedía para cerrar P0:
 > `MINDMAP.md` §4. En el informe intermedio de ese mismo día se había marcado `PARTIAL`
 > al comprobar que `alexis/memory/` sólo produce `kind="observations"`; esa observación
 > era cierta pero contestaba a la pregunta equivocada: los otros tipos no pertenecen a ese
-> módulo. El recuento vigente es **16 COMPLETE · 3 PARTIAL (2, 3, 6)**.
+> módulo. El recuento vigente es **20 COMPLETE · 2 PARTIAL (2, 3)** (ver la corrección de la auditoría independiente más abajo).
