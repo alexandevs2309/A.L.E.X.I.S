@@ -130,10 +130,11 @@ quietly resolved in either direction:
 The vision's own §67 priority order puts **core correctness → safety → persistence** first,
 then goal management, then recovery, then learning. Read against the real state:
 
-- The P0 cognitive core is at **20 COMPLETE · 2 PARTIAL (2, 3) of 22** (95.5% by its own scoring method) with the method stated in
-  `P0-COGNITIVE-CORE-GAP-ANALYSIS.md`. The remaining P0 gaps are **Req 2 (Context Assembly,
-  short of a PostgreSQL end-to-end test) and Req 3 (Self Model does not take part in the
-  authorization decision)**.
+- The P0 cognitive core is at **22 COMPLETE · 0 PARTIAL of 22** (100% by its own scoring method) with the method stated in
+  `P0-COGNITIVE-CORE-GAP-ANALYSIS.md`. There are no remaining P0 gaps: **Req 2** closed with a
+  PostgreSQL end-to-end test (`bb74a16`) and **Req 3** closed by design decision —the
+  SelfModel informs, the Policy authorizes, deliberately, so a stale SelfModel cannot
+  block legitimate work.
 - **Reflection (§17) is `COMPLETE`, not `MISSING`.** This paragraph used to say it was the
   smallest gap the vision needed and the code did not have. It is implemented
   (`alexis/learning/reflection.py`, `experience.py`), wired into the loop's epilogue

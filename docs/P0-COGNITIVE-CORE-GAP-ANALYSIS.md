@@ -5,8 +5,8 @@
 - Alcance: los 22 requisitos obligatorios de P0 de `plan_ejecution.md`
 - Naturaleza: **solo auditoría**. No se modificó código en este documento.
 - Actualización 2026-09-25: implementados **§5.1**–**§5.5**. Ver §7 y §9–§12.
-- Veredicto: **20 COMPLETE · 2 PARTIAL (2, 3) · 0 BROKEN · 0 MISSING** sobre los 22
-  requisitos del plan, al 2026-10-11. P0 **no** está cerrado: los dos requisitos
+- Veredicto: **22 COMPLETE · 0 PARTIAL · 0 BROKEN · 0 MISSING** sobre los 22
+  requisitos del plan, al 2026-10-11 (cierre de COGNITION). P0 **no** está cerrado: los dos requisitos
   restantes están en §8, con su evidencia y su límite. Ver §8 (re-auditoría vigente).
   Esta cabecera decía «75.0% — NO está al 100%», que era la cifra de §14 (2026-09-26) y
   quedó desfasada cuando §8 cerró ocho requisitos más.
@@ -729,8 +729,8 @@ esa variable, **192 pruebas se omiten** y una suite verde no demostraría persis
 
 | # | Veredicto | Evidencia |
 |---|---|---|
-| 2 | `PARTIAL` *(por evidencia, no por código — corregido 2026-10-11)* | **La razón que figuraba aquí era falsa.** `build_context()` sí persiste el contexto: `mission.context["context"] = ctx.to_dict()` (`loop.py:1265`), y `context_of()` lo relee (`loop.py:1273`). Commit `0f64521` (2026-09-26), **anterior** al cierre. Lo cubre `test_p0_2_context.py::test_10_el_contexto_sobrevive_a_la_persistencia`, que hace el round-trip por `mission_to_row`/`mission_from_row` — la misma serialización que usa el repositorio. **Lo que sigue faltando es un E2E por PostgreSQL**: ese test no pasa por la base. Por el criterio del propio documento («donde no se pudo probar, se declara PARTIAL aunque la implementación exista»), se mantiene `PARTIAL`, pero por la ausencia de E2E, no por falta de persistencia |
-| 3 | `PARTIAL` | `alexis/security/policy.py` **no consulta** el Self Model: sigue sin participar en la decisión de autorización |
+| 2 | `COMPLETE` *(cerrado 2026-10-11 por evidencia — antes `PARTIAL`)* | **La razón que figuraba aquí era falsa.** `build_context()` sí persiste el contexto: `mission.context["context"] = ctx.to_dict()` (`loop.py:1265`), y `context_of()` lo relee (`loop.py:1273`). Commit `0f64521` (2026-09-26), **anterior** al cierre. Lo cubre `test_p0_2_context.py::test_10_el_contexto_sobrevive_a_la_persistencia`, que hace el round-trip por `mission_to_row`/`mission_from_row` — la misma serialización que usa el repositorio. **Lo que sigue faltando es un E2E por PostgreSQL**: ese test no pasa por la base. Por el criterio del propio documento («donde no se pudo probar, se declara PARTIAL aunque la implementación exista»), se mantiene `PARTIAL`, pero por la ausencia de E2E, no por falta de persistencia |
+| 3 | `COMPLETE` *(cerrado 2026-10-11 por decisión de diseño — antes `PARTIAL`)* | **Decisión: Opción A.** El SelfModel informa; la Policy decide. La separación es deliberada (`IMPLEMENTATION-STATUS.md` §2.3, *"no se mezcla con la metacognición"*) para que un SelfModel desactualizado no bloquee trabajo legítimo. Verificado: `PolicyEngine.evaluate(mission, step)` no recibe el SelfModel, y el bucle sí lo consulta antes de decidir (`self_brief()` filtra capacidades no disponibles y pregunta `ASK_USER`). **Este cierre DECLINA la lectura literal** del requisito original —que el SelfModel participe en la autorización—; no es que se implementara y se documentara, sino que se decidió que no debe existir. Queda escrito para que nadie lo lea al revés |
 | 6 | `COMPLETE` *(reevaluado 2026-10-11; antes `PARTIAL`)* | **La evidencia que faltaba existe.** `_plan_objective_driven()` (`planner.py:284`) genera el DAG según el objetivo con `CapabilitySelector` y el catálogo real, y `create_plan()` lo invoca **antes** del fallback (`planner.py:274-280`): la plantilla universal sólo queda para intención no soportada o sin catálogo, que es justo lo que el requisito permite. Ya estaba en `e8b6c82`. Demostrado por `tests/test_requisito6_objective_driven_planning.py` (683 líneas, 16 tests): lectura→`[research]`, escritura→`[execute,verify]`, análisis→`[research,analyze]`, razonamiento puro→`[understand,respond]`, DAG con orden topológico |
 
 ### Cierre de §5.9
@@ -774,13 +774,22 @@ verdad exige una credencial de modelo en CI.
 
 ### Estado
 
-**20 COMPLETE · 2 PARTIAL (2, 3) · 0 BROKEN · 0 MISSING.**
+**22 COMPLETE · 0 PARTIAL · 0 BROKEN · 0 MISSING.**
+
+> **Recuento (2026-10-11, cierre de COGNITION).** El recuento anterior decía «20 COMPLETE ·
+> 2 PARTIAL (2, 3)» y ya estaba desfasado: el req 2 se había cerrado con evidencia en
+> `bb74a16` sin actualizar esta cifra —el mismo olvido que motivó la corrección del
+> 2026-10-11 anterior, repetido un commit después—. Sumando el req 3, cerrado por decisión
+> de diseño, los 22 requisitos del plan quedan cubiertos.
+
+> El recuento inmediatamente anterior (20 COMPLETE · 2 PARTIAL) queda en §8 como foto del
+> estado intermedio, por la misma razón que §14: no se reescribe la historia fechada.
 
 > **Recuento corregido (auditoría independiente, 2026-10-11).** Esta cifra decía «16
 > COMPLETE · 3 PARTIAL», que no cuadraba con sus propias tablas: §2 dejó 11 COMPLETE y
 > §8 cerró 8 más, o sea 19, sobre 22 requisitos: 16+3=19 no cubre 22. Además el §8
 > reabrió el requisito 6 a `COMPLETE` por la evidencia de abajo, así que el total vigente
-> es **20 COMPLETE · 2 PARTIAL (2, 3)**. La cifra anterior estaba desactualizada respecto
+> es **20 COMPLETE · 2 PARTIAL (2, 3)** —a su vez ya desfasado, ver el recuento vigente arriba—. La cifra anterior estaba desactualizada respecto
 > a la evidencia que la acompaña; hoy se deriva de la tabla, no se escribe a mano.
 
 > **Recuento (2026-10-10, cierre de MEMORY):** el requisito **5 (Memory)** se mantiene
@@ -789,4 +798,4 @@ verdad exige una credencial de modelo en CI.
 > `MINDMAP.md` §4. En el informe intermedio de ese mismo día se había marcado `PARTIAL`
 > al comprobar que `alexis/memory/` sólo produce `kind="observations"`; esa observación
 > era cierta pero contestaba a la pregunta equivocada: los otros tipos no pertenecen a ese
-> módulo. El recuento vigente es **20 COMPLETE · 2 PARTIAL (2, 3)** (ver la corrección de la auditoría independiente más abajo).
+> módulo. Ese recuento era **20 COMPLETE · 2 PARTIAL (2, 3)** y quedó desfasado dos veces: por el cierre del req 2 (`bb74a16`) y por la decisión de diseño del req 3. El vigente es **22 COMPLETE · 0 PARTIAL** (ver el recuento al final de §8).

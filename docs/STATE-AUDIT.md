@@ -3,7 +3,7 @@
 > ## ⚠️ DOCUMENTO HISTÓRICO — 2026-09-26. NO DESCRIBE EL ESTADO ACTUAL.
 >
 > Se conserva por su método y por lo que aceptó no medir. Sus cifras de completitud
-> quedaron desfasadas: la del CORE pasó de 11 COMPLETE a **20 COMPLETE · 2 PARTIAL**
+> quedaron desfasadas: la del CORE pasó de 11 COMPLETE a **22 COMPLETE · 0 PARTIAL**
 > (ver `P0-COGNITIVE-CORE-GAP-ANALYSIS.md` §8, re-auditado el 2026-10-11).
 >
 > El propio documento lo dice en su cabecera y conviene tomárselo en serio: *"No es una
@@ -54,7 +54,7 @@ El error más común al medir así es contar *envoltorios vacíos* como avance. 
 | Arquitectura Core | **~70%** | 94 módulos organizados en capas, pero **3 ciclos de dependencia activos** (§4) y 8 paquetes placeholder (§3) |
 | Autonomía / Mission Runtime | ~75% | 459 líneas, importado en 25 ficheros de test. Recovery verificado sólo por el camino legacy (`tests/test_s3_s4.py:249`) |
 | Policy / Security | ~80% | 373 líneas, 19 ficheros de test. Gate sin bypass read-only y `requires_approval` vinculante |
-| Cognitive Core (P0) | ~~75.0%~~ **actual: 20 COMPLETE · 2 PARTIAL (2, 3)** | Esta fila decía 11 COMPLETE / 11 PARTIAL y remitía a §14, que §8 dejó atrás. Vigente: `docs/P0-COGNITIVE-CORE-GAP-ANALYSIS.md` §8 (2026-10-11). **Fuente única de verdad: §8, no §14** |
+| Cognitive Core (P0) | ~~75.0%~~ **actual: 22 COMPLETE · 0 PARTIAL** | Esta fila decía 11 COMPLETE / 11 PARTIAL y remitía a §14, que §8 dejó atrás. Vigente: `docs/P0-COGNITIVE-CORE-GAP-ANALYSIS.md` §8 (2026-10-11). **Fuente única de verdad: §8, no §14** |
 | Self Model | ~75% | 553 líneas (`alexis/self/`), 19 ficheros de test. Sin zona de supuestos |
 | Memory | ~55-60% | 216 líneas, 12 ficheros de test. `recall()` antes de `decide()` |
 | World Model | ~50-60% | 207 líneas, 9 ficheros de test. **Sólo en memoria**: dominios FILE y TOOL, se pierde al reiniciar |

@@ -36,6 +36,41 @@ La v0.3 es una **Complete Foundation**, no una versión final.
 - documentación arquitectónica (+ docs/DEVELOPMENT.md, docs/AUDIT-v0.3.md, docs/DESIGN-v0.4.md)
 - **MEMORY (COMPLETE en el alcance del CORE)** — arquitectura **distribuida**: `alexis/memory/` aporta la recuperación contextual episódica (relevancia real, `token_budget`, aislamiento por misión, contenido no confiable persistido saneado, degradación sin romper el runtime); el tipo Working vive en `missions.context`, el semántico en `world_entities`, el procedural en `skills` (`(id, version)`) y el de proyecto en `missions.goal`+`world_edges`; el procedural vive en la tabla única `skills`, con PK `(id, version)`, que absorbe lo que eran `skill_candidates`, `skill_versions` y `skill_performance`. Duplicarlos en un módulo único habría creado una segunda fuente de verdad. Ver la tabla de los 7 tipos en `docs/MINDMAP.md` §4. **Búsqueda semántica de memoria**: `observations.embedding vector(384)` + índice HNSW (`scripts/migrations/064`, aplicado también desde `schema.py` porque `Database.migrate()` sólo ejecuta ese fichero). `PostgresMemoryProvider` ordena por distancia de coseno cuando hay consulta vector y **cae a coincidencia de términos** cuando no la hay, así que las observaciones escritas antes del backfill siguen siendo recuperables. El provider de embeddings es **inyectable** (`alexis/memory/embeddings.py`); el de por defecto es un hashing determinista sin dependencias, que **no entiende significado** — para eso hay que inyectar un modelo real. Knowledge Graph sigue PARTIAL (existe el grafo en `world_edges`, no su recorrido): feature futura, no deuda del CORE.
 
+- **COGNITION — Req 3: Self Model en Policy — DECIDIDO (Opción A)**
+
+  Decisión de diseño tomada: el SelfModel informa (metacognición/capacidad), pero la Policy
+  decide (autorización/permisos). Esta separación es deliberada (§2.3) para evitar que un
+  SelfModel desactualizado bloquee trabajo legítimo (falsos negativos). El SelfModel ya
+  gobierna QUÉ se decide, no SI SE PUEDE. Requisito cerrado a nivel de diseño, no requiere
+  cambios de código.
+
+  Verificado contra el código al documentarlo: `PolicyEngine.evaluate(mission, step)` no
+  recibe el SelfModel (0 referencias en `security/policy.py`), mientras que el bucle
+  cognitivo sí lo consulta antes de decidir (`self_brief()` filtra las capacidades que el
+  SelfModel no declara como disponibles y pregunta `ASK_USER` si falta alguna). Es decir,
+  la Opción A no es un deseo a futuro: **es lo que el runtime ya hace**, y la decisión lo
+  convierte de omisión en contrato.
+
+  Una advertencia para quien lea esto dentro de seis meses: este cierre **declina** la
+  lectura literal del requisito original ("que el SelfModel participe en la
+  autorización"). No es que la participación se haya implementado y luego documented; es
+  que se decidió que no debe existir, y el contrato lo dice. Confundirlo con "el
+  SelfModel ahora autoriza" sería leer mal el diseño.
+
+- **AUTONOMY — CONSTRUIDO, NO SE TRABAJA**
+
+  10 módulos, gate integrado en la cadena de ejecución del CORE, §4.3 y §9/§10
+  `IMPLEMENTED`. Pendiente: §48 (autonomía a largo plazo) `MISSING` y `PAUSE` ausente
+  entre los estados. En pausa por la regla de secuenciación, no por inexistencia.
+
+  Verificado al documentarlo: `alexis/autonomy/` tiene 10 módulos (1316 líneas), el
+  `AutonomyGate` forma parte de la cadena `Policy → Gate → Execute`, `autonomy.gates` y
+  `autonomy.queue` están `available` en el catálogo, y los estados de misión son
+  `pending, planning, running, verifying, needs_verification, waiting_approval,
+  waiting_clarification, blocked, recovering, completed, failed, stopped` — sin `PAUSE`.
+  Esta nota existe porque el rótulo anterior ("sin comenzar") describía la regla de
+  secuenciación con palabras de estado, y se leía como si el módulo no existiera.
+
 - **USER MODEL (COMPLETE)** — `alexis/user/` cierra el último tipo de memoria que faltaba. Una sola tabla, `user_preferences` (`migrations/065`, también en `schema.SQL`), con las cuatro categorías `project`/`style`/`approval`/`context`; un proyecto activo es una preferencia `project` con `value->>'active' = 'true'` y una decisión es una `context`. **Las categorías son un CHECK, no un comentario**: un `category='proyects'` se escribiría sin error y no lo leería nadie, así que la lista se hizo restricción. `UserRepository` degrada a defaults si la tabla no existe, y `CognitiveRuntime` sólo inyecta `mission.context['user_preferences']` si hay repositorio y algo que inyectar — personalizar es una mejora, no un requisito para decidir, y un fallo ahí no puede tragarse la decisión. La zona `user` del `SelfModel` vive en `__init__` y **no** en `_reset()`, porque `_reset` limpia estado de MISIÓN y el usuario no cambia al terminar una. 26 tests con PostgreSQL real y contrapruebas.
 - **Integridad de eventos y auditoría (P0-1)**: `EventBus` con política de saturación explícita —suscriptor `critical=True` (auditoría) con entrega sin pérdida, best-effort acotado a 100 con contador `dropped_events` y aviso en log; `AuditSink` drena lo pendiente antes de parar, de modo que lo aceptado se vuelve durable. Sin esto se perdían 50 de 150 registros de `model.routed` en silencio.
 - **Idempotencia del arranque (P1-3)**: `start_services()` no duplica worker, `SelfModelSync` ni `AuditSink`. `stop_services()` cierra la base de datos: es terminal para ese runtime, no una pausa.
