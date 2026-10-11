@@ -294,6 +294,9 @@ class CognitiveRuntime:
         decision_max_tokens: int = 2048,
         decision_deadline_ms: int = 60000,
         embedder=None,
+        #: User Model (opcional). Sólo se usa para inyectar preferencias en
+        #: `mission.context`; sin él el bucle funciona exactamente igual.
+        user_repository=None,
     ):
         self.policy = policy
         #: P0 requisito 2: el catálogo real viaja al contexto de decisión.
@@ -307,6 +310,7 @@ class CognitiveRuntime:
         self.evidence = evidence or EvidenceStore()
         self.model_router = model_router
         self.memory = memory
+        self.user_repository = user_repository
         #: Provider de embeddings para la búsqueda semántica de memoria. Opcional y
         #: degradado: sin él, `recall()` sigue funcionando por coincidencia de términos.
         self._embedder = embedder or NullEmbeddingProvider()
@@ -633,6 +637,34 @@ class CognitiveRuntime:
     # Decide
     # ------------------------------------------------------------------ #
 
+    async def _inyectar_preferencias(self, mission) -> None:
+        """Vuelca las preferencias del usuario en `mission.context`.
+
+        Opcional y degradado por partida doble: sin repositorio no se hace nada, y si la
+        consulta falla se deja la misión como estaba. Un fallo al leer preferencias NUNCA
+        puede impedir decidir —personalizar es una mejora, no un requisito para pensar— y
+        un error aquí se tragaría la excepción que sí debía verse.
+        """
+        if self.user_repository is None:
+            return
+        try:
+            proyectos = await self.user_repository.get_active_projects()
+            estilo = {
+                p.key: p.value
+                for p in await self.user_repository.list_by_category("style")
+            }
+        except Exception:  # noqa: BLE001 — personalizar no puede impedir decidir
+            return
+        if not proyectos and not estilo:
+            return
+        # Se conserva lo que ya hubiera (`context` es un dict compartido y puede venir
+        # con claves de otras capas): overwrite a ciegas borraría estado de la misión.
+        ctx = _mission_context(mission)
+        ctx["user_preferences"] = {
+            "active_projects": list(proyectos),
+            "style": estilo,
+        }
+
     async def decide_next_action(
         self,
         mission: Mission,
@@ -641,6 +673,7 @@ class CognitiveRuntime:
         pending_steps: list[PlanStep] | None = None,
     ) -> Decision:
         """Elige la siguiente acción. La memoria participa ANTES de decidir."""
+        await self._inyectar_preferencias(mission)
         options = self.options(mission, knowledge, pending_steps or [])
         context = await self.recall(mission, knowledge)
         entities = self.world_hint(mission, knowledge)

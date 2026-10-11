@@ -74,6 +74,12 @@ class SelfModel:
         self.transient = {"listening": False, "speaking": False, "reflecting": False, "flag": None}
         self.reflections: list[dict] = []
         self.observations_about_self: list[dict] = []
+        #: Zona `user`: qué sabe ALEXIS de quien lo usa. Va en `__init__` y NO en
+        #: `_reset()` a propósito —`_reset` limpia estado de MISIÓN, y el usuario no cambia
+        #: al terminar una misión. Ponerlo aquí lo borraría en cada `settle()`.
+        self.user_preferences: dict = {}
+        self.active_projects: list[str] = []
+        self.recent_decisions: list[dict] = []
         self._reset()
 
     def _reset(self):
@@ -116,6 +122,21 @@ class SelfModel:
             return
         self.reflections.append({"at": int(time.time()), "text": text})
         self.reflections = self.reflections[-5:]
+
+    def note_user(self, *, preferences=None, active_projects=None, recent_decisions=None):
+        """Proyecta el User Model en la zona `user`.
+
+        ASIGNA en vez de acumular, por el mismo motivo que `note_knowledge`: la zona es una
+        proyección del estado persistido. Acumular haría que una preferencia retirada
+        siguiera ahí para siempre —el modelo mentiría sobre lo que el usuario ya quitó— y
+        que la lista creciera sin límite entre refrescos.
+        """
+        if preferences is not None:
+            self.user_preferences = dict(preferences)
+        if active_projects is not None:
+            self.active_projects = [str(p) for p in active_projects]
+        if recent_decisions is not None:
+            self.recent_decisions = list(recent_decisions)
 
     def note_self_observation(self, text):
         if not text:
@@ -386,6 +407,9 @@ class SelfModel:
             "recent_actions": list(self.recent_actions),
             "decisions": list(self.decisions),
             "observations_about_self": list(self.observations_about_self),
+            "user_preferences": dict(self.user_preferences),
+            "active_projects": list(self.active_projects),
+            "recent_decisions": list(self.recent_decisions),
             "uncertainties": list(self.uncertainties),
             "assumptions": list(self.assumptions),
             "hypotheses": list(self.hypotheses),

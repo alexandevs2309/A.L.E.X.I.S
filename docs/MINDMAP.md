@@ -40,7 +40,7 @@ ALEXIS
 │   │  Project Context   COMPLETE    missions.goal + world_edges
 │   │  Knowledge Graph   PARTIAL     world_edges (grafo de enlaces); sin recorrido
 │   │  Vector Memory     PARTIAL     pgvector + columna `observations.embedding`
-│   │  Preferences       MISSING     módulo User Model (futuro, fuera del CORE)
+│   │  Preferences       COMPLETE    `alexis/user/` → tabla `user_preferences`
 │   │
 │   └── (los 7 tipos se conservan; los PARTIAL y el MISSING son features futuras)
 │

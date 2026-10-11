@@ -192,8 +192,16 @@ def init_storage(loop: asyncio.AbstractEventLoop) -> dict:
         # CORE-11: el aprendizaje persiste en la MISMA base, no en una segunda. Una skill que
         # sólo vive en RAM no es una skill: es un texto que se pierde al reiniciar.
         storage["learning"] = LearningRepository(db)
+        # User Model: preferencias, proyectos y decisiones. En la MISMA base, por el mismo
+        # motivo que `learning` — un recuerdo que sólo vive en RAM se pierde al reiniciar.
+        try:
+            from alexis.user.repository import UserRepository
+
+            storage["user"] = UserRepository(db)
+        except ImportError as exc:  # noqa: BLE001 — sin user model se sirve igual
+            print(f"[warn] User Model no disponible: {exc}")
         print("Persistencia PostgreSQL activa (missions, tasks, executions, checkpoints, "
-              "verifications, observations, audit, world, learning).")
+              "verifications, observations, audit, world, learning, user).")
     except Exception as exc:  # noqa: BLE001 — sin base se arranca igual, pero se avisa
         print(f"[warn] persistencia no disponible: {exc}")
     return storage
@@ -834,6 +842,92 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
             self.end_headers()
             self.wfile.write(body)
 
+        def _user_write(self, path: str) -> None:
+            """`POST /user/preferences` y `POST /user/projects`.
+
+            Comparten lectura de cuerpo y despacho porque sólo cambia qué se guarda; el
+            manejo de errores (400 por payload incompleto, 503 sin persistencia) es el
+            mismo y duplicarlo dos veces es duplicar el sitio donde se equivocó ayer.
+            """
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                data = json.loads(self.rfile.read(length) or b"{}")
+            except json.JSONDecodeError:
+                self._send_json({"error": "json inválido"}, 400)
+                return
+            repo = self._user()
+            if repo is None:
+                self._send_json({"error": "user model no disponible"}, 503)
+                return
+            try:
+                if path == "/user/preferences":
+                    category, key = data.get("category"), data.get("key")
+                    if not category or not key:
+                        self._send_json({"error": "faltan 'category' y 'key'"}, 400)
+                        return
+                    coroutine = repo.set(category, key, data.get("value"),
+                                         confidence=data.get("confidence", 1.0),
+                                         source=data.get("source"))
+                else:
+                    nombre = data.get("name") or data.get("project")
+                    if not nombre:
+                        self._send_json({"error": "falta 'name'"}, 400)
+                        return
+                    coroutine = repo.add_project(nombre,
+                                                **(data.get("details") or {}))
+                pref = asyncio.run_coroutine_threadsafe(coroutine, LOOP).result(timeout=10)
+            except Exception as exc:  # noqa: BLE001 — un CHECK violado es un 400, no un 500
+                self._send_json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+                return
+            self._send_json(pref.to_dict())
+
+        def _user_get(self, path: str) -> None:
+            """`GET /user/preferences[/{category}]`, `/user/projects`, `/user/decisions`.
+
+            Los cuatro leen y contestan igual, así que comparten un cuerpo y sólo cambia
+            qué se pregunta. En cuatro ramas se repetía cuatro veces el mismo 503 y el
+            mismo `run_coroutine_threadsafe`, que es justo donde un arreglo se aplica a
+            tres de las cuatro.
+            """
+            # `/user/preferences/{categoria}` -> partes = [user, preferences, categoria].
+            # El índice 1 es la sección; el 2, la categoría dentro de `preferences`.
+            partes = [p for p in urlparse(self.path).path.split("/") if p]
+            seccion = partes[1] if len(partes) > 1 else None
+            categoria = partes[2] if len(partes) > 2 else None
+            repo = self._user()
+            if repo is None:
+                self._send_json({"error": "user model no disponible"}, 503)
+                return
+            try:
+                if seccion == "preferences" and categoria:
+                    prefs = repo.list_by_category(categoria)
+                elif seccion == "preferences":
+                    prefs = repo.list_all()
+                elif seccion == "projects":
+                    self._send_json({"active_projects": asyncio.run_coroutine_threadsafe(
+                        repo.get_active_projects(), LOOP).result(timeout=10)})
+                    return
+                elif seccion == "decisions":
+                    self._send_json(asyncio.run_coroutine_threadsafe(
+                        repo.get_recent_decisions(), LOOP).result(timeout=10))
+                    return
+                else:
+                    self._send_json({"error": "not found"}, 404)
+                    return
+                self._send_json([p.to_dict() for p in asyncio.run_coroutine_threadsafe(
+                    prefs, LOOP).result(timeout=10)])
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+
+        def _user(self):
+            """El `UserRepository`, o `None` si no hay persistencia.
+
+            Que pueda faltar es un estado de diseño, no una excepción: sin base de datos el
+            resto de la API sigue sirviendo, y `/user/*` debe decir que no hay USER MODEL
+            en vez de caer con un 500.
+            """
+            return STORAGE.get("user")
+
         def _get_mission(self, mission_id: str):
             """`GET /missions/{id}`. Lectura pura: no ejecuta, no encola, no muta."""
             if not mission_id:
@@ -1046,13 +1140,36 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
                 })
             elif path == "/state":
                 self._send_json(self._state_payload())
+            elif path.startswith("/user"):
+                self._user_get(path)
             else:
                 self._send_json({"error": "not found"}, 404)
+
+        # -- DELETE --------------------------------------------------------- #
+        def do_DELETE(self):
+            path = urlparse(self.path).path
+            if path.startswith("/user/projects/"):
+                nombre = path.split("/")[3]
+                repo = self._user()
+                if repo is None:
+                    self._send_json({"error": "user model no disponible"}, 503)
+                    return
+                borrado = asyncio.run_coroutine_threadsafe(
+                    repo.remove_project(nombre), LOOP).result(timeout=10)
+                if not borrado:
+                    # 404 y no un 200 vacío: `remove_project` es idempotente, pero
+                    # "borré algo" cuando no había nada sería mentir sobre el efecto.
+                    self._send_json({"error": "proyecto no encontrado"}, 404)
+                else:
+                    self._send_json({"removed": nombre})
 
         # -- POST ----------------------------------------------------------- #
         def do_POST(self):
             path = urlparse(self.path).path
             if presentation is not None and presentation.try_post(self, path):
+                return
+            if path in ("/user/preferences", "/user/projects"):
+                self._user_write(path)
                 return
             if path == "/chat":
                 length = int(self.headers.get("Content-Length", 0))

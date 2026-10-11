@@ -299,4 +299,38 @@ CREATE TABLE IF NOT EXISTS skills (
   ALTER TABLE world_entities
       ALTER COLUMN confidence TYPE DOUBLE PRECISION,
       ALTER COLUMN base_confidence TYPE DOUBLE PRECISION;
-  """
+  
+
+-- =========================================================================== #
+--# User Model
+-- =========================================================================== #
+--# Las cuatro categorías (`project`, `style`, `approval`, `context`) viven en UNA tabla.
+--# Un proyecto activo es `category='project'` con `value->>'active' = 'true'`; una
+--# decisión es `category='context'`. Ver la justificación en `migrations/065`.
+--#
+--# Los tres CHECK (categoría, source, confidence) NO están en el enunciado original: los
+--# tres eran comentarios. Un comentario no rechaza nada, así que un `category='proyects'`
+--# se escribía sin error y nadie lo leía nunca. Convertir el comentario en restricción es
+--# lo que hace que la lista sea real en vez de aspiracional.
+CREATE TABLE IF NOT EXISTS user_preferences (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value JSONB NOT NULL,
+    confidence FLOAT NOT NULL DEFAULT 1.0,
+    source TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(category, key),
+    CONSTRAINT user_preferences_category_check
+        CHECK (category IN ('project', 'style', 'approval', 'context')),
+    CONSTRAINT user_preferences_source_check
+        CHECK (source IS NULL OR source IN ('explicit', 'inferred', 'default')),
+    -- Fuera de [0, 1] no es "mucha confianza": es un dato corrupto que un MAX() elige
+    -- como la entrada más fiable.
+    CONSTRAINT user_preferences_confidence_check
+        CHECK (confidence >= 0.0 AND confidence <= 1.0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_prefs_category ON user_preferences(category);
+"""

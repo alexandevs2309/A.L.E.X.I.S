@@ -39,6 +39,34 @@ class SelfModelSync:
         self.persistence = persistence
         #: Hook opcional para que quien compone sepa cuándo hubo algo que persistir.
         self.on_persist = on_persist
+        #: User Model (opcional). Sin repositorio, la zona `user` se queda vacía y nada
+        #: más cambia: es una mejora, no un requisito para que el Self Model sea válido.
+        self.user_repository = None
+
+    async def refresh_user_preferences(self) -> bool:
+        """Refresca la zona `user` desde la base de datos.
+
+        ASIGNA, no fusiona: quien llama trae el estado completo y esta zona es una
+        proyección. Fusionar dejaría las preferencias que el usuario borró durante toda la
+        sesión, y `/self` seguiría afirmándolas.
+
+        `True` si se actualizó; `False` si no hay repositorio o la tabla no existe, que es
+        el estado por defecto de un ALEXIS recién arrancado sin migrar.
+        """
+        if self.user_repository is None:
+            return False
+        ctx = await self.user_repository.context()
+        if not ctx.active_projects and not ctx.technical_style and not ctx.recent_decisions:
+            # Sin datos NO se pisa la zona: un arranque sin preferencias dejaría vacía una
+            # zona que otro proceso pudo poblar, y `note_user` no distingue "vacío" de
+            # "aún no consultado".
+            return False
+        self.model.note_user(
+            preferences={"style": ctx.technical_style},
+            active_projects=ctx.active_projects,
+            recent_decisions=ctx.recent_decisions,
+        )
+        return True
 
     def apply_event(self, topic, payload):
         antes = (
