@@ -159,40 +159,65 @@ CREATE TABLE IF NOT EXISTS lessons (
 );
   CREATE INDEX IF NOT EXISTS ix_lessons_scope ON lessons(scope, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS skill_candidates (
-    id BIGSERIAL PRIMARY KEY,
-    candidate_id TEXT NOT NULL UNIQUE,
+-- Skill System consolidado (migración 063). Una sola tabla para candidatos y versiones.
+--
+-- PK `(id, version)` y NO sólo `id`: una skill tiene varias versiones que comparten
+-- `skill_id` (`skill.py` calcula `next_version = max(v.version) + 1` sobre el mismo id), y
+-- la anterior conservaba la v1 en `superseded` como evidencia. Con `PRIMARY KEY (id)` la v2
+-- no cabe. `test_16_la_mejora_crea_v2_y_no_toca_v1` falla por diseño.
+--
+-- `id` es `candidate_id` (`cand-<uuid>`) para un candidato y `skill_id` (`skill-<hash>`)
+-- para una versión: espacios de nombres distintos por construcción.
+--
+-- `payload` guarda el `to_dict()` íntegro y es la fuente de la rehidratación. Las columnas
+-- tipadas existen para poder CONSULTAR por SQL; si mañana falta una columna, el round-trip
+-- sigue siendo exacto porque `payload` no depende del esquema.
+--
+-- `risk` es NOT NULL y su default es 'critical', no 'low'. `skill.py:204` hace
+-- `raw.get("risk") or "low"`: si una fila llegara sin riesgo, el default del código la
+-- degradaría a la MÍNIMA declaración. Con el default de esquema en el extremo
+-- restrictivo, un descarte accidental de la columna no abre la puerta, la cierra.
+CREATE TABLE IF NOT EXISTS skills (
+    id TEXT NOT NULL,
+    version INT NOT NULL DEFAULT 1,
     name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'proposed',
+    purpose TEXT NOT NULL DEFAULT '',
+    -- Contenido de la skill (candidate y version comparten forma por `to_dict()`).
+    procedure JSONB NOT NULL DEFAULT '[]'::jsonb,
+    prerequisites JSONB NOT NULL DEFAULT '[]'::jsonb,
+    required_capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+    success_criteria JSONB NOT NULL DEFAULT '[]'::jsonb,
+    verification_method JSONB NOT NULL DEFAULT '[]'::jsonb,
+    applicability TEXT NOT NULL DEFAULT '',
+    contraindications JSONB NOT NULL DEFAULT '[]'::jsonb,
+    expected_effects JSONB NOT NULL DEFAULT '[]'::jsonb,
+    failure_modes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- Procedencia y evidencia: sin `provenance` no se sabe qué lección originó la skill.
+    source_lessons JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source_experiences JSONB NOT NULL DEFAULT '[]'::jsonb,
+    proposed_version INT NOT NULL DEFAULT 1,
+    validation JSONB NOT NULL DEFAULT '{}'::jsonb,
+    provenance JSONB NOT NULL DEFAULT '{}'::jsonb,
+    risk TEXT NOT NULL DEFAULT 'critical'
+        CHECK (risk IN ('low', 'medium', 'high', 'critical')),
+    -- Unión de los dos vocabularios: el de `SkillStatus` (skill.py) y el de promoción
+    -- (`active`/`deprecated`) que usaba el pipeline que se perdió. Se acepta el término
+    -- más amplio porque `runtime` rehidrata `superseded` y `SkillStatus` no tiene
+    -- equivalente para `active`.
+    status TEXT NOT NULL DEFAULT 'candidate'
+        CHECK (status IN ('candidate', 'proposed', 'under_validation', 'validated',
+                          'rejected', 'superseded', 'active', 'deprecated')),
+    -- LISTA y no objeto: `save_performance` concatena entradas. Un '{}' inicial haría
+    -- que jsonb mezclara objeto y array y los registros quedaran ilegibles.
+    performance_stats JSONB NOT NULL DEFAULT '[]'::jsonb,
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-  CREATE INDEX IF NOT EXISTS ix_skill_candidates_name ON skill_candidates(name, status);
-
--- Una versión publicada es INMUTABLE: la app no expone un UPDATE, y por eso una ejecución
--- antigua siempre se puede reconstruir contra la skill que realmente se usó.
-CREATE TABLE IF NOT EXISTS skill_versions (
-    id BIGSERIAL PRIMARY KEY,
-    skill_id TEXT NOT NULL,
-    version INT NOT NULL,
-    name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'validated',
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_from_lesson_id TEXT REFERENCES lessons(lesson_id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (skill_id, version)
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (id, version)
 );
-  CREATE INDEX IF NOT EXISTS ix_skill_versions_status ON skill_versions(status, name);
-
-CREATE TABLE IF NOT EXISTS skill_performance (
-    id BIGSERIAL PRIMARY KEY,
-    skill_id TEXT NOT NULL,
-    version INT NOT NULL,
-    mission_id TEXT NOT NULL,
-    verified BOOLEAN NOT NULL DEFAULT FALSE,
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-  CREATE INDEX IF NOT EXISTS ix_skill_performance_skill ON skill_performance(skill_id, version);
+  CREATE INDEX IF NOT EXISTS ix_skills_status ON skills(status, name);
+  CREATE INDEX IF NOT EXISTS ix_skills_name_version ON skills(name, version);
 
   -- P0 §4.3 — World Model persistente. Sustituye a `mission.context["world"]` como almacén
   -- de autoridad; esa proyección sigue existiendo, pero ya no es la fuente.

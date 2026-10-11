@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 from alexis.contracts import Checkpoint, Execution, Mission, Task, TaskState
 from alexis.storage.db import Database
@@ -9,6 +10,16 @@ from alexis.storage.serialization import (
     task_from_row,
     task_to_row,
 )
+
+
+def _jsonb(value: Any) -> str:
+    """Serializa a JSON para un parámetro `::jsonb`.
+
+    `default=str` por el motivo que ya usa el resto del fichero: un campo de entidad puede
+    llevar algo no serializable y, en un parámetro de base de datos, eso aborta la
+    escritura. Perder un campo raro es preferible a perder el registro entero.
+    """
+    return json.dumps(value, ensure_ascii=False, default=str)
 
 
 class MissionRepository:
@@ -634,109 +645,224 @@ class LearningRepository:
     # Candidatas
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # Skill System — tabla única `skills`
+    # ------------------------------------------------------------------ #
+    #
+    # `skills` guarda candidatos Y versiones. Se distinguen por `status`, no por tabla:
+    # un candidato nace con `status='candidate'` y se promueve a una fila con
+    # `status='validated'` y su propio `skill_id`.
+    #
+    # PK `(id, version)`: varias versiones comparten `skill_id` y la anterior se conserva
+    # en `superseded` como evidencia. Con `PRIMARY KEY (id)` la v2 no cabría.
+    #
+    # `payload` es el `to_dict()` íntegro y la fuente de la rehidratación. Las columnas
+    # tipadas permiten consultar por SQL; si mañana falta una, el round-trip sigue siendo
+    # exacto porque `payload` no depende del esquema.
+    #
+    # `risk` NUNCA viaja como NULL: `SkillVersion.from_dict` haría `raw.get("risk") or
+    # "low"`, y un riesgo ausente se convertiría en la declaración mínima. Aquí se fuerza
+    # 'critical' si falta o no es del vocabulario.
+
+    _RISKS = ("low", "medium", "high", "critical")
+
+    #: Estados de una skill YA publicada. Todo lo demás es un candidato.
+    _STATES_PUBLICADOS = ("validated", "superseded", "active", "deprecated", "rejected")
+
+    @classmethod
+    def _risk_de(cls, valor) -> str:
+        """Riesgo efectivo. Ausente o inválido => 'critical' (fail-closed), nunca 'low'."""
+        texto = str(valor or "").strip().lower()
+        return texto if texto in cls._RISKS else "critical"
+
+    @staticmethod
+    def _como_dict(row: dict) -> dict:
+        """Fila de `skills` → el dict que `from_dict` espera (`id` → `skill_id`).
+
+        El `payload` se superpone POR ENCIMA de las columnas, y no al revés, por una razón
+        concreta: las columnas son para consultar por SQL, pero sus tipos no siempre coinciden
+        con los del `to_dict()`. `created_at` es `datetime` en la tabla y `float` en la
+        entidad, y `SkillVersion.from_dict` hace `float(raw["created_at"])`. Sin esta
+        superposición, la fila rompe la rehidratación; con ella, el round-trip es exacto
+        aunque mañana falte una columna.
+        """
+        fila = {k: v for k, v in row.items() if k != "id"}
+        payload = _decoded(row.get("payload") or {})
+        if isinstance(payload, dict):
+            fila.update(payload)
+        if row.get("id") is not None:
+            fila.setdefault("skill_id", row["id"])
+        return fila
+
     async def save_candidate(self, candidate) -> bool:
         await self.db.execute(
             """
-            INSERT INTO skill_candidates (candidate_id, name, status, payload)
-            VALUES (%(candidate_id)s, %(name)s, %(status)s, %(payload)s::jsonb)
-            ON CONFLICT (candidate_id) DO UPDATE SET status = EXCLUDED.status
+            INSERT INTO skills (
+                id, version, name, purpose, procedure, prerequisites,
+                required_capabilities, success_criteria, verification_method,
+                applicability, contraindications, expected_effects, failure_modes,
+                source_lessons, source_experiences, proposed_version,
+                validation, provenance, risk, status, payload, updated_at
+            ) VALUES (
+                %(id)s, %(version)s, %(name)s, %(purpose)s, %(procedure)s,
+                %(prerequisites)s, %(required_capabilities)s, %(success_criteria)s,
+                %(verification_method)s, %(applicability)s, %(contraindications)s,
+                %(expected_effects)s, %(failure_modes)s, %(source_lessons)s,
+                %(source_experiences)s, %(proposed_version)s, %(validation)s,
+                %(provenance)s, %(risk)s, %(status)s, %(payload)s, now()
+            )
+            ON CONFLICT (id, version) DO UPDATE
+                SET status = EXCLUDED.status,
+                    name = EXCLUDED.name,
+                    risk = EXCLUDED.risk,
+                    payload = EXCLUDED.payload,
+                    updated_at = now()
             """,
             {
-                "candidate_id": candidate.candidate_id,
+                "id": candidate.candidate_id,
+                "version": 1,
                 "name": candidate.name,
-                "status": candidate.status,
-                "payload": json.dumps(candidate.to_dict(), ensure_ascii=False, default=str),
+                "purpose": candidate.purpose or "",
+                "procedure": _jsonb(candidate.procedure),
+                "prerequisites": _jsonb(candidate.prerequisites),
+                "required_capabilities": _jsonb(candidate.required_capabilities),
+                "success_criteria": _jsonb(candidate.success_criteria),
+                "verification_method": _jsonb(candidate.verification),
+                "applicability": candidate.applicability or "",
+                "contraindications": _jsonb(candidate.contraindications),
+                "expected_effects": _jsonb(candidate.expected_effects),
+                "failure_modes": _jsonb(candidate.failure_modes),
+                "source_lessons": _jsonb(candidate.source_lessons),
+                "source_experiences": _jsonb(candidate.source_experiences),
+                "proposed_version": int(candidate.proposed_version or 1),
+                "validation": _jsonb(candidate.to_dict().get("provenance") or {}),
+                "provenance": _jsonb(candidate.provenance),
+                "risk": self._risk_de(candidate.risk),
+                # El estado real del candidato, no uno forzado. Poner 'candidate' en la
+                # columna mientras el `payload` dice 'proposed' deja la fila diciendo dos
+                # cosas distintas, y `candidates()` filtraría por una mientras devuelve la
+                # otra.
+                # Literal, no `SkillStatus`: `storage` no debe importar `learning`. Si el
+                # vocabulario cambia, esta constante y `skills_status_check` cambian juntos.
+                "status": candidate.status or "proposed",
+                "payload": _jsonb(candidate.to_dict()),
             },
         )
         return True
 
     async def candidates(self, *, status: str | None = None, limit: int = 200) -> list[dict]:
+        """Candidatos: lo que aún NO es una versión publicada.
+
+        Se definen por exclusión —una versión es `validated`/`superseded`/`active`/
+        `deprecated`/`rejected`— en vez de por una lista de estados de candidato. Añadir un
+        estado nuevo al Skill System no dejaría de golpe los candidatos fuera de la vista,
+        que es justo el fallo que produce un filtro por lista positiva.
+        """
+        params: dict[str, Any] = {"limit": limit}
         if status:
             rows = await self.db.fetch(
-                "SELECT payload FROM skill_candidates WHERE status = %(status)s ORDER BY created_at DESC LIMIT %(limit)s",
+                "SELECT * FROM skills WHERE status = %(status)s "
+                "ORDER BY created_at DESC LIMIT %(limit)s",
                 {"status": status, "limit": limit},
             )
         else:
             rows = await self.db.fetch(
-                "SELECT payload FROM skill_candidates ORDER BY created_at DESC LIMIT %(limit)s",
-                {"limit": limit},
+                "SELECT * FROM skills WHERE status <> ALL(%(publicados)s::text[]) "
+                "ORDER BY created_at DESC LIMIT %(limit)s",
+                {"publicados": list(self._STATES_PUBLICADOS), "limit": limit},
             )
-        return [_decoded(row["payload"]) for row in rows]
-
-    # ------------------------------------------------------------------ #
-    # Versiones (inmutables)
-    # ------------------------------------------------------------------ #
+        return [self._como_dict(r) for r in rows]
 
     async def save_skill_version(self, version) -> bool:
+        """Publica una versión. `DO NOTHING` si ya existe: una versión es INMUTABLE.
+
+        Sobrescribirla haría imposible reconstruir una ejecución antigua contra la skill
+        que realmente se usó, que es lo único que explica que exista un registro.
+        """
         await self.db.execute(
             """
-            INSERT INTO skill_versions (skill_id, version, name, status, payload)
-            VALUES (%(skill_id)s, %(version)s, %(name)s, %(status)s, %(payload)s::jsonb)
-            ON CONFLICT (skill_id, version) DO NOTHING
+            INSERT INTO skills (
+                id, version, name, purpose, procedure, prerequisites,
+                required_capabilities, success_criteria, verification_method,
+                applicability, contraindications, provenance, risk, status, payload, updated_at
+            ) VALUES (
+                %(id)s, %(version)s, %(name)s, %(purpose)s, %(procedure)s,
+                %(prerequisites)s, %(required_capabilities)s, %(success_criteria)s,
+                %(verification_method)s, %(applicability)s, %(contraindications)s,
+                %(provenance)s, %(risk)s, %(status)s, %(payload)s, now()
+            )
+            ON CONFLICT (id, version) DO NOTHING
             """,
             {
-                "skill_id": version.skill_id,
-                "version": version.version,
+                "id": version.skill_id,
+                "version": int(version.version or 1),
                 "name": version.name,
+                "purpose": "",
+                "procedure": _jsonb(version.procedure),
+                "prerequisites": _jsonb(version.prerequisites),
+                "required_capabilities": _jsonb(version.capabilities),
+                "success_criteria": _jsonb(version.success_criteria),
+                "verification_method": _jsonb(version.verification),
+                "applicability": version.applicability or "",
+                "contraindications": _jsonb(version.contraindications),
+                "provenance": _jsonb(version.provenance),
+                "risk": self._risk_de(version.risk),
                 "status": version.status,
-                "payload": json.dumps(version.to_dict(), ensure_ascii=False, default=str),
+                "payload": _jsonb(version.to_dict()),
             },
         )
         return True
 
     async def skill_versions(self, *, status: str | None = None, limit: int = 200) -> list[dict]:
         """Las skills utilizables. Superseded sigue saliendo: se puede auditar qué se usó."""
-        if status:
-            rows = await self.db.fetch(
-                "SELECT payload FROM skill_versions WHERE status = %(status)s ORDER BY created_at DESC LIMIT %(limit)s",
-                {"status": status, "limit": limit},
-            )
-        else:
-            rows = await self.db.fetch(
-                "SELECT payload FROM skill_versions ORDER BY created_at DESC LIMIT %(limit)s",
-                {"limit": limit},
-            )
-        return [_decoded(row["payload"]) for row in rows]
-
-    # ------------------------------------------------------------------ #
-    # Rendimiento
-    # ------------------------------------------------------------------ #
+        estados = [s.strip() for s in (status or "validated,superseded,active").split(",")]
+        rows = await self.db.fetch(
+            "SELECT * FROM skills WHERE status = ANY(%(estados)s::text[]) "
+            "ORDER BY created_at DESC LIMIT %(limit)s",
+            {"estados": estados, "limit": limit},
+        )
+        return [self._como_dict(r) for r in rows]
 
     async def save_performance(self, record) -> bool:
+        """Acumula el rendimiento en `performance_stats` de la fila de la skill.
+
+        Se AGREGA en vez de insertar una fila: `skills` es la fuente de verdad de la skill,
+        y su historial debe vivir con ella. Una tabla paralela se volvería a desincronizar.
+        """
         await self.db.execute(
             """
-            INSERT INTO skill_performance (skill_id, version, mission_id, verified, payload)
-            VALUES (%(skill_id)s, %(version)s, %(mission_id)s, %(verified)s, %(payload)s::jsonb)
+            UPDATE skills
+            SET performance_stats = (
+                    CASE WHEN jsonb_typeof(performance_stats) = 'array'
+                         THEN performance_stats ELSE '[]'::jsonb END
+                ) || %(entry)s::jsonb,
+                updated_at = now()
+            WHERE id = %(skill_id)s AND version = %(version)s
             """,
             {
                 "skill_id": record.skill_id,
-                "version": record.version,
-                "mission_id": record.mission_id,
-                "verified": bool(record.verified),
-                "payload": json.dumps(record.to_dict(), ensure_ascii=False, default=str),
+                "version": int(record.version or 1),
+                "entry": _jsonb([record.to_dict()]),
             },
         )
         return True
 
     async def performance(self, *, skill_id: str, version: int | None = None, limit: int = 500) -> list[dict]:
+        """Rendimiento de una skill, leído de su `performance_stats`."""
+        params: dict[str, Any] = {"skill_id": skill_id, "limit": limit}
+        where = "id = %(skill_id)s"
         if version is not None:
-            rows = await self.db.fetch(
-                """
-                SELECT payload FROM skill_performance
-                WHERE skill_id = %(skill_id)s AND version = %(version)s
-                ORDER BY created_at DESC LIMIT %(limit)s
-                """,
-                {"skill_id": skill_id, "version": version, "limit": limit},
-            )
-        else:
-            rows = await self.db.fetch(
-                """
-                SELECT payload FROM skill_performance
-                WHERE skill_id = %(skill_id)s ORDER BY created_at DESC LIMIT %(limit)s
-                """,
-                {"skill_id": skill_id, "limit": limit},
-            )
-        return [_decoded(row["payload"]) for row in rows]
+            where += " AND version = %(version)s"
+            params["version"] = int(version)
+        rows = await self.db.fetch(
+            f"SELECT performance_stats FROM skills WHERE {where} LIMIT %(limit)s", params
+        )
+        registros: list[dict] = []
+        for row in rows:
+            stats = _decoded(row["performance_stats"])
+            if isinstance(stats, list):
+                registros.extend(dict(e) for e in stats if isinstance(e, dict))
+        return registros[:limit]
 
     async def all_performance(self, *, limit: int = 2000) -> list[dict]:
         """Todo el rendimiento registrado, para rehidratar el registro al arrancar.
@@ -746,10 +872,12 @@ class LearningRepository:
         en caliente (una sola ejecución no juzga nunca a una skill).
         """
         rows = await self.db.fetch(
-            """
-            SELECT payload FROM skill_performance
-            ORDER BY created_at DESC LIMIT %(limit)s
-            """,
+            "SELECT performance_stats FROM skills ORDER BY created_at DESC LIMIT %(limit)s",
             {"limit": limit},
         )
-        return [_decoded(row["payload"]) for row in rows]
+        registros: list[dict] = []
+        for row in rows:
+            stats = _decoded(row["performance_stats"])
+            if isinstance(stats, list):
+                registros.extend(dict(e) for e in stats if isinstance(e, dict))
+        return registros[:limit]

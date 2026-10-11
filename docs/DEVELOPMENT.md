@@ -298,22 +298,61 @@ Requisitos del fichero:
 ### Migraciones en cuarentena
 
 `alexis/storage/db.py` declara `QUARANTINED_MIGRATIONS`: migraciones que `migrate()` **no
-aplica**, con el motivo escrito. Hoy contiene `063_skills_consolidation.sql`, que borra
-`skill_candidates`, `skill_versions` y `skill_performance` — las tres las consulta
-`alexis/storage/repositories.py`. Aplicarla automáticamente dejaría el Skill System con
-*"relation does not exist"*.
+aplica**, con el motivo escrito. **Hoy la lista está vacía.**
 
-Para desbloquear una migración en cuarentena hay que **primero** migrar el código que usa
-las tablas viejas, y quitar la entrada de la lista en el mismo commit. El resumen de
-`migrate()` expone `quarantined`, así que no es un silencio.
+Estuvo conteniendo `063_skills_consolidation.sql`, que borra `skill_candidates`,
+`skill_versions` y `skill_performance`. Se puso en cuarentena porque las tres las consulta
+`alexis/storage/repositories.py` y aplicarla sola dejaba el Skill System con *"relation
+does not exist"*: una migración que rompe el código se aplica **antes** que el código que
+la hace posible, no después.
+
+Se desbloqueó al consolidar las tres tablas en `skills` (§ siguiente). El mecanismo sigue
+vigilando —`tests/test_migrations.py` lo comprueba con una migración inventada que borra
+`missions`— porque la próxima migración destructiva volverá a necesitarlo. El resumen de
+`migrate()` expone siempre `quarantined`, esté vacía o no: quien lo lee tiene que poder
+distinguir *"no hay nada retenido"* de *"no hay información"*.
+
+Para desbloquear una hay que **primero** migrar el código que usa las tablas viejas, y
+quitar la entrada de la lista en el mismo commit.
+
+### La tabla `skills`
+
+El Skill System persiste sobre **una sola tabla**, no sobre tres:
+
+| Columna | Para qué |
+|---|---|
+| `id`, `version` | Clave primaria **compuesta**. `version` es el número de versión, no un surrogate. |
+| `name`, `purpose`, `procedure`, `prerequisites`, … | Los campos tipados del `SkillVersion`. |
+| `status` | CHECK que admite tanto el vocabulario del pipeline (`proposed`, `under_validation`, `validated`, `rejected`) como el histórico (`superseded`, `active`, `deprecated`, `candidate`). |
+| `risk` | `NOT NULL DEFAULT 'critical'`, y `CHECK` de cuatro valores. |
+| `payload` | El `to_dict()` íntegro. |
+
+Tres decisiones que no son obvias:
+
+- **PK `(id, version)` y no `id` sola.** Es lo que permite que un mismo `skill_id` tenga
+  `v1`, `v2`, `v3` conviviendo. Con `PRIMARY KEY (id)` la segunda versión no se podría
+  insertar y `save_skill_version()` perdería historial sin avisar.
+- **Un candidato no es una versión.** Un candidato se guarda con su `candidate_id` como
+  `id` y `version = 1`, y se distingue por su `status`, no por una tabla aparte. Por eso
+  `candidates()` define *"candidato"* como **lo que no está publicado** (exclusión) en vez
+  de por una lista positiva: un estado nuevo no deja de golpe los candidatos fuera de la
+  vista.
+- **`payload` es la verdad; las columnas tipadas son el índice.** `SkillVersion.from_dict()`
+  reconstruye desde `payload`, así que el round-trip es exacto aunque alguna columna se quede atrás. Si una consulta de emergencia leyera sólo `purpose`, no reflejaría un
+  cambio guardado sólo en `payload`.
 
 ### Doble fuente: qué NO se duplica
 
-`schema.SQL` y las migraciones se solapan sólo en un caso deliberado: una columna añadida
-después de existir la tabla (`observations.embedding`). `schema.SQL` la declara para bases
-nuevas; la migración 064 la añade a las ya desplegadas. Las tablas que NACEN de una
-migración (`goals`, `schedule_rules`, `skills`) **no** están en `schema.SQL`: meterlas
-devolvería el problema de dos fuentes de verdad que este sistema elimina.
+`schema.SQL` y las migraciones se solapan sólo en casos deliberados:
+
+- `observations.embedding`: `schema.SQL` la declara para bases nuevas; la migración 064 la
+  añade a las ya desplegadas.
+- `skills`: `schema.SQL` la declara completa para bases nuevas y la migración 062/063 la
+  membawa a ese mismo estado en las que ya existían. Solapamiento intencionado: el
+  resultado converge y ambos lados son idempotentes.
+
+Lo que **no** se hace es dejar dos definiciones que puedan divergir. `goals` y
+`schedule_rules` nacen sólo de migraciones.
 
 ### Comprobar
 

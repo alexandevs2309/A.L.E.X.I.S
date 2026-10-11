@@ -28,7 +28,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT_TEST_DB_NAME = "alexis_test"
 _SAFE_DB_NAME = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
-_EXCLUDED_TABLES = frozenset({"spatial_ref_sys"})
+# `migrations_applied` NO se vacía: no es dato de test, es el estado del esquema. Si se
+# truncara, cada test re-ejecutaría las migraciones pendientes contra una base ya
+# consolidada, que es justo el escenario donde una migración con `DROP` rompe algo.
+_EXCLUDED_TABLES = frozenset({"spatial_ref_sys", "migrations_applied"})
 
 
 class DatabaseIsolationError(RuntimeError):

@@ -40,15 +40,19 @@ async def test_migrate_aplica_el_esquema_base(db):
 
 
 async def test_migrate_aplica_las_migraciones_pendientes(db):
-    resultado = await db.migrate()
+    """Invariante: tras `migrate()`, toda migración noVeterle_aplicada queda registrada.
 
-    assert resultado["applied"], "debe aplicar al menos las migraciones pendientes"
+    No se afirma "esta llamada aplicó alguna": `migrations_applied` NO se vacía entre
+    tests, así que la primera llamada del proceso aplica y las siguientes son no-ops. Lo que
+    tiene que ser cierto siempre es el final, no cuántas se aplicaron en esta llamada.
+    """
+    resultado = await db.migrate()
+    assert resultado["failed"] is None
+
     aplicadas = await _aplicadas(db)
-    for nombre in resultado["applied"]:
-        assert nombre in aplicadas
-    # Las que no son destructivas, todas.
     esperadas = set(Database.migration_files()) - set(QUARANTINED_MIGRATIONS)
     assert esperadas <= aplicadas, f"faltan por aplicar: {esperadas - aplicadas}"
+    assert set(resultado["applied"]) <= aplicadas
 
 
 async def test_las_migraciones_crean_su_schema(db):
@@ -72,10 +76,10 @@ async def test_las_migraciones_crean_su_schema(db):
 
 async def test_migrate_dos_veces_no_reaplica(db):
     """La segunda pasada no aplica nada nuevo: es lo que hace `schema.SQL` idempotente."""
-    primera = await db.migrate()
-    assert primera["applied"]
-
+    await db.migrate()
     aplicadas_tras_primera = await _aplicadas(db)
+    assert aplicadas_tras_primera, "la primera pasada no registró nada"
+
     segunda = await db.migrate()
 
     assert segunda["applied"] == [], "la segunda pasada no debe aplicar nada"
@@ -131,11 +135,17 @@ async def test_una_migracion_que_falla_se_detiene_y_se_reporta(db, monkeypatch):
 
 
 async def test_el_resumen_informa_de_cuarentena(db):
-    """La cuarentena es visible en el resumen, no es un silencio."""
+    """La cuarentena sigue siendo visible aunque esté vacía.
+
+    Vacía es el estado correcto desde que 063 se desbloqueó, pero el campo debe seguir
+    existiendo: quien lea el resumen tiene que poder distinguir "no hay nada en cuarentena"
+    de "la información no existe".
+    """
     resultado = await db.migrate()
-    assert resultado["quarantined"]
-    for nombre in resultado["quarantined"]:
-        assert resultado["quarantined"][nombre], "el motivo de la cuarentena debe existir"
+    assert "quarantined" in resultado
+    assert isinstance(resultado["quarantined"], dict)
+    for nombre, motivo in resultado["quarantined"].items():
+        assert motivo, f"{nombre} está en cuarentena sin motivo escrito"
 
 
 # --------------------------------------------------------------------- #
@@ -143,39 +153,70 @@ async def test_el_resumen_informa_de_cuarentena(db):
 # --------------------------------------------------------------------- #
 
 
-async def test_una_migracion_destructiva_no_se_aplica(db):
-    """`063` hace DROP de tablas que `repositories.py` consulta.
+async def test_063_ya_se_aplica_y_las_tablas_viejas_desaparecen(db):
+    """`063` copia los datos y borra `skill_candidates`/`skill_versions`/`skill_performance`.
 
-    Si se aplicara sola, el Skill System se quedaría sin `skill_candidates` ni
-    `skill_versions` y toda lectura de skills lanzaría "relation does not exist". Es la
-    razón de que exista la cuarentena, y por eso tiene prueba propia.
+    Es el final de la consolidación: el Skill System escribe y lee sobre `skills`, así que
+    las tablas viejas son estructura huérfana. Mantenerlas sería una segunda fuente de
+    verdad que puede volver a desincronizarse, que es lo que consolidation evita.
     """
-    await db.migrate()
+    resultado = await db.migrate()
+    assert resultado["failed"] is None
 
     aplicadas = await _aplicadas(db)
-    for nombre in QUARANTINED_MIGRATIONS:
-        assert nombre not in aplicadas, (
-            f"{nombre} se aplicó y elimina tablas que el código usa"
-        )
+    assert "063_skills_consolidation.sql" in aplicadas
+    assert "063_skills_consolidation.sql" not in QUARANTINED_MIGRATIONS
 
-    # Y la prueba de que la cuarentena está justificada: las tablas siguen ahí.
     tablas = {
         f["tablename"]
         for f in await db.fetch(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
         )
     }
-    assert {"skill_candidates", "skill_versions", "skill_performance"} <= tablas, (
-        "las tablas que lee el Skill System desaparecieron"
+    assert "skills" in tablas
+    assert not ({"skill_candidates", "skill_versions", "skill_performance"} & tablas), (
+        "las tablas viejas siguen existiendo: la consolidación no ocurrió"
     )
 
 
-async def test_la_cuarentena_declara_el_motivo():
-    """Una cuarentena sin motivo escrito es una excepción sin explicación."""
-    assert QUARANTINED_MIGRATIONS
+async def test_una_migracion_destructiva_sigue_protegida_si_se_declara(db, monkeypatch):
+    """El mecanismo de cuarentena sigue vivo aunque hoy no haya ninguna.
+
+    Se prueba con una migración inventada que borra `missions`: si alguien añade un `DROP`
+    sin justificarla, `migrate()` no debe aplicarla por su cuenta.
+    """
+    from alexis.storage.db import MIGRATIONS_DIR, QUARANTINED_MIGRATIONS as QM
+
+    peligrosa = "098_peligrosa.sql"
+    (MIGRATIONS_DIR / peligrosa).write_text("DROP TABLE IF EXISTS missions;", encoding="utf-8")
+    monkeypatch.setitem(QM, peligrosa, "borraría la tabla de misiones")
+
+    reales = Database.migration_files()
+
+    def archivos():
+        return sorted(set(reales) | {peligrosa})
+
+    monkeypatch.setattr(Database, "migration_files", staticmethod(archivos))
+    try:
+        resultado = await db.migrate()
+        assert resultado["applied"] == []
+        assert resultado["quarantined"].get(peligrosa)
+        tablas = {
+            f["tablename"]
+            for f in await db.fetch(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+            )
+        }
+        assert "missions" in tablas, "una migración en cuarentena se aplicó igualmente"
+    finally:
+        (MIGRATIONS_DIR / peligrosa).unlink()
+
+
+async def test_toda_migracion_en_cuarentena_declara_su_motivo():
+    """Ninguna entrada sin motivo escrito: una cuarentena sin explicación es un veto invisible."""
     for nombre, motivo in QUARANTINED_MIGRATIONS.items():
-        assert (MIGRATIONS_DIR / nombre).is_file(), f"{nombre} no existe"
-        assert motivo and len(motivo) > 20, f"{nombre} sin motivo legible"
+        assert (MIGRATIONS_DIR / nombre).is_file(), f"{nombre} no existe en disco"
+        assert motivo and len(motivo) > 20, f"{nombre} en cuarentena sin motivo legible"
 
 
 # --------------------------------------------------------------------- #

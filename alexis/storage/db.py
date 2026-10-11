@@ -18,25 +18,15 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "scripts" / "migrations"
 
 #: Migraciones que `migrate()` NO aplica automáticamente.
 #:
-#: No es una lista de "pendientes": es una lista de **destructivas**. Una migración que
-#: hace `DROP TABLE` sobre tablas que el código consulta no es un cambio de esquema, es una
-#: eliminación de datos en producción, y un arranque no debe decidir eso solo.
+#: Vacío a propósito: la consolidación del Skill System se completó. `skill.py` sigue siendo
+#: la única implementación, pero `LearningRepository` ya escribe y lee sobre `skills`, la
+#: tabla tiene la PK compuesta `(id, version)` y las columnas que la rehidratación necesita,
+#: y 063 copia los datos ANTES de borrar las tres tablas viejas.
 #:
-#: 063 consolida el Skill System: crea `skills` y borra `skill_candidates`,
-#: `skill_versions` y `skill_performance`. Las tres las lee
-#: `alexis/storage/repositories.py`, así que aplicarla automáticamente dejaría el Skill
-#: System con "relation does not exist". La consolidación del lado del CÓDIGO nunca se
-#: terminó —los repositorios siguen leyendo las tablas viejas—, así que la migración no
-#: puede precederla.
-#:
-#: Para desbloquearla hay que migrar el código a `skills` primero, y entonces quitarla de
-#: aquí en el mismo commit.
-QUARANTINED_MIGRATIONS = {
-    "063_skills_consolidation.sql": (
-        "hace DROP TABLE sobre skill_candidates/skill_versions/skill_performance, "
-        "que alexis/storage/repositories.py sigue consultando"
-    ),
-}
+#: Reintroducir una migración destructiva aquí exige el mismo cuidado de siempre: `DROP
+#: TABLE` sobre tablas que el código consulta no es un cambio de esquema, es una eliminación
+#: de datos, y un arranque no debe decidir eso solo.
+QUARANTINED_MIGRATIONS: dict[str, str] = {}
 
 
 class Database:
