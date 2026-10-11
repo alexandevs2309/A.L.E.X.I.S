@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from apps.api.auth import MissingAPIToken, require_api_token, token_matches
 from apps.demo.runtime_flags import resolve_cognitive_runtime
 from apps.ui import PAGE
 from alexis.agents.registry import AGENTS
@@ -792,6 +793,52 @@ def _self_aux_factory(RUNTIME, TOOLS, RUNNING, STATE, SELF, enabled, self_sync=N
 # --------------------------------------------------------------------------- #
 
 
+#: Token de control del API. Se resuelve UNA vez al arrancar y no se vuelve a leer.
+#:
+#: `require_api_token()` devuelve "" cuando no hay token configurado en un entorno
+#: permisivo, y `token_matches("", x)` devuelve SIEMPRE True: usarlos tal cual dejaría
+#: estas rutas abiertas, que es exactamente el hallazgo. Por eso, si no hay token de
+#: operator, se genera uno aleatorio para el proceso: la validación se ejecuta SIEMPRE y
+#: lo único que se pierde es la comodidad de no configurarlo.
+#:
+#: En `ALEXIS_ENV=production` `require_api_token()` lanza `MissingAPIToken` y el arranque
+#: muere, que es lo correcto: allí no se degrada.
+API_TOKEN = ""
+#: Rutas que conceden poder sobre una misión en curso. Autenticar el GET no sirve de nada:
+#: aprobar, denegar y responder por el usuario SÍ cambian lo que el runtime hace.
+RUTAS_DE_CONTROL = ("/approve", "/deny", "/clarify")
+
+
+def _token_del_proceso() -> str:
+    """Devuelve el token efectivo, generándolo si el entorno no lo define."""
+    global API_TOKEN
+    if API_TOKEN:
+        return API_TOKEN
+    API_TOKEN = require_api_token()
+    if not API_TOKEN:
+        import secrets as _secrets
+
+        API_TOKEN = _secrets.token_urlsafe(32)
+        LOGGER.warning(
+            "ALEXIS_API_TOKEN no definido: se ha generado uno para este proceso. "
+            "Las rutas de control (/approve, /deny, /clarify) lo exigirán. "
+            "El token está en el log de arranque; para uno estable, define "
+            "ALEXIS_API_TOKEN en el entorno."
+        )
+    return API_TOKEN
+
+
+def _RUTA_ES_DE_CONTROL(path: str) -> bool:
+    """¿Esta ruta concede poder sobre una misión?
+
+    Se decide por el sufijo, no por el listado de rutas, para que añadir `/approve` a
+    otro sitio (por ejemplo un `PATCH`) quede protegido por ser control y no por
+    acordarse de enumerarlo.
+    """
+    limpio = (path or "").split("?", 1)[0].rstrip("/")
+    return any(limpio.endswith(sufijo) for sufijo in RUTAS_DE_CONTROL)
+
+
 def create_handler(runtime: OfficialRuntime, presentation: Any = None):
     """Clase `BaseHTTPRequestHandler` con la superficie oficial.
 
@@ -926,6 +973,32 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
                     prefs, LOOP).result(timeout=10)])
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": f"{type(exc).__name__}: {exc}"}, 400)
+
+        def _exige_token_de_control(self) -> bool:
+            """`True` si la petición está autenticada; si no, ya respondió 401/403.
+
+            Sin cabecera `Authorization` es 401 (no hay credenciales); con cabecera pero
+            token incorrecto es 403 (las hay y no valen). La comparación es en tiempo
+            constante (`secrets.compare_digest` dentro de `token_matches`) para que el
+            valor no se pueda sacar por temporización.
+            """
+            if not _RUTA_ES_DE_CONTROL(self.path):
+                return True
+            cabecera = self.headers.get("Authorization") or ""
+            esperado = _token_del_proceso()
+            if not cabecera.strip():
+                self._send_json(
+                    {"error": "unauthorized",
+                     "detail": "las rutas de control exigen Authorization: Bearer <token>"},
+                    401,
+                )
+                return False
+            partes = cabecera.split(None, 1)
+            aportado = partes[1].strip() if len(partes) == 2 else ""
+            if not token_matches(esperado, aportado):
+                self._send_json({"error": "forbidden", "detail": "token inválido"}, 403)
+                return False
+            return True
 
         def _user(self):
             """El `UserRepository`, o `None` si no hay persistencia.
@@ -1175,6 +1248,11 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
         def do_POST(self):
             path = urlparse(self.path).path
             if presentation is not None and presentation.try_post(self, path):
+                return
+            # ANTES de tocar la misión. El ensanchamiento del envelope que hace
+            # `/approve` va después de esta línea, no antes: si el token falla, la
+            # permiso no se amplía.
+            if not self._exige_token_de_control():
                 return
             if path in ("/user/preferences", "/user/projects"):
                 self._user_write(path)

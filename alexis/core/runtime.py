@@ -96,6 +96,14 @@ class AlexisRuntime:
             capability="fs.stat",
             args={"path": path},
         )
+        # SECURITY EXCEPTION: el probe de recuperación (`fs.stat`) salta Policy y Gate
+        # por diseño. No es un olvido y conviene que se lea aquí, junto al bypass:
+        #   1. La capability está HARDCODEADA. El modelo no elige qué se inspecciona.
+        #   2. La acción es `research` (sólo lectura) y de riesgo LOW.
+        #   3. `FileSystemStatTool` contiene la ruta por `resolve_in_workspace`, así que
+        #      ni siquiera la ruta escapa del workspace: está verificado en Fase 2.
+        # Lo que NO valdría sería inspeccionar con una capability elegida por el modelo o
+        # con una ruta sin confinar. Si algún día el probe cambia, esto hay que rehacerlo.
         try:
             result = await self.executor.execute(mission, probe, tool_name="fs.stat")
         except Exception as exc:  # noqa: BLE001 — no poder mirar no es "no existe"

@@ -26,6 +26,11 @@ class MissionState(str, Enum):
     WAITING_APPROVAL = "waiting_approval"
     WAITING_CLARIFICATION = "waiting_clarification"
     BLOCKED = "blocked"
+    #: Pausa explícita: la misión sigue viva pero el runtime no avanza. Distinta de
+    #: STOPPED, que la termina. Antes no existía y una misión en curso sólo podía
+    #: "detenerse" (STOPPED) o quedarse esperando — no había forma de decir "para, sigue
+    #: aquí", que es justo lo que un operador quiere al bajar la tensión.
+    PAUSE = "pause"
     RECOVERING = "recovering"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -53,6 +58,23 @@ class MissionEnvelope:
     capabilities: list[str] = field(default_factory=list)
     perimeters: list[dict] = field(default_factory=list)
     auto_approve: list[str] = field(default_factory=list)
+
+
+#: Estados desde los que la misión no vuelve a estar viva por su cuenta.
+ESTADOS_TERMINALES = (MissionState.COMPLETED, MissionState.FAILED)
+
+#: Estados que reinician una misión. Esos son los que se prohíben desde un terminal.
+ESTADOS_REINICIANTE = (MissionState.RUNNING, MissionState.PENDING)
+
+
+class InvalidStateTransitionError(RuntimeError):
+    """Se intentó devolver una misión ya terminada a un estado en curso.
+
+    No es una máquina de estados completa —no hay grafo de transiciones— sino la guarda
+    mínima contra el error que sí importa: una misión `COMPLETED` o `FAILED` que vuelve a
+    `RUNNING` porque alguien asignó el campo sin mirar. Sin esta guarda, "terminada" es
+    sólo una palabra que un `mission.state = ...` borra.
+    """
 
 
 class UnverifiedGoalError(RuntimeError):
@@ -84,6 +106,14 @@ class Mission:
         confirmado recibe `UnverifiedGoalError`. Los caminos que sí pueden completarse usan
         `MissionEngine.settle()`, que es la política; esta es la redacción.
         """
+        if name == "state":
+            actual = getattr(self, "state", None)
+            if actual in ESTADOS_TERMINALES and value in ESTADOS_REINICIANTE:
+                raise InvalidStateTransitionError(
+                    f"la misión {getattr(self, 'id', '?')} está en {actual.value} y no "
+                    f"puede volver a {value.value}. Un estado terminal no se reabre "
+                    "asignando el campo; crea una misión nueva."
+                )
         if name == "state" and value == MissionState.COMPLETED:
             from alexis.autonomy.goal_state import goal_is_confirmed
 
