@@ -130,12 +130,16 @@ quietly resolved in either direction:
 The vision's own §67 priority order puts **core correctness → safety → persistence** first,
 then goal management, then recovery, then learning. Read against the real state:
 
-- The P0 cognitive core is at **75.0%** with the scoring method stated in
-  `P0-COGNITIVE-CORE-GAP-ANALYSIS.md`. The remaining P0 gaps are capability selection under a
-  real model, a composed response, and reflection.
-- **Reflection (§17 of the gap analysis, `MISSING`)** is the smallest gap that the vision
-  needs and the code does not have, and it has an existing seam: the loop already stops at
-  COMMIT with a `WorldModel`, a `KnowledgeState` and an `EvidenceStore`.
+- The P0 cognitive core is at **20 COMPLETE · 2 PARTIAL (2, 3) of 22** (95.5% by its own scoring method) with the method stated in
+  `P0-COGNITIVE-CORE-GAP-ANALYSIS.md`. The remaining P0 gaps are **Req 2 (Context Assembly,
+  short of a PostgreSQL end-to-end test) and Req 3 (Self Model does not take part in the
+  authorization decision)**.
+- **Reflection (§17) is `COMPLETE`, not `MISSING`.** This paragraph used to say it was the
+  smallest gap the vision needed and the code did not have. It is implemented
+  (`alexis/learning/reflection.py`, `experience.py`), wired into the loop's epilogue
+  (`cognition/loop.py:2078`, called from `core/runtime.py:544`) and covered by
+  `tests/test_p0_5_6_epilogue.py`. The gap analysis marked it COMPLETE on 2026-09-26; this
+  paragraph was never updated to match the document it refers to.
 - Goal management (§9, §10) is the largest structural absence: ALEXIS manages one mission at a
   time and has no notion of an objective outliving it.
 

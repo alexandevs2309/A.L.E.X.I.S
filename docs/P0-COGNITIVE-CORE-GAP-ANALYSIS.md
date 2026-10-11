@@ -5,7 +5,11 @@
 - Alcance: los 22 requisitos obligatorios de P0 de `plan_ejecution.md`
 - Naturaleza: **solo auditoría**. No se modificó código en este documento.
 - Actualización 2026-09-25: implementados **§5.1**–**§5.5**. Ver §7 y §9–§12.
-- Veredicto: **P0 = 75.0% de los 22 requisitos del plan — NO está al 100%. P1 no comienza.**
+- Veredicto: **20 COMPLETE · 2 PARTIAL (2, 3) · 0 BROKEN · 0 MISSING** sobre los 22
+  requisitos del plan, al 2026-10-11. P0 **no** está cerrado: los dos requisitos
+  restantes están en §8, con su evidencia y su límite. Ver §8 (re-auditoría vigente).
+  Esta cabecera decía «75.0% — NO está al 100%», que era la cifra de §14 (2026-09-26) y
+  quedó desfasada cuando §8 cerró ocho requisitos más.
 - Los requisitos COMPLETE han pasado de 5 a 8. El porcentaje no se mueve respecto a §5.4
   porque el requisito 23 (ejecución real de tests), que §5.4 añadió, sale del numerador y el
   11 entra; el recuento de requisitos cumplidos sí subió. El 23 no cuenta en los 22 del plan.
@@ -26,7 +30,12 @@ Cada requisito se clasifica contra el código real, no contra la intención docu
 BROKEN pesa menos que PARTIAL a propósito: un requisito roto es más peligroso que
 uno parcial, porque produce falsos positivos (el sistema *parece* cumplirlo).
 
-**Ecuación (sobre los 22 del plan):** `(11×1.00 + 11×0.50 + 0×0.25 + 0×0.00) / 22 = 16.50 / 22 = 75.0%`
+**Ecuación (sobre los 22 del plan, método §5.5: COMPLETE=1.00, PARTIAL=0.50,
+BROKEN=0.25, MISSING=0.00):**
+`(20×1.00 + 2×0.50 + 0×0.25 + 0×0.00) / 22 = 21.00 / 22 = 95.5%`
+
+El porcentaje es un artefacto derivado del recuento, no la medida. El recuento es lo que
+dice la verdad: 20 COMPLETE, 2 PARTIAL.
 
 *(53.4% original → 54.5% §5.1 (req. 11 de BROKEN a PARTIAL) → 57.3% §5.2 (req. 10 COMPLETE) → 59.1% §5.3 (req. 15 COMPLETE) → 61.4% §5.4 (req. 12 COMPLETE).)*
 
@@ -670,7 +679,13 @@ El 6 sube solo a PARTIAL. La selección de capability es dinámica, sí, pero el
 pide dos cosas y una de ellas —que el plan dependa del objetivo y no de una secuencia fija—
 sigue sin cumplirse. Marcarlo COMPLETE habría sido falsear el medidor. La evidencia es lo que decide.
 
-### Nueva cifra
+### Nueva cifra — ⚠️ SUPERADA (vigente: la cabecera y §8, 2026-10-11)
+
+> Este apartado se conserva tal cual porque es la foto del 2026-09-26. **Sus cifras ya no
+> valen**: §8 cerró después ocho requisitos (1, 4, 7, 13, 18, 19, 21, 22) y la auditoría
+> del 2026-10-11 reevaluó el 6 a `COMPLETE`. El recuento vigente es **20 COMPLETE · 2
+> PARTIAL (2, 3)**. No se reescribe para no destruir la trazabilidad de cómo se llegó aquí.
+
 `(11×1.00 + 11×0.50 + 0×0.25 + 0×0.00) / 22 = 16.50 / 22 = 75.0%`
 
 11 COMPLETE (5, 8, 9, 10, 11, 12, 14, 15, 16, 17, 20) · 11 PARTIAL (1, 2, 3, 4, 6, 7, 13, 18,
