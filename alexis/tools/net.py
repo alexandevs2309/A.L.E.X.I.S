@@ -20,6 +20,14 @@ llamada de red cruda fuera del registro que documenta ese fichero, la suite fall
 - **No cubre todavía las capabilities de red que faltan.** `api.http`, `mcp.run` e
   `iot.mqtt` están declaradas pero sin implementar. Cuando se escriban, deben llamar
   aquí; el guardián lo exigirá.
+- **La política por defecto de `check_url()` permite loopback.** `check_url` bloquea lo
+  NO público, así que PostgreSQL y los servidores de test siguen funcionando por TCP
+  local. Eso es deliberado: el aislamiento de red real (net-ns) no se puede activar sin
+  mover PostgreSQL a socket unix, y está medido y documentado, no secreto.
+
+`instalar_guardian_de_salida()` (abajo) es una capa DISTINTA y más estrecha: en vez de
+filtrar por la política de una tool, cierra los `connect()` de Python que no pasen por
+este módulo. Ver su docstring para lo que cubre y lo que NO cubre.
 
 Sobre el DNS rebinding: `check_url()` RESUELVE el nombre y comprueba todas las
 direcciones, y `fetch_text()` conecta a la que comprobó sin volver a preguntar. Sin esa
@@ -29,8 +37,12 @@ ventana que el atacante controla con el TTL. Ver `docs/SECURITY.md`.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import ipaddress
+import os
 import socket
+import sys
 from urllib.parse import urljoin, urlparse
 
 #: `https` y `http` únicamente. Sin FTP, sin `file://`, sin gopher: los esquemas raros
@@ -231,10 +243,14 @@ class _BackendFijado:
         # no se fija y se deja el comportamiento por defecto. La validación ocurre antes
         # y ese camino ya debería haber bloqueado; fijar aquí a ciegas sería peor.
         destino = ip if ip is not None else host
-        return await self._backend().connect_tcp(
-            destino, port, timeout=timeout, local_address=local_address,
-            socket_options=socket_options,
-        )
+        # La ventana de permiso se abre AQUÍ y no alrededor de `fetch_text`: es el punto
+        # más estrecho que hace el connect real. Envolver la función entera dejaría el
+        # permiso abierto durante la descarga completa, que es justo lo que no se quiere.
+        with autorizar_salida():
+            return await self._backend().connect_tcp(
+                destino, port, timeout=timeout, local_address=local_address,
+                socket_options=socket_options,
+            )
 
     async def connect_unix_socket(self, path, timeout=None, socket_options=None):
         return await self._backend().connect_unix_socket(
@@ -367,3 +383,107 @@ async def fetch_text(
 # --------------------------------------------------------------------------- #
 # La tool
 # --------------------------------------------------------------------------- #
+
+
+# --------------------------------------------------------------------------- #
+# Guardián de salida — cierre por defecto de los `connect()` de Python
+# --------------------------------------------------------------------------- #
+
+class EgressDenied(PermissionError):
+    """Un `connect()` de Pythonocuments fuera de `net.py` intentó salir a la red.
+
+    Deliberadamente NO es `FetchBlocked`: aquel significa "esta tool pidió un destino que
+    la política no permite" y es un intento de acceso del usuario. Este significa "salió
+    un socket que no ha pasado por la puerta", que es un fallo de programación o un
+    ataque, y no se debe reintentar igual.
+    """
+
+
+#: El permiso dura lo que dura el contexto. Un `ContextVar` y no una bandera global
+#: porque la red se usa desde hilos y desde tareas: con una bandera global, dos
+#: descargas simultáneas se darían el permiso la una a la otra.
+_permiso_de_salida: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "alexis_permiso_de_salida", default=False
+)
+
+#: El hook de auditoría de Python NO se puede quitar una vez instalado, así que lo que se
+#: manipula es la POLÍTICA, no el hook. Eso permite probar las dos ramas en el mismo
+#: proceso sin tener que poisoned el resto de la suite.
+_politica: dict[str, bool] = {"activo": True}
+
+_hook_instalado = False
+
+
+def _es_loopback(direccion) -> bool:
+    """¿La dirección de destino es local?
+
+    Se comparan los bytes, no la cadena: `localhost`, `::1`, `127.0.0.1` y `127.1.2.3`
+    son todos loopback y una comparación de texto dejaría pasar `127.1.2.3`.
+    """
+    if isinstance(direccion, (bytes, bytearray)):
+        # sockaddr de AF_UNIX: bytes, no una tupla. No hay red en juego.
+        return True
+    if not isinstance(direccion, tuple) or not direccion:
+        return True  # forma desconocida: no se bloquea por ignorancia
+    try:
+        return ipaddress.ip_address(str(direccion[0])).is_loopback
+    except ValueError:
+        return False
+
+
+def _vigilante_de_conexiones(evento: str, args) -> None:
+    """Hook de auditoría. Sólo mira `socket.connect`; todo lo demás pasa sin coste.
+
+    Se filtra en `connect` y no en `socket.__new__` a propósito: crear un socket no sale
+    a la red, y bloquear la creación rompería los sockets de los SERVIDORES de test y de
+    cualquier servidor que ALEXIS levante en local, que es justo lo que sí se permite.
+    """
+    if evento != "socket.connect" or not _politica["activo"]:
+        return
+    if _permiso_de_salida.get():
+        return
+    direccion = args[1] if len(args) > 1 else None
+    if _es_loopback(direccion):
+        return
+    host = direccion[0] if isinstance(direccion, tuple) and direccion else direccion
+    raise EgressDenied(
+        f"conexión a {host!r} bloqueada: todo socket de ALEXIS debe salir por "
+        f"alexis.tools.net.fetch_text(). Si de verdad hace falta otro camino, se "
+        f"autoriza explícitamente con net.autorizar_salida()."
+    )
+
+
+def instalar_guardian_de_salida(forzar: "bool | None" = None) -> bool:
+    """Instala el hook de auditoría. Idempotente. Devuelve si el hook queda activo.
+
+    El hook es PERMANENTE para el proceso —Python no da forma de quitarlo— así que sólo
+    se llama una vez y la política se cambia en caliente con `_politica`. Se activa al
+    importar el módulo salvo que `ALEXIS_EGRESS_GUARD=0`: desactivar la protección por
+    una variable de entorno tiene que ser deliberado, no algo que ocurra por descuido.
+    """
+    global _hook_instalado
+    if forzar is None:
+        forzar = os.environ.get("ALEXIS_EGRESS_GUARD", "1") not in ("0", "false", "no")
+    if forzar and not _hook_instalado:
+        sys.addaudithook(_vigilante_de_conexiones)
+        _hook_instalado = True
+    _politica["activo"] = bool(forzar)
+    return _politica["activo"]
+
+
+@contextlib.contextmanager
+def autorizar_salida():
+    """Permite salir a la red mientras dura el bloque. De uso EXCLUSIVO de este módulo.
+
+    Es lo que convierte la política en una puerta: `fetch_text()` abre esta ventana justo
+    para su conexión, y nada más en todo ALEXIS la puede abrir. Que sea `ContextVar` y no
+    un atributo es lo que impide que una tool queake cualquier código en su camino.
+    """
+    token = _permiso_de_salida.set(True)
+    try:
+        yield
+    finally:
+        _permiso_de_salida.reset(token)
+
+
+instalar_guardian_de_salida()

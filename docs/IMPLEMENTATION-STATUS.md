@@ -93,6 +93,16 @@ La v0.3 es una **Complete Foundation**, no una versión final.
   lo demuestra a propósito. El arreglo limpio es que `_commit` respete los finales
   externos, y eso toca todo el runtime — es una decisión, no un detalle, y queda pendiente.
 
+  **Fase 3 — aislamiento de red (2026-10-12): paso 1, a medias y etiquetado.**
+  Medido antes de escribir código: el network namespace SÍ se puede crear sin root
+  (user namespaces), pero corta también a PostgreSQL, que sólo se ve por TCP desde el
+  host. Se optó por no tocar la base y se implementó una capa en Python
+  (`net.instalar_guardian_de_salida()`): cierra los `connect()` de Python que no pasen por
+  `net.py`, con el permiso en un `ContextVar` que no se filtra entre hilos. 10 pruebas.
+  **No es aislamiento y no se documenta como tal**: las librerías nativas (`libpq`,
+  `libcurl`) y el DNS siguen fuera, y la garantía de aislamiento sigue siendo **no**.
+  El net-ns queda medido y documentado en `docs/SECURITY.md` para cuando se decida.
+
   **No existe `/cancel`.** `STOPPED` ya significa "cancelada" en la presentación
   (`presenter.py` lo rotula así); un cuarto nombre para lo mismo haría creer al operador
   que puede deshacer algo que no puede.

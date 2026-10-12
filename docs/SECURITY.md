@@ -138,6 +138,61 @@ credenciales es exactamente el tipo de atajo que un control explícito existe pa
 **Límite honesto:** la validación dice a qué dirección puede publicar *esta* tool. No
 impide que otra tool abra un socket, y no sustituye un namespace de red.
 
+## Guardián de salida: defensa en profundidad, NO aislamiento (2026-10-12)
+
+### Qué se decidió y por qué
+
+La Fase 3 consistía en aislar la red a nivel de sistema operativo. Se midió
+antes de escribir código, y el resultado cambió el plan:
+
+| Comprobación | Resultado |
+|---|---|
+| ¿Se puede crear un network namespace? | **Sí**, con user namespace (sin root) |
+| ¿Hay puente para sacar tráfico de él? | No (`slirp4netns`/`pasta` no instalados) |
+| Dentro del namespace: internet | Bloqueada |
+| Dentro del namespace: PostgreSQL por TCP | **Bloqueada** |
+| Dentro del namespace: sockets unix | **Funcionan** |
+
+El aislamiento real es posible y se comprobó con un experimento, no con una suposición.
+El problema es que **corta también a la base de datos**: PostgreSQL sólo es visible desde
+el host por TCP 5433, y su socket unix vive dentro del contenedor y no se ve desde fuera.
+Exponerlo exigiría recrear el contenedor.
+
+Decisión tomada: **Paso 1 sin tocar PostgreSQL**. El net-ns queda medido y documentado
+para cuando se decida, no aplicado a medias.
+
+### Qué hace este guardián
+
+Un hook de auditoría de Python (`sys.addaudithook`) que **rechaza todo `socket.connect`
+que no pase por `alexis/tools/net.py`**. El permiso vive en un `ContextVar` que sólo
+abre `autorizar_salida()`, y esa ventana se abre en el punto más estrecho posible: justo
+antes del connect fijado, no alrededor de la descarga.
+
+- El loopback **sigue permitido**, y por eso PostgreSQL y los servidores locales no se
+  rompen. Bloquearlo sólo funcionaría con el net-ns, que es lo que no se ha hecho.
+- El permiso **no se filtra entre hilos**, y hay una prueba que lo comprueba: con una
+  bandera global, dos descargas simultáneas se darían el permiso la una a la otra.
+
+### Lo que NO cubre — y es lo importante
+
+1. **Las librerías nativas.** El hook sólo ve lo que pasa por la API de Python. `libpq`
+   (PostgreSQL), `libcurl` o cualquier socket abierto por una extensión en C **no pasan
+   por aquí**. Es la limitación de fondo de toda defensa en Python, y es exactamente el
+   hueco que el net-ns cerraría.
+2. **El DNS.** Se filtra el `connect`, no la resolución. Los nombres consultedos siguen
+   saliendo. No se puede cerrar sin romper `resolve_public()`, que necesita resolver
+   **para poder validar** —es el propio control que dice "permitido" el que lo necesita—.
+3. **Otros procesos.** Decide a qué puede salir este proceso. No impide que otro
+   programa de la máquina conecte a donde quiera.
+4. **Es irreversible dentro del proceso.** Python no da forma de quitar un hook de
+   auditoría. Lo que sí se puede cambiar en caliente es la política
+   (`ALEXIS_EGRESS_GUARD=0` o `net._politica`), y por eso el hook filtra en `connect` y no
+   en `socket.__new__`: bloquear la creación de sockets rompería los servidores locales.
+
+**Lo que NO se afirma:** esto no es aislamiento de red, no es una garantía de que ALEXIS
+no pueda salir, y no cierra los puntos 1 y 2. Es una capa más. La garantía de aislamiento
+sigue siendo **no**.
+
 ## Rutas de control: qué exige token y qué no (2026-10-12)
 
 **Exigen token** (`ALEXIS_API_TOKEN`, comparación en tiempo constante): `POST
