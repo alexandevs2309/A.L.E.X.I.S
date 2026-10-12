@@ -138,6 +138,29 @@ credenciales es exactamente el tipo de atajo que un control explícito existe pa
 **Límite honesto:** la validación dice a qué dirección puede publicar *esta* tool. No
 impide que otra tool abra un socket, y no sustituye un namespace de red.
 
+## Rutas de control: qué exige token y qué no (2026-10-12)
+
+**Exigen token** (`ALEXIS_API_TOKEN`, comparación en tiempo constante): `POST
+/missions/{id}/approve`, `/deny`, `/clarify`, `/pause`, `/resume` y `/stop`. Sin cabecera
+→ 401; con cabecera incorrecta → 403. Sin token configurado en producción, el arranque
+falla; en desarrollo se genera uno aleatorio por proceso y se registra al arrancar.
+
+El criterio no es "lo que Dangerous hacía": es **poder sobre algo que el sistema tiene en
+memoria**. Aprobar cambia lo que se ejecuta; pausar, reanudar o parar cambian el estado de
+una misión que el bucle tiene abierta. Por eso las tres nuevas entran por la misma puerta
+que las tres antiguas y no por cortesía.
+
+**NO exigen token**, y sigue siendo un agujero conocido: `GET /missions` y
+`GET /missions/{id}` (lectura del estado y del contexto de cualquier misión),
+`POST /missions` (crear una misión, que en `autonomous` se encola sola), `POST /chat` y el
+resto de la superficie de lectura. Leer no ejecuta, pero `GET /missions/{id}` devuelve el
+contexto completo de la misión y eso ya es datos.
+
+**Lo que NO se afirma:** esto no es autenticación de usuarios. Es una única llave
+compartida para la superficie de control de localhost. No hay identidades, no hay
+auditoría de *quién* approved, y con la llave puesta cualquier proceso de la máquina puede
+aprobar un `git push`.
+
 ## DNS rebinding: MITIGATED at address level (2026-10-11)
 
 **This section states a control, and what it does not cover.** The claim is deliberately

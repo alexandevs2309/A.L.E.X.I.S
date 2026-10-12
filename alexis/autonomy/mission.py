@@ -29,3 +29,31 @@ class MissionEngine:
     def stop(self, mission: Mission, reason: str):
         mission.state = mission.state.STOPPED
         mission.results.append({"stopped": reason})
+
+    def pause(self, mission: Mission, reason: str):
+        """Pausa: la misión sigue viva pero el bucle debe soltarla.
+
+        Distinta de `stop` en eso: `stop` la termina, `pause` la deja reanudable. Sin
+        esa diferencia no había forma de decir "para un momento" — sólo "sigue" o
+        "muere". El motivo va al contexto y no sólo a `results` porque el bucle, al
+        soltar la misión, necesita saber por qué lo hizo y eso tiene que sobrevivir a un
+        reinicio.
+        """
+        mission.state = mission.state.PAUSE
+        mission.context["paused_reason"] = reason
+        mission.results.append({"paused": reason})
+        return mission
+
+    def resume(self, mission: Mission):
+        """Reanuda una misión pausada. Devuelve `None` si no estaba pausada.
+
+        Vuelve a `PENDING`, no a `RUNNING`: lo que se reencola es la MÍSICA y es el
+        worker quien la marca `running` cuando realmente la empieza. Ponerla `running`
+        aquí sería mentir sobre lo que está pasando ahora mismo.
+        """
+        if mission.state is not mission.state.PAUSE:
+            return None
+        mission.state = mission.state.PENDING
+        mission.context.pop("paused_reason", None)
+        mission.results.append({"resumed": True})
+        return mission

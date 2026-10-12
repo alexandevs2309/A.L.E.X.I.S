@@ -385,6 +385,33 @@ class AlexisRuntime:
         self.plan_planner_reason = ""
         self.latest_verification = None
 
+    async def _estado_externo(self, mission_id: str) -> MissionState:
+        """El estado que tiene AHORA la misión en la base.
+
+        Si no hay repositorio (runtime sin almacenamiento) o la fila no existe todavía,
+        devuelve RUNNING: no hay con qué contradecir al bucle, y quedarse quieto sería
+        peor que seguir.
+        """
+        if self.mission_repo is None:
+            return MissionState.RUNNING
+        fila = await self.mission_repo.get(mission_id)
+        if fila is None:
+            return MissionState.RUNNING
+        return fila.state
+
+    async def _abandonada_externamente(self, mission_id: str) -> bool:
+        """¿Alguien pidió desde fuera que estamisión pare?
+
+        `PAUSE` y `STOPPED` son los dos finales que el operador puede pedir desde fuera
+        y que el bucle no puede deducir solo. `FAILED` y `COMPLETED` NO se consultan aquí:
+        son finales que el propio bucle decide poner, y consultarlos volvería a pisar el
+        estado local justo después de que el bucle lo fijara — el bucle se_detendría a sí
+        mismo en su propia normalización.
+        """
+        return await self._estado_externo(mission_id) in (
+            MissionState.PAUSE, MissionState.STOPPED,
+        )
+
     async def _commit(self, mission: Mission, topic=None, payload=None):
         if self.mission_repo is not None:
             await self.mission_repo.upsert(mission)
@@ -1455,6 +1482,29 @@ class AlexisRuntime:
         knowledge = cognitive.knowledge_for(mission)
 
         while True:
+            # El operador manda desde FUERA del proceso. Hasta ahora la misión vivía sólo
+            # en esta memoria durante toda la ejecución: `/deny` era el único final posible
+            # y sólo funcionaba con la misión EN ESPERA. Poner `stopped` en la base no
+            # llegaba a nada porque nadie releía. Por eso una misión en marcha no se podía
+            # parar.
+            #
+            # Releer el estado una vez por vuelta es barato (una fila por iteración) y es
+            # lo que convierte PAUSE/STOPPED en algo que el bucle obedezca.
+            # Se relee el estado y NO la misión entera: el objeto en memoria lleva el
+            # progreso del bucle (`knowledge`, pasos completados) que la fila no tiene, y
+            # sustituirlo por lo de la base perdería el avance de la vuelta anterior.
+            if await self._abandonada_externamente(mission.id):
+                # Se propaga al objeto en memoria para que lo que salga por debajo describa
+                # lo que pasó, y la fila queda coherente con lo que el bucle hizo.
+                mission.state = await self._estado_externo(mission.id)
+                if mission.state is MissionState.PAUSE:
+                    await self._commit(mission, "mission.paused",
+                                       {"mission_id": mission.id,
+                                        "reason": mission.context.get("paused_reason")})
+                    return mission
+                await self._close(mission, mission.state)
+                return mission
+
             pending = cognitive.pending_steps(mission, plan, knowledge)
             outcome = await cognitive.step(mission, knowledge, pending_steps=pending, plan=plan)
             knowledge = outcome.knowledge

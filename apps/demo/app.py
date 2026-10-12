@@ -806,7 +806,7 @@ def _self_aux_factory(RUNTIME, TOOLS, RUNNING, STATE, SELF, enabled, self_sync=N
 API_TOKEN = ""
 #: Rutas que conceden poder sobre una misión en curso. Autenticar el GET no sirve de nada:
 #: aprobar, denegar y responder por el usuario SÍ cambian lo que el runtime hace.
-RUTAS_DE_CONTROL = ("/approve", "/deny", "/clarify")
+RUTAS_DE_CONTROL = ("/approve", "/deny", "/clarify", "/pause", "/resume", "/stop")
 
 
 def _token_del_proceso() -> str:
@@ -1325,6 +1325,52 @@ def create_handler(runtime: OfficialRuntime, presentation: Any = None):
                 mission.context.pop("pending_approval", None)
                 mission.results.clear()
                 _enqueue_or_run(mission)
+                self._send_json(runtime.payload(mission))
+            elif path.startswith("/missions/") and path.rstrip("/").endswith(("/pause", "/stop", "/resume")):
+                # Control del ciclo de vida de la misión. Todo lo que cambia el estado de
+                # una misión que el bucle tiene en memoria es poder sobre ella, así que
+                # entra por la MISMA guardia que /approve: token o nada.
+                #
+                # No hay /cancel: STOPPED ya significa "cancelada" en la presentación
+                # (presenter.py lo rotula así). Un cuarto nombre para lo mismo sería otra
+                # forma de que el operador creyera que puede deshacer algo que no puede.
+                sufijo = path.rstrip("/").rsplit("/", 1)[-1]
+                mission_id = path.split("/")[2]
+                mission = RUNNING.get(mission_id)
+                if mission is None:
+                    self._send_json({"error": "mission not found"}, 404)
+                    return
+                longitud = int(self.headers.get("Content-Length", 0))
+                try:
+                    cuerpo = json.loads(self.rfile.read(longitud) or b"{}")
+                except json.JSONDecodeError:
+                    self._send_json({"error": "json inválido"}, 400)
+                    return
+                motivo = str(cuerpo.get("reason") or "").strip() or f"{sufijo} por el operador"
+
+                if sufijo == "pause":
+                    MISSIONS.pause(mission, motivo)
+                elif sufijo == "stop":
+                    MISSIONS.stop(mission, motivo)
+                elif sufijo == "resume":
+                    # `resume` devuelve None si no estaba pausada: responder 409 y no
+                    # encolar una misión que el operador no ha reanudado.
+                    if MISSIONS.resume(mission) is None:
+                        self._send_json(
+                            {"error": f"la misión no está pausada (estado={mission.state.value})"},
+                            409,
+                        )
+                        return
+
+                # Se persiste ANTES de reencolar: si el worker leyera la fila antes de
+                # que el estado llegue a ella, arrancaría una misión que aún figura
+                # pausada en la base.
+                asyncio.run_coroutine_threadsafe(
+                    STORAGE["mission"].upsert(mission), LOOP
+                ).result(timeout=10)
+                if sufijo == "resume":
+                    # Se reencola: el worker la volverá a empezar por donde lo dejó.
+                    _enqueue_or_run(mission)
                 self._send_json(runtime.payload(mission))
             elif path.startswith("/missions/") and path.endswith("/clarify"):
                 # P0 §13: respuesta a una pregunta pendiente. Delega en la MISMA

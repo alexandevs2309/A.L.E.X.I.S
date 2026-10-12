@@ -60,16 +60,42 @@ La v0.3 es una **Complete Foundation**, no una versión final.
 - **AUTONOMY — CONSTRUIDO, NO SE TRABAJA**
 
   10 módulos, gate integrado en la cadena de ejecución del CORE, §4.3 y §9/§10
-  `IMPLEMENTED`. Pendiente: §48 (autonomía a largo plazo) `MISSING` y `PAUSE` ausente
-  entre los estados. En pausa por la regla de secuenciación, no por inexistencia.
+  `IMPLEMENTED`. Pendiente: §48 (autonomía a largo plazo) `MISSING`. En pausa por la regla
+  de secuenciación, no por inexistencia.
 
   Verificado al documentarlo: `alexis/autonomy/` tiene 10 módulos (1316 líneas), el
   `AutonomyGate` forma parte de la cadena `Policy → Gate → Execute`, `autonomy.gates` y
   `autonomy.queue` están `available` en el catálogo, y los estados de misión son
   `pending, planning, running, verifying, needs_verification, waiting_approval,
-  waiting_clarification, blocked, recovering, completed, failed, stopped` — sin `PAUSE`.
+  waiting_clarification, blocked, pause, recovering, completed, failed, stopped`.
   Esta nota existe porque el rótulo anterior ("sin comenzar") describía la regla de
   secuenciación con palabras de estado, y se leía como si el módulo no existiera.
+
+  **Control del ciclo de vida (2026-10-12) — cerrado.** Al documentar lo anterior se
+  descubrió que `PAUSE` no era sólo un estado ausente: una misión **en marcha no se podía
+  parar**. El bucle de `_run_cognitive` mantenía la misión en memoria y sólo escribía
+  (`_commit` → `upsert`); no la releía nunca. `MissionEngine.stop()` no lo llamaba nadie
+  más que `/deny`, que a su vez sólo funciona con la misión EN ESPERA. Poner `stopped` a
+  mano en PostgreSQL no llegaba a nada.
+
+  Ahora el bucle relee el estado al principio de cada vuelta y obedece `PAUSE` y
+  `STOPPED`; `MissionEngine` tiene `pause()` y `resume()`; y hay `POST
+  /missions/{id}/pause|resume|stop`, que exigen token como las demás rutas de control
+  (cambiar el estado de una misión en marcha ES poder sobre ella). Pausar deja la misión
+  viva y el motivo en `context["paused_reason"]`; reanudar la devuelve a `pending` —no a
+  `running`, que sería mentir sobre lo que está pasando ahora mismo—. Verificado en
+  `tests/test_control_auth_and_state.py` (11 pruebas nuevas) con PostgreSQL real.
+
+  **Limitación conocida, medida.** La guarda lee al principio de la vuelta, así que existe
+  una ventana de un paso: si el operador escribe `stopped` justo después de esa lectura, el
+  `_commit` del final de la vuelta escribe la copia EN MEMORIA y vuelve a poner `running`,
+  y el `stopped` se pierde. No se oculta: `test_13_el_commit_del_bucle_tapa_un_stop_externo`
+  lo demuestra a propósito. El arreglo limpio es que `_commit` respete los finales
+  externos, y eso toca todo el runtime — es una decisión, no un detalle, y queda pendiente.
+
+  **No existe `/cancel`.** `STOPPED` ya significa "cancelada" en la presentación
+  (`presenter.py` lo rotula así); un cuarto nombre para lo mismo haría creer al operador
+  que puede deshacer algo que no puede.
 
 - **USER MODEL (COMPLETE)** — `alexis/user/` cierra el último tipo de memoria que faltaba. Una sola tabla, `user_preferences` (`migrations/065`, también en `schema.SQL`), con las cuatro categorías `project`/`style`/`approval`/`context`; un proyecto activo es una preferencia `project` con `value->>'active' = 'true'` y una decisión es una `context`. **Las categorías son un CHECK, no un comentario**: un `category='proyects'` se escribiría sin error y no lo leería nadie, así que la lista se hizo restricción. `UserRepository` degrada a defaults si la tabla no existe, y `CognitiveRuntime` sólo inyecta `mission.context['user_preferences']` si hay repositorio y algo que inyectar — personalizar es una mejora, no un requisito para decidir, y un fallo ahí no puede tragarse la decisión. La zona `user` del `SelfModel` vive en `__init__` y **no** en `_reset()`, porque `_reset` limpia estado de MISIÓN y el usuario no cambia al terminar una. 26 tests con PostgreSQL real y contrapruebas.
 - **Integridad de eventos y auditoría (P0-1)**: `EventBus` con política de saturación explícita —suscriptor `critical=True` (auditoría) con entrega sin pérdida, best-effort acotado a 100 con contador `dropped_events` y aviso en log; `AuditSink` drena lo pendiente antes de parar, de modo que lo aceptado se vuelve durable. Sin esto se perdían 50 de 150 registros de `model.routed` en silencio.
