@@ -339,11 +339,30 @@ async def test_12_restart_real_del_componente(db, repo):
 # ====================================================================== #
 
 
-def test_13_el_self_model_sigue_respondiendo_despues(db, repo):
-    """La persistencia no rompe la metacognición: `answer`/`snapshot` siguen bien."""
+async def test_13_el_self_model_sigue_respondiendo_despues(db, repo):
+    """La persistencia no rompe la metacognición: `answer`/`snapshot` siguen bien.
+
+    Antes esto era `model.restore(repo.load() if False else {...})`: `repo.load()` es una
+    CORRUTINA, así que la rama muerta era la única que podía ejecutarse —el `if False` no
+    era cosmetics—, y el test nunca llegó a leer de la base. Ahora el viaje es real:
+    se guarda, se relee del almacenamiento durable y se restaura.
+    """
+    await repo.save(
+        lessons=["aprendi a leer notas"],
+        observations=["sigo funcionando"],
+        reflections=[],
+    )
+
     model = _model()
-    model.lessons_learned = ["aprendi a leer notas"]
-    model.restore(repo.load() if False else {"lessons": [], "observations": [], "reflections": [], "mission_id": None})
+    aprendido = await repo.load()
+    assert "aprendi a leer notas" in aprendido["lessons"], (
+        f"lo guardado tiene que volver de la base; volvió {aprendido!r}"
+    )
+
+    model.restore(aprendido)
+    assert model.lessons_learned == ["aprendi a leer notas"], (
+        f"restore no rehidrató la lección: {model.lessons_learned!r}"
+    )
     model.note_self_observation("sigo funcionando")
 
     snap = model.snapshot()

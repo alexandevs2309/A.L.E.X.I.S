@@ -190,7 +190,25 @@ def test_e_existe_un_unico_constructor():
     assert "def build_official_runtime(" in fuente
     assert fuente.count("def build_official_runtime(") == 1
     assert "RUNTIME = AlexisRuntime(" in fuente
-    assert _constructed_names(OFFICIAL).count("AlexisRuntime") if False else True
+    # Lo que se quería comprobar: que `AlexisRuntime` se construye en UN solo sitio.
+    # Estaba escrito como `... .count(...) if False else True`, y además `.count()` no
+    # existe sobre el `set` que devuelve `_constructed_names`: habría lanzado
+    # AttributeError. El recuento se hace por AST, que es lo que mira esa función.
+    assert "AlexisRuntime" in _constructed_names(OFFICIAL), (
+        "la app oficial debería construir el runtime explícitamente"
+    )
+    construcciones = [
+        node.lineno
+        for node in ast.walk(ast.parse(fuente))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "AlexisRuntime"
+    ]
+    assert len(construcciones) == 1, (
+        f"debe haber UN punto de construcción de AlexisRuntime; hay {len(construcciones)} "
+        f"en las líneas {construcciones}. Un segundo runtime oficial significa dos "
+        f"estados distintos en el mismo proceso."
+    )
 
 
 def test_e2e_la_aplicacion_oficial_es_importable_sin_efectos():
@@ -493,10 +511,10 @@ def test_n_la_api_conserva_token_health_y_ui():
     paths = {getattr(r, "path", "") for r in api_main.app.routes}
     assert {"/health", "/ui", "/stream", "/missions"} <= paths
     assert isinstance(api_main.API_TOKEN, str)
-    assert any(
-        isinstance(r, str) or "X-ALEXIS-Token" in str(r)
-        for r in [api_main.__doc__ or ""]
-    ) or True  # el token se exige en la dependencia, ver abajo
+    # Antes aquí había un `assert any(...) or True`, que era siempre verdadero y no
+    # comprobaba nada: leía el docstring del módulo. Se quitó en vez de repararse
+    # porque lo que el test quiere de verdad está en las dos aserciones siguientes —
+    # la cabecera que exigía el token, y la dependencia que lo exige de verdad.
     # La dependencia de auth sigue siendo la que exige el token.
     fuente = _source(API)
     assert "X-ALEXIS-Token" in fuente

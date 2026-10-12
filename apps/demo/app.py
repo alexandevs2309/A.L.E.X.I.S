@@ -559,13 +559,26 @@ def build_official_runtime(
           f"{_real_providers or 'ninguno (DEGRADED por configuración)'} "
           f"| fallback: {'degraded' if MODEL_CONFIG.allow_degraded() else 'none'}")
 
+    def _autorizar_reintento(mission, step):
+        """Autorización para los reintentos de un paso. Ver `runtime._authorize_step`.
+
+        Sin esto, un reintento de un paso ya aprobado repetía el efecto sin volver a
+        preguntar — con `git push` eso significa subirlo hasta tres veces con un solo
+        "sí" del humano.
+        """
+        if RUNTIME.gate is not None:
+            return RUNTIME.gate.decide(mission, step, RUNTIME.policy)
+        return RUNTIME.policy.authorize(mission, step)
+
     # --- Ejecución de una misión ------------------------------------------ #
     async def _cognitive_execute(mission, step, tool_name=None):
         if RUNNER is not None:
             async def _run(_mission, _step):
                 return await RUNTIME.executor.execute(_mission, _step, tool_name=tool_name)
 
-            result, task = await RUNNER.run_step(mission, step, _run)
+            result, task = await RUNNER.run_step(
+                mission, step, _run, authorize=_autorizar_reintento,
+            )
             if task.status.value == "failed":
                 await RUNNER.close_open_tasks(mission.id, status="cancelled")
             return result

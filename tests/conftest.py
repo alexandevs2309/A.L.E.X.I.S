@@ -46,6 +46,24 @@ if DEV_DSN:
     os.environ["ALEXIS_DEV_DATABASE_URL"] = DEV_DSN
     os.environ["ALEXIS_TEST_DATABASE_URL"] = TEST_DSN
     os.environ["ALEXIS_DATABASE_URL"] = TEST_DSN
+else:
+    # SIN DSN declarada, la red estructural de arriba no llega a montarse: entonces
+    # `alexis.storage.db.DEFAULT_DSN` cae en el literal hardcodeado
+    # `postgresql://alexis:change-me@localhost:5433/alexis`, que es la base de
+    # DESARROLLO. Con el PostgreSQL de desarrollo levantado, `init_storage()` conectaba
+    # a ella y los tests HTTP —`test_core04_http_e2e`, `test_control_auth_and_state`,
+    # `test_user_model`— escribían misiones, checkpoints y auditoría en datos reales.
+    # El `pytest.skip` de esos ficheros sólo salta si `storage["mission"] is None`, y con
+    # el servidor vivo no salta: la comprobación nunca se activaba.
+    #
+    # Aquí se pone una DSN que no puede llegar a ningún sitio (puerto 1, refused
+    # inmediato). `init_storage()` degrada a storage vacío, `storage["mission"]` es None
+    # y los tests que necesitan base se saltan solos, que es lo que deben hacer cuando
+    # no hay ninguna configurada.
+    os.environ["ALEXIS_DATABASE_URL"] = (
+        "postgresql://tests-sin-base-configurada@127.0.0.1:1/alexis_test"
+    )
+    os.environ.pop("ALEXIS_DEV_DATABASE_URL", None)
 
 
 @pytest.fixture(scope="session")

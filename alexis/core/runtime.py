@@ -110,7 +110,14 @@ class AlexisRuntime:
             log.warning("recovery: no pude inspeccionar %s (%s)", path, exc)
             return None
         if not result.success or not isinstance(result.output, dict):
-            return {"exists": False, "error": str(result.error or "")}
+            # La herramienta FALLÓ: no se sabe si el efecto ocurrió. Decir `exists=False`
+            # aquí es afirmar algo que nadie ha comprobado, y `assess()` lo traduce a
+            # `NOT_EXECUTED` → `RESUME`, que reintenta a ciegas. Una ruta sin permisos
+            # —el caso más común de este fallo— convertía así una escritura ya hecha en
+            # otra. `UNKNOWN` es lo único honesto, y es lo que el docstring promete.
+            log.warning("recovery: la inspección de %s falló (%s); no se puede afirmar "
+                        "que no ocurriera", path, result.error)
+            return None
         return {"exists": bool(result.output.get("exists")), "output": result.output}
 
     async def _revalidate_restored_completion(self, mission: Mission) -> bool:
@@ -384,6 +391,17 @@ class AlexisRuntime:
         self.plan_planner_mode = "unset"
         self.plan_planner_reason = ""
         self.latest_verification = None
+
+    def _authorize_step(self, mission: Mission, step) -> object:
+        """La MISMA decisión que se tomó antes de entrar al ejecutor, para los reintentos.
+
+        Se reproduce aquí la forma de `CognitiveRuntime._authorize` a propósito: gate si lo
+        hay, policy si no. Que las dos rutas decidan igual no es casualidad, es que las dos
+        tienen que preguntar lo mismo antes de repetir un efecto.
+        """
+        if self.gate is not None:
+            return self.gate.decide(mission, step, self.policy)
+        return self.policy.authorize(mission, step)
 
     async def _estado_externo(self, mission_id: str) -> MissionState:
         """El estado que tiene AHORA la misión en la base.
@@ -1126,7 +1144,10 @@ class AlexisRuntime:
             # desconocido, que es lo que permite NO repetirla a ciegas al volver.
             await self._record_inflight_action(mission, step)
             if self.task_runner is not None:
-                result, task = await self.task_runner.run_step(mission, step, self.executor.execute)
+                result, task = await self.task_runner.run_step(
+                    mission, step, self.executor.execute,
+                    authorize=self._authorize_step,
+                )
                 if task.status.value == "failed":
                     await self.task_runner.close_open_tasks(mission.id, status="cancelled")
             else:

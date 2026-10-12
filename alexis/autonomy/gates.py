@@ -33,6 +33,19 @@ class AutonomyGate:
     """
 
     def __init__(self, confidence_threshold: float = 0.50):
+        #: AVISO HONESTO: esto NO es un control. Antes el log escribía
+        #: `confianza=0.35 ≥ umbral=0.50`, un `≥` que era texto dentro de una cadena, no
+        #: una comparación: nada comparaba `score` con `threshold`. Quien leyera el log
+        #: concluiría que hubo un filtro por confianza que en realidad nunca ocurrió.
+        #:
+        #: NO se activa a propósito, no por descuido. Con la fórmula de `MetaCognition`
+        #: (`0.35 + 0.15·evidencia + …`) una misión sin evidencia vale 0.35, por debajo
+        #: del 0.50 por defecto: aplicar el umbral bloquearía el PRIMER paso de TODA
+        #: misión. Eso no es una corrección de un defecto, es cambiar la semántica de la
+        #: autonomía, y a esa altura es una decisión de quien manda, no un arreglo.
+        #:
+        #: Para que el valor llegue a estar en la superficie hay que decidir primero qué
+        #: debe pasar con una misión recién empezada. Está pendiente y anotado.
         self.threshold = confidence_threshold
         self.metacognition = MetaCognition()
 
@@ -100,7 +113,7 @@ class AutonomyGate:
                 return GateDecision(
                     True,
                     f"(autonomous): 'borrar' está en approval_required del envelope → pido "
-                    f"aprobación humana (confianza={score:.2f}, umbral={self.threshold:.2f})",
+                    f"aprobación humana (confianza actual={score:.2f})",
                     requires_approval=True,
                     capability=capability,
                 )
@@ -124,7 +137,7 @@ class AutonomyGate:
             return GateDecision(
                 True,
                 f"({level.value}): ejecuto sola dentro del envelope (intent={intent or action}, "
-                f"confianza={score:.2f} ≥ umbral={self.threshold:.2f})",
+                f"confianza actual={score:.2f})",
                 capability=capability,
             )
 

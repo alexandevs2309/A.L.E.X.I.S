@@ -293,16 +293,33 @@ async def test_09_la_decision_no_eva_la_policy_ni_el_gate():
 
 @pytest.mark.asyncio
 async def test_10_la_verificacion_no_pasa_por_el_modelo():
-    rt = _runtime(_Contador())
+    # Antes: `assert d.action is not NextAction.VERIFY or True`. El `or True` lo hacía
+    # siempre verdadero, así que el test que se llama "la verificación no pasa por el
+    # modelo" no comprobaba nada de eso. Lo que se comprueba ahora es la garantía de su
+    # nombre: el Runtime DECIDE, y para eso no consulta al modelo.
+    contador = _Contador()
+    rt = _runtime(contador)
     d = await rt.decide_next_action(_mision(), KnowledgeState(), pending_steps=[])
-    assert d.action is not NextAction.VERIFY or True  # el estado de partida no verifica
+
+    assert d is not None, "decide_next_action siempre devuelve una decisión"
+    assert contador.llamadas == 0, (
+        f"el Runtime decidió sin delegar en el modelo; se le llamó "
+        f"{contador.llamadas} veces"
+    )
+
     k = KnowledgeState()
     k.verified = True
     k.verification_passed = False
-    rt2 = _runtime(_Contador())
+    contador2 = _Contador()
+    rt2 = _runtime(contador2)
     d2 = await rt2.decide_next_action(_mision(), k, pending_steps=[])
+
     # Verificación fallida con PlanValidator ausente: el Runtime no delega en el modelo.
     assert d2 is not None
+    assert contador2.llamadas == 0, (
+        f"una verificación fallida tampoco puede ser el modelo quien la decida; "
+        f"se le llamó {contador2.llamadas} veces"
+    )
 
 
 # =========================================================================== #

@@ -101,11 +101,42 @@ class TaskRunner:
                 {"task_id": task.id, "mission_id": task.mission_id, "attempt": task.attempts},
             )
 
-    async def run_step(self, mission: Mission, step: PlanStep, run):
-        """Claim → ejecutar (con heartbeat + reintentos) → registrar → finalizar."""
+    async def run_step(self, mission: Mission, step: PlanStep, run, authorize=None):
+        """Claim → ejecutar (con heartbeat + reintentos) → registrar → finalizar.
+
+        `authorize` es lo que arregla que un reintento ejecutara sin volver a pedir
+        permiso. La autorización ocurre UNA vez, antes de entrar aquí; si el reintento
+        repite la operación —que puede ser un `git push`, un borrado, cualquier cosa con
+        efecto real— sin volver a comprobar, una sola aprobación humana acaba
+        autorizando tres ejecuciones. Con un timeout de red, el push ya está hecho en el
+        servidor cuando el cliente reporta fallo: el segundo intento lo repite.
+
+        Antes de cada reintento se vuelve a preguntar. Es opcional a propósito: sin él el
+        comportamiento es exactamente el de siempre, y los dos sitios que ejecutan de
+        verdad lo pasan (`runtime.run_mission` y `app._cognitive_execute`).
+        """
         task = await self.create_task(mission, step)
         last_result: ExecutionResult | None = None
         while task.status not in {TaskState.COMPLETED, TaskState.FAILED} and task.attempts < task.max_attempts:
+            if authorize is not None and task.attempts > 0:
+                decision = authorize(mission, step)
+                if not getattr(decision, "allowed", True):
+                    # La operación NO se reintenta. El paso se marca FAILED porque en
+                    # este runtime no hay estado "blocked" en `Task`: es el final
+                    # honesto, y es terminal, así que el bucle no insiste.
+                    motivo = f"reintento no autorizado: {getattr(decision, 'reason', '')}".strip()
+                    task.attempts += 1
+                    task.error = motivo
+                    task.status = TaskState.FAILED
+                    await self.task_repo.upsert(task)
+                    await self._publish("task.blocked", {
+                        "task_id": task.id,
+                        "mission_id": task.mission_id,
+                        "attempts": task.attempts,
+                        "reason": motivo,
+                    })
+                    last_result = ExecutionResult(success=False, error=motivo)
+                    break
             await self.claim(task)
             await self.heartbeat(task)
             last_result = await run(mission, step)

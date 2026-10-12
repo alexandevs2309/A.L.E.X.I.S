@@ -296,7 +296,19 @@ def test_22_no_se_duplica_memory():
     cincuenta = len(str(muchos.known_path("notas.txt").to_dict()))
     # 50 ids adds ~350 chars of ids, not evidence prose: sin evidencia embebida.
     assert cincuenta - uno < 1000, f"la fila creció {cincuenta - uno} chars: hay texto dentro"
-    assert "cl-0" not in str(fila) or True   # los ids SÍ están; el texto, no
+    # Antes: `assert "cl-0" not in str(fila) or True`. `fila` NO EXISTE en este ámbito
+    # —la variable de aquí es `muchos`—, así que la aserción era siempre verdadera por
+    # el `or True` y además habría lanzado NameError sin él. La garantía real, que es que
+    # los identificadores sí se guardan pero el texto de evidencia no, se comprueba
+    # sobre el objeto correcto.
+    fila = muchos.known_path("notas.txt").to_dict()
+    assert "cl-0" in fila["evidence_ids"], (
+        "los identificadores de evidencia SÍ se persisten; es lo que permite contarlos "
+        f"sin guardar la prosa. Se guardó {fila.get('evidence_ids')!r}"
+    )
+    assert len(fila["evidence_ids"]) == 50, (
+        f"deben estar los 50 punteros; hay {len(fila['evidence_ids'])}"
+    )
 
 
 def test_23_el_llm_no_decide_que_hecho_es_verdadero():
