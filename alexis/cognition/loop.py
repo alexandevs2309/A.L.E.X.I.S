@@ -53,6 +53,7 @@ from alexis.contracts import (
     PlanStep,
     RiskLevel,
 )
+from alexis.autonomy.step_identity import nueva_identidad
 from alexis.learning.experience import Experience, LearningBoundary
 from alexis.learning.reflection import build_reflection
 from alexis.memory.contracts import MemoryQuery
@@ -107,6 +108,13 @@ class StepOutcome:
     action: NextAction
     knowledge: KnowledgeState
     decision: Decision
+    #: R-08: la identidad del paso que se EJECUTÓ, tal y como quedó tras desambiguar.
+    #: Es la única fuente válida para `pending_approval`. Antes el runtime la re-derivaba
+    #: de `decision.step_id`, que es un campo distinto al que recibió la identidad real:
+    #: por eso se guardaba `"cognitive"` y se comprobaba `"cognitive-step"`, y una
+    #: aprobación humana nunca satisfacía a su propio paso. `None` cuando la iteración no
+    #: llegó a construir un paso.
+    step_key: str | None = None
     done: bool = False
     mission_state: MissionState | None = None
     result: ExecutionResult | None = None
@@ -1597,30 +1605,30 @@ class CognitiveRuntime:
                 verdict=Verdict.BLOCKED.value,
             )
             return self._settle(blocked_outcome, before)
+        if authorization.requires_approval and not self._aprobado_para_ejecutar(mission, step):
+            self._record_decision(
+                mission,
+                knowledge,
+                decision,
+                policy_verdict="require_approval",
+                verdict=Verdict.BLOCKED.value,
+            )
+            return self._settle(
+                StepOutcome(
+                    action=decision.action,
+                    knowledge=knowledge,
+                    decision=decision,
+                    step_key=step.id,
+                    done=True,
+                    mission_state=MissionState.WAITING_APPROVAL,
+                    requires_approval=True,
+                    error=authorization.reason,
+                    verdict=Verdict.BLOCKED,
+                    verdict_reason=f"esperando aprobación del usuario: {authorization.reason}",
+                ),
+                before,
+            )
         if authorization.requires_approval:
-            approved = set(mission.context.get("approved_step_ids") or [])
-            if step.id not in approved:
-                self._record_decision(
-                    mission,
-                    knowledge,
-                    decision,
-                    policy_verdict="require_approval",
-                    verdict=Verdict.BLOCKED.value,
-                )
-                return self._settle(
-                    StepOutcome(
-                        action=decision.action,
-                        knowledge=knowledge,
-                        decision=decision,
-                        done=True,
-                        mission_state=MissionState.WAITING_APPROVAL,
-                        requires_approval=True,
-                        error=authorization.reason,
-                        verdict=Verdict.BLOCKED,
-                        verdict_reason=f"esperando aprobación del usuario: {authorization.reason}",
-                    ),
-                    before,
-                )
             knowledge.add_known(f"'{step.id}' aprobado por el usuario")
 
         # P0 §12.4: el intento se registra ANTES de ejecutar (procedencia) y se cierra con
@@ -1678,6 +1686,22 @@ class CognitiveRuntime:
             return ExecutionResult(success=False, error="no hay executor inyectado")
         return await self.executor.execute(mission, step, tool_name=decision.tool)
 
+    def _aprobado_para_ejecutar(self, mission: Mission, step: PlanStep) -> bool:
+        """¿Hay una aprobación humana que ampare EXACTAMENTE a este paso?
+
+        La comparación es por identidad de paso, y la identidad es única por construcción
+        (`step_identity.nueva_identidad`). Por eso esto no necesita borrar aprobaciones:
+        un paso distinto NUNCA puede coincidir con una clave aprobada, aunque repita el
+        `step_id` que le dio el modelo.
+
+        Existe como método y no en línea porque es la frontera de autorización de la
+        ejecución: si está incrustada en `step()`, nadie puede comprobarla sin montar
+        una iteración entera, y una frontera que no se puede probar es una frontera que
+        no está verificada.
+        """
+        approved = set((getattr(mission, "context", None) or {}).get("approved_step_ids") or [])
+        return step.id in approved
+
     def _plan_step_for(
         self,
         decision: Decision,
@@ -1708,8 +1732,18 @@ class CognitiveRuntime:
                     success_criteria=list(step.success_criteria or []),
                 )
             return step
+        # R-08: la identidad NACE aquí y en ningún otro sitio. Antes esta línea usaba la
+        # constante `"cognitive-step"` y `runtime.py` guardaba `"cognitive"` para la misma
+        # cosa: dos constantes distintos para la misma clave, así que la aprobación que
+        # guardaba una nunca satisfacía a la otra y el pasocognitive sin `step_id` era
+        # IMPOSIBLE de aprobar. Y dos pasos sin `step_id` compartían identidad, con lo que
+        # el segundo heredaba la aprobación del primero.
+        #
+        # `nueva_identidad` desambigua contra lo ya usado en la misión y lo registra, de
+        # modo que un replan que reutilice un id obtenga OTRO. Sin misión no hay contexto
+        # que reiniciar, y entonces se comporta como la constante de antes.
         step = PlanStep(
-            id=decision.step_id or "cognitive-step",
+            id=nueva_identidad(mission, decision.step_id),
             description=decision.description or decision.rationale,
             action="research" if decision.action is NextAction.RESEARCH else "execute",
             risk=RiskLevel.MEDIUM,

@@ -2,6 +2,7 @@ import logging
 import time
 
 from alexis.autonomy.goal_state import settle
+from alexis.autonomy.step_identity import IDENTIDAD_POR_DEFECTO
 from alexis.contracts import Mission, MissionState, RiskLevel, Verification
 from alexis.cognition.planner import (
     PLANNED_FALLBACK_TEMPLATE,
@@ -1566,8 +1567,15 @@ class AlexisRuntime:
             if outcome.requires_approval:
                 reason = outcome.error or "Requiere aprobación humana."
                 mission.state = MissionState.WAITING_APPROVAL
+                # R-08: la clave es la del paso REAL (`outcome.step_key`), no una
+                # re-derivación desde `decision.step_id`. Re-derivarla era lo que hacía que
+                # se guardara `"cognitive"` mientras el gate comprobaba `"cognitive-step"`:
+                # dos constantes para la misma clave, y ninguna aprobación humana llegaba a
+                # satisfacer a su propio paso. `step_key` es la MISMA cadena que se
+                # comprobó en `loop.py`, por construcción no puede divergir.
+                clave = outcome.step_key or outcome.decision.step_id or IDENTIDAD_POR_DEFECTO
                 mission.context["pending_approval"] = {
-                    "step": outcome.decision.step_id or "cognitive",
+                    "step": clave,
                     "action": outcome.decision.action.value,
                     "risk": RiskLevel.MEDIUM.value,
                     "reason": reason,
