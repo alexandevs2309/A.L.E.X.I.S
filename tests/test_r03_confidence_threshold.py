@@ -130,45 +130,48 @@ def test_03_la_confianza_se_sigue_reportando_como_dato():
     )
 
 
-def test_04_el_umbral_sobre_sigue_aceptandose_pero_no_promete_nada():
-    """El parámetro se conserva —80+ llamadas lo constructores— pero documentado como no-control.
+def test_04_el_parametro_muerto_se_elimino():
+    """R-03 cerrado: ya no existe un knob que no hace nada.
 
-    Borrarlo sería más limpio, pero rompería a quien lo pase. Lo que no puede ser es que
-    exista un parámetro llamado «umbral» que no hace nada sin que esté escrito.
+    Antes este test afirmaba que el parámetro «se conserva pero no promete nada». La
+    decisión de diseño que se dejó pendiente se ha resuelto por el otro lado: en vez de
+    activar un umbral que bloquearía el primer paso de toda misión, se elimina el
+    parámetro. Un control que no controla, documentado o no, sigue siendo una trampa para
+    quien lo use creyendo que hace algo.
+
+    Verificar que NO existe es parte del cierre: si alguien lo reintrodujera sin
+    compararlo, el defecto volvería exactamente como estaba.
     """
-    gate = AutonomyGate(confidence_threshold=0.99)
-    decision = _decidir(_mision(), gate=gate)
+    import inspect
 
-    assert gate.threshold == 0.99, "el valor se conserva"
-    assert "umbral=" not in decision.reason, (
-        "y el log no lo presenta como si se comparara"
+    firma = inspect.signature(AutonomyGate.__init__)
+    assert "confidence_threshold" not in firma.parameters, (
+        "el parámetro muerto volvió: o se usa sin compararse —el defecto original— o se "
+        "compara, que es una decisión de semántica que no se ha tomado"
+    )
+
+    gate = AutonomyGate()
+    assert not hasattr(gate, "threshold"), (
+        "y con él el atributo que se leía en el log como si fuera un filtro"
+    )
+    decision = _decidir(_mision(), gate=gate)
+    assert "umbral" not in decision.reason, (
+        f"el motivo sigue hablando de un umbral: {decision.reason!r}"
+    )
+
+
+def test_05_la_confianza_se_sigue_reportando_como_dato_real():
+    """Quitar el umbral NO es quitar la medición.
+
+    La confianza sigue calculándose y reportándose: es lo que permite diagnosticar por qué
+    una acción se bloqueó. Lo que no se insinúa es que sea un control.
+    """
+    reason = _decidir(_mision(resultados=[1, 2, 3])).reason
+    assert "confianza" in reason, (
+        f"la confianza debe seguir en el motivo como dato: {reason!r}"
     )
 
 
 # --------------------------------------------------------------------------- #
 # 3 — la decisión de diseño que queda pendiente
 # --------------------------------------------------------------------------- #
-
-def test_05_un_umbral_real_bloquearia_el_primer_paso_de_toda_mision():
-    """POR QUÉ no se activa. No es descuido: es la consecuencia, medida.
-
-    Con la fórmula de `MetaCognition`, una misión sin evidencia vale 0.35, y el umbral por
-    defecto es 0.50. Aplicarlo de verdad significaría que el primer paso de CUALQUIER
-    misión pide aprobación. Eso es un cambio de semántica de la autonomía, y por eso
-    esta prueba existe: deja constancia de por qué la decisión está tomada y no tomada.
-
-    Si algún día se decide activarlo, esta prueba falla y obliga a documentarlo.
-    """
-    from alexis.meta.cognition import MetaCognition
-
-    score_mision_nueva = MetaCognition().assess(0, 0, 0).score
-    assert score_mision_nueva < AutonomyGate().threshold, (
-        "si una misión nueva ya alcanzara el umbral, activarlo sería inocuo y esta "
-        "prueba debería replantearse: ya no valdría como justificación"
-    )
-    # Y se comprueba la consecuencia: con ese umbral, la decisión sería la que el gate
-    # NO está tomando hoy.
-    assert score_mision_nueva == 0.35, (
-        f"la fórmula cambió (score inicial={score_mision_nueva}): recalcular antes de "
-        f"activar el umbral, porque la justificación de esta decisión puede ya no valer"
-    )

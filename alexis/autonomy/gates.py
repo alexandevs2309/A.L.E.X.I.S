@@ -32,21 +32,31 @@ class AutonomyGate:
     no se puede ejecutar, no es "preguntar".
     """
 
-    def __init__(self, confidence_threshold: float = 0.50):
-        #: AVISO HONESTO: esto NO es un control. Antes el log escribía
-        #: `confianza=0.35 ≥ umbral=0.50`, un `≥` que era texto dentro de una cadena, no
-        #: una comparación: nada comparaba `score` con `threshold`. Quien leyera el log
-        #: concluiría que hubo un filtro por confianza que en realidad nunca ocurrió.
-        #:
-        #: NO se activa a propósito, no por descuido. Con la fórmula de `MetaCognition`
-        #: (`0.35 + 0.15·evidencia + …`) una misión sin evidencia vale 0.35, por debajo
-        #: del 0.50 por defecto: aplicar el umbral bloquearía el PRIMER paso de TODA
-        #: misión. Eso no es una corrección de un defecto, es cambiar la semántica de la
-        #: autonomía, y a esa altura es una decisión de quien manda, no un arreglo.
-        #:
-        #: Para que el valor llegue a estar en la superficie hay que decidir primero qué
-        #: debe pasar con una misión recién empezada. Está pendiente y anotado.
-        self.threshold = confidence_threshold
+    def __init__(self):
+        """R-03 — este gate NO filtra por confianza, y ya no finge que sí.
+
+        Existía un parámetro `confidence_threshold` que se guardaba, se imprimía en el
+        motivo de cada decisión (`confianza=0.35 ≥ umbral=0.50`) y **nunca se comparaba**:
+        aquel `≥` era texto dentro de una cadena. Quien leyera el log concluiría que hubo
+        un filtro por confianza que en realidad no ocurrió.
+
+        Se elimina el parámetro en vez de activarlo, por dos razones concretas:
+
+        1. **Activar no es una corrección, es cambiar la semántica.** Con la fórmula de
+           `MetaCognition` (`0.35 + 0.15·evidencia + …`) una misión sin evidencia vale
+           0.35. Un umbral de 0.50 bloquearía el PRIMER paso de TODA misión. Eso no es
+           arreglar un defecto: es decidir qué significa la autonomía, y es de quien manda.
+        2. **Un knob que no hace nada es la trampa que produjo el defecto.** Dejarlo,
+           documentado o no, invita a que alguien lo use creyendo que hace algo.
+
+        La confianza **sí se calcula y se reporta** (`_confidence`), porque es una
+        medición útil para diagnosticar por qué una acción se bloqueó. Lo que no se
+        insinúa es que sea un filtro.
+
+        Lo que SÍ aplica autoridad sobre la evidencia es otro camino, y ese sí funciona:
+        `risk.requires_approval` (`policy_rules.py`) y `goal_state.goal_is_confirmed`, que
+        exige procedencia sana para que una misión pueda `COMPLETED`.
+        """
         self.metacognition = MetaCognition()
 
     def _confidence(self, mission) -> tuple[float, object]:
