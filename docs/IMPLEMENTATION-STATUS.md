@@ -63,7 +63,8 @@ La v0.3 es una **Complete Foundation**, no una versión final.
   `IMPLEMENTED`. Pendiente: §48 (autonomía a largo plazo) `MISSING`. En pausa por la regla
   de secuenciación, no por inexistencia.
 
-  Verificado al documentarlo: `alexis/autonomy/` tiene 10 módulos (1316 líneas), el
+  Verificado al documentarlo: `alexis/autonomy/` tiene 10 ficheros (9 con contenido,
+  1497 líneas), el
   `AutonomyGate` forma parte de la cadena `Policy → Gate → Execute`, `autonomy.gates` y
   `autonomy.queue` están `available` en el catálogo, y los estados de misión son
   `pending, planning, running, verifying, needs_verification, waiting_approval,
@@ -103,6 +104,28 @@ La v0.3 es una **Complete Foundation**, no una versión final.
   `libcurl`) y el DNS siguen fuera, y la garantía de aislamiento sigue siendo **no**.
   El net-ns queda medido y documentado en `docs/SECURITY.md` para cuando se decida.
 
+  **R-08 — integridad de aprobaciones (2026-10-13): cerrado y demostrado.** La auditoría
+  encontró TRES defectos, no uno: (a) `runtime.py` guardaba `"cognitive"` mientras
+  `loop.py` comprobaba `"cognitive-step"` — dos constantes para la misma clave, con lo que
+  un paso cognitivo sin `step_id` era **imposible de aprobar**; (b) todo paso sin
+  `step_id` recibía la misma identidad constante; (c) un `step_id` reutilizado por el
+  modelo tras un replan heredaba la aprobación del anterior. Ahora la identidad nace en
+  una sola función (`alexis/autonomy/step_identity.py`), se propaga por
+  `StepOutcome.step_key`, y el contador de identidades vive en `mission.context` —no en la
+  instancia del runtime— porque la aprobación se persiste en la misión y su frontera
+  tiene que persistir con ella. 10 pruebas; las cuatro contrapruebes sobre producción
+  rompen 3, 1, 2 y 1 respectivamente.
+
+  **R-06 — veracidad del catálogo (2026-10-13): cerrado.** `git.push` figuraba como
+  `available` sin funcionar dentro del sandbox. Ahora `status="missing"` con el motivo en
+  la descripción. Se conservan `risk=critical`, `plans_action`, `git.push.requires_approval`
+  y la validación de remoto: no operativa **no** significa inofensiva.
+
+  **R-03 — decisión de diseño resuelta.** El `confidence_threshold` del gate se ha
+  ELIMINADO en vez de activarse: no gateaba nada (el `≥` del log era texto) y activarlo
+  bloquearía el primer paso de toda misión, porque `MetaCognition` da 0,35 sin evidencia y
+  el umbral era 0,50. Un control que no controla es una trampa para quien lo use.
+
   **No existe `/cancel`.** `STOPPED` ya significa "cancelada" en la presentación
   (`presenter.py` lo rotula así); un cuarto nombre para lo mismo haría creer al operador
   que puede deshacer algo que no puede.
@@ -121,7 +144,10 @@ La v0.3 es una **Complete Foundation**, no una versión final.
 2. ~~contratos v0.4 + tabla/repo tasks/executions/observations/verifications/checkpoints~~ — **hecho (S1)**
 3. ~~runtime persistente (S2)~~ — **hecho y verificado**: la misión se persiste en cada transición; verificación y auditoría se escriben en PostgreSQL; recuperación de misiones abiertas al reiniciar (probado en vivo)
 4. worker runtime + task leases/heartbeats (**S3 hecho**): `TaskRunner` con estados `queued→running→completed/failed/retrying`, lease (`lease_until`) + heartbeat, retry con `max_attempts=3`, checkpoint por `step_index`, `resume` desde el último checkpoint (verificado en vivo: aprobación reanuda en el paso pendiente sin re-ejecutar lo hecho); `Scheduler` reclamando leases huérfanas en el arranque (anti-huérfanas, deadline expirado → failed). Tasks/executions/checkpoints persistentes en PostgreSQL.
-5. scheduler (**S3 hecho**, ver arriba: `alexis/autonomy/scheduler.py`)
+5. scheduler (**CONTRACT**, no operativo): `alexis/autonomy/scheduler.py` sólo
+   define `recover_stale` y un `poll_claimable` sin consumidor; no hay bucle que
+   programe nada. `docs/VISION-ALIGNMENT.md` §27 lo clasifica `CONTRACT` y es la
+   clasificación que manda: el rótulo anterior «S3 hecho» lo contradecía.
 6. checkpointing + recovery (**S3 hecho**): `CheckpointRepository` + `TaskRunner.save_checkpoint`/`resume`; el demo reanuda misiones abiertas al reiniciar desde el último checkpoint.
 7. sandbox subprocess restringido (**S4 hecho**): `alexis/security/sandbox.py` — cwd acotado al workspace, env limpio, RLIMIT (AS/CPU/FSIZE/NOFILE/NPROC/CORE), timeout real, sin red (limitación de capa documentada). Probado: captura de `timeout` y de `MemoryError` por RLIMIT.
 8. filesystem tools reales (**S4 hecho**): `fs.read`, `fs.stat`, **`fs.write`** y **`fs.remove`** registradas (`alexis/tools/filesystem.py`), ejecutadas en subprocess sandbox, con `schema/permissions/timeout/limits` en `Tool`. `SandboxExecutor` ejecuta pasos reales (analyze honesto; research→`fs.read`/`fs.stat` según intención; execute→`fs.remove`/`fs.write`/`fs.read` según intención; verify→`fs.stat`); paso sin tool → error explícito; `fs.remove` rechaza el workspace y directorios.

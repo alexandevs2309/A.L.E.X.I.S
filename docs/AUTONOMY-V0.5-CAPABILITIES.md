@@ -65,7 +65,8 @@ Catálogo completo (estado honesto, enero-2026):
 | `tts.speak` (voz saliente) | Voice | ✅ implementada |
 | STT (voz entrante) | Voice | ⏳ requiere mic externo (mic interno roto) |
 | Terminal (subprocess con whitelist) | Project/host | 🔸 `SandboxRunner` existe; sin whitelist aún |
-| Git / GitHub | Project | ⛔ no implementado |
+| Git (`git.read` / `git.commit`) | Project | ✅ implementado (sin red) |
+| GitHub (`git.push`) | Project | ⚠️ adaptador implementado, **no operativo**: `RLIMIT_NPROC=16` impide el fork de `remote-http` |
 | Browser / Web research | Web | ⛔ sólo abrir app de escritorio |
 | MCP | Integraciones | ⛔ |
 | APIs externas | Integraciones | ⛔ |
