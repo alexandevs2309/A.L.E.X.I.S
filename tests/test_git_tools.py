@@ -351,17 +351,28 @@ async def test_13_contraprueba_el_push_no_ocurre_si_el_remoto_es_malo(sandbox):
 
 
 def test_13b_estar_disponible_no_es_estar_autorizado():
-    """`git.push` es `available` y aun así la policy exige aprobación.
+    """`git.push` NO es operativa y aun así la policy exigiría aprobación si lo fuera.
 
-    Son dos cosas distintas y confundirlas sería un agujero: `available` significa que
-    existe un adaptador, `authorised` significa que este paso concreto puede ejecutarse.
-    Aquí se comprueba que una capability disponible sigue pasando por la regla.
+    Son dos cosas distintas y confundirlas sería un agujero: `available` significa que la
+    operación puede ocurrir, `authorised` significa que este paso concreto puede
+    ejecutarse. Aquí se comprueba lo que sigue valiendo con el nuevo estado — que la regla
+    de aprobación no se afloja porque la capacidad figure como no operativa—.
+
+    R-06: el catálogo pasó de `available` a `missing` porque el adaptador existe pero la
+    operación no funciona dentro del sandbox (`RLIMIT_NPROC=16`). Lo que cambia es la
+    DECLARACIÓN, no la autorización: si mañana se sube el límite, esta prueba debe seguir
+    exigiendo que `git.push` pida permiso.
     """
     from alexis.capabilities.catalog import build_catalog
 
     spec = next(s for s in build_catalog().specs() if s.id == "git.push")
-    assert spec.status == "available", "git.push debería estar implementada"
-    assert spec.default_risk == "critical"
+    assert spec.status == "missing", (
+        "git.push no es operativa dentro del sandbox: declararla disponible sería untrue"
+    )
+    assert spec.default_risk == "critical", (
+        "el riesgo no se baja aunque la operación no funcione: si se arregla el límite, "
+        "sigue siendo crítica"
+    )
 
     from alexis.security.policy_rules import evaluate_rules
 

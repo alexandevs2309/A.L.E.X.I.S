@@ -269,8 +269,14 @@ def build_catalog(enable_available=True) -> CapabilityRegistry:
             CapabilitySpec(
                 id="git.push", sphere="project", network=True, side_effects=True,
                 trust_domain="git", sandbox_profile="network-observed", default_risk="critical",
-                plans_action="commit", status="available",
-                description="Publicar en un remoto; exige aprobación y valida el destino",
+                plans_action="commit", status="missing",
+                description=(
+                    "Publicar en un remoto; exige aprobación y valida el destino. "
+                    "R-06: el ADAPTADOR existe pero la operación NO es operativa dentro "
+                    "del sandbox —`RLIMIT_NPROC=16` impide el fork que `git push` necesita "
+                    "para `remote-http`—, así que el catálogo no la declara disponible. "
+                    "Ver docs/SECURITY.md."
+                ),
             ),
             CapabilitySpec(
                 id="terminal.run", sphere="project", network=False, side_effects=True,

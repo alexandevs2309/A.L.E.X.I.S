@@ -60,10 +60,12 @@ def test_missing_capabilities_registered_but_not_enabled():
     all_ids = {s.id for s in catalog.specs()}
     missing = {s.id for s in catalog.specs() if s.status == "missing"}
     assert "vision.screen" in missing
-    # git.* dejaron de ser `missing` al implementarse (2026-10-11). Estar `available` NO
-    # significa estar autorizado: `git.push` sigue exigiendo aprobación explícita por
-    # policy, y esa comprobación vive en `test_git_tools.py`.
-    assert "git.commit" not in missing and "git.push" not in missing
+    # `git.commit` dejó de ser `missing` al implementarse (2026-10-11).
+    # `git.push` vuelve a `missing` por R-06: el adaptador existe pero la operación no es
+    # operativa dentro del sandbox (`RLIMIT_NPROC=16` impide el fork de `remote-http`).
+    # Declararla `available` sería decir que ALEXIS puede publicar cuando no puede.
+    assert "git.commit" not in missing
+    assert "git.push" in missing
     assert len(missing) >= 8  # muchas capacidades futuras
     assert all(catalog.has(cid) for cid in missing)
 
