@@ -297,3 +297,20 @@ moved to the query that actually opens the socket.
 with egress restricted to an allowlist. That needs privileges or a user namespace, and it
 is defence in depth: this control decides the destination, the namespace constrains what
 can be reached at all.
+
+---
+
+## Estado 2026-10-13: aislamiento aplicado
+
+El bypass de `libpq` ya **no es explotable en el despliegue**, y el motivo es que no lo
+arreglamos: lo dejamos de necesitar. `ALEXIS` se ejecuta con `scripts/launch-isolated.sh`,
+que lo mete en un espacio de nombres de red sin rutas, con el socket Varlink de
+`systemd-resolved` tapado por un tmpfs. `libpq` sigue ignorando el hook de auditoría —es C y
+no puede hacer otra cosa— pero el kernel no le ofrece ningún destino.
+
+PostgreSQL expone **sólo socket Unix** (`listen_addresses=''`, sin puertos publicados), así
+que persiste sin que el aislamiento abra nada. El TCP 5433 que antes escuchaba en
+`0.0.0.0` y era alcanzable desde la red local **ya no existe**.
+
+Detalles, mediciones y desviaciones: `docs/DISENO-AISLAMIENTO.md`.
+Pruebas que lo verifican: `tests/test_isolation_gate.py` (15).

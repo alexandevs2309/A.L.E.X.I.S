@@ -196,6 +196,7 @@ def test_check_url_allowlist_de_dominios():
     assert check_url("https://example.com/x", [])[0] is True
 
 
+@pytest.mark.external
 async def test_fuente_fuera_de_allowlist_se_omite_sin_descargar():
     descargadas = []
 
@@ -246,6 +247,7 @@ async def test_perfil_de_sandbox_sin_red_bloquea_ejecucion():
 # --- Inyección de prompt ---------------------------------------------------- #
 
 
+@pytest.mark.external
 async def test_prompt_injection_se_descarta_y_se_audita():
     eventos = []
     tool = make_tool(
