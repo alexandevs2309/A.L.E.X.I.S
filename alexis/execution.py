@@ -601,7 +601,33 @@ class SandboxExecutor:
 
         override = tool_name
         if override is None:
-            override = _CAPABILITY_TOOL.get(getattr(step, "capability", None) or "")
+            # R-01: la capability declarada es parte del contrato del paso. Antes se leía
+            # SÓLO de `_CAPABILITY_TOOL`, que tiene seis entradas, así que para cualquier otra
+            # capability el override era `None` y mandaba la tabla por acción: un paso que
+            # declara `git.commit` con `action=execute` ejecutaba `fs.write`, sin error y sin
+            # rastro de que lo declarado se había ignorado.
+            #
+            # Tres casos, y son tres comportamientos distintos a propósito:
+            #   1. La capability está en la tabla -> manda la tabla (fs.*, execute.test,
+            #      browser.research). Es la ruta explícita y no cambia.
+            #   2. La tool está REGISTRADA aunque no esté en la tabla -> se usa la tool. Es el
+            #      arreglo: `git.read` y `git.commit` tienen adaptador de verdad, así que
+            #      declararlas tiene que significar ejecutarlas.
+            #   3. No hay tool con ese nombre -> cae a la tabla por acción, como antes. Aquí
+            #      caen los alias SEMÁNTICOS (`research.filesystem` ES leer el filesystem,
+            #      `verification.filesystem` ES verificarlo) y las capabilities internas del
+            #      runtime (`cognition.*`, `autonomy.*`). Cambiar esto rompería alias que hay
+            #      que mantener; no es lo que se arregla aquí.
+            #
+            # Lo que NO se hace es dejar la sustitución en silencio para el caso 2: ahí la
+            # capability declarada es ejecutable y descartar cuál se usa es un fallo de
+            # contrato, no una decisión de diseño.
+            declared = str(getattr(step, "capability", None) or "")
+            if declared:
+                if declared in _CAPABILITY_TOOL:
+                    override = _CAPABILITY_TOOL[declared]
+                elif self.tools.has(declared):
+                    override = declared
         if action == "research":
             resolved_tool = "fs.stat" if intent in {"write", "destructive"} else "fs.read"
         elif action == "execute":

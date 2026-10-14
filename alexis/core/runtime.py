@@ -1465,7 +1465,9 @@ class AlexisRuntime:
         aprender que el usuario consiguió lo que pidió.
         """
         if verification.passed and goal_verified and self.learning is not None:
-            await self.learning.record_experience(mission, verification)
+            await self.learning.record_experience(
+                mission, verification, goal_verified=goal_verified
+            )
             # CORE-11: el ciclo completo. De una experiencia VERIFICADA sale una lección, y de
             # una lección con alcance y evidencia sale una candidata que se valida contra el
             # catálogo y la policy REALES. Si algo falla aquí, la misión ya está cerrada: no

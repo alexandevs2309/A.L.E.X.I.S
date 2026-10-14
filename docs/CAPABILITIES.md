@@ -62,3 +62,40 @@ ALEXIS does not get unlimited authority, unrestricted self-modification, or auto
 La seguridad es **contextual y granular**, no una restricción global: cada capacidad
 tiene su política, su sandbox, su riesgo y su necesidad de aprobación evaluada en
 tiempo de ejecución.
+
+---
+
+## Resolución de capabilities (R-01, 2026-10-13)
+
+La resolución de una capability a una tool se hace en `alexis/execution.py::execute`, y hay
+**tres** casos distintos. Antes sólo se distinguishan dos, y el caso que faltaba era el que
+importaba:
+
+1. La capability está en `_CAPABILITY_TOOL` → manda la tabla (`fs.*`, `execute.test`,
+   `browser.research`).
+2. La tool está registrada en el `ToolRegistry` aunque no esté en la tabla → **se ejecuta esa
+   tool**. Antes esto no existía.
+3. No hay tool con ese nombre → cae a la tabla por **acción**. Aquí viven los alias
+   semánticos (`research.filesystem` ES leer el filesystem) y las capabilities internas del
+   runtime (`cognition.*`, `autonomy.*`).
+
+**Por qué el caso 2 era un defecto y no una decisión.** El catálogo declara `git.read` y
+`git.commit` como `available`, ambas tienen adaptador real, `PlanValidator` las acepta porque
+están disponibles y la autoridad las autoriza. Y entonces el paso se ejecutaba como
+`fs.read`/`fs.write`, en silencio: el catálogo affirmed una capacidad, el paso pedía otra y
+ocurría una tercera. Con `action=execute` y objetivo de escritura, `git.commit` terminaba
+**escribiendo un archivo** — y podía reportar `success` sobre un commit que no se hizo.
+
+El catálogo no podía detectarlo porque `available()` se apoya únicamente en `status`, y
+`catalog.py` no tenía ni una mención de adapter, dispatch o executor: la disponibilidad se
+declaraba sin que nadie comprobara que la capability fuera ejecutable.
+
+**Cómo se evita la clase de defecto.** `tests/test_capability_resolution.py::test_04` recorre
+todas las capabilities `available`/`base` que tienen adaptador registrado y las EJECUTA, una
+con la capability declarada y otra con override explícito, y exige que coincidan. Es
+comportamental a propósito: comprobar si el id está en una tabla mediría la
+implementación, no el contrato, y pasaría en verde con el defecto vivo.
+
+**Lo que sigue sin ser cierto.** `available` significa «hay implementación y está
+registrada», no «se puede ejecutar en cualquier contexto»: `git.push` es `missing` aunque su
+adaptador exista, porque la operación no funciona dentro del sandbox.

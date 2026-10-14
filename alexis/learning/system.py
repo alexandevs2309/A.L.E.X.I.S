@@ -21,7 +21,7 @@ from alexis.cognition.state import KnowledgeState, Verdict
 
 class LearningSystem(ABC):
     @abstractmethod
-    async def record_experience(self, mission, verification): ...
+    async def record_experience(self, mission, verification, goal_verified: bool | None = None): ...
 
 
 class ExperienceLearner(LearningSystem):
@@ -35,14 +35,40 @@ class ExperienceLearner(LearningSystem):
         self.experiences: list[dict] = []
         self.records: list[VerifiedExperience] = []
         self.boundary = LearningBoundary()
-        #: CORE-11: sin esto la experiencia se perdía. `record_experience` la construía, pero
-        #: nadie la escribía en `mission.context`, así que `ExperienceStore.load()` — que es
-        #: lo que la recupera tras un reinicio — no encontraba nada que leer. La clase existía,
-        #: la llamada no.
-        self.store = ExperienceStore()
+        # R-02: se eliminó `self.store`. Sólo servía para una llamada a `publish()` que
+        # nunca podía tener efecto (sin `observation_repo` devuelve `False` sin publicar).
+        # La recuperación tras reinicio la hace `ExperienceStore.load()`, que lee de
+        # `mission.context` — y eso lo escribe `ExperienceStore.attach()`, un staticmethod
+        # que no necesita instancia.
 
-    async def record_experience(self, mission, verification):
-        goal_verified = bool(getattr(verification, "verified", False))
+    async def record_experience(self, mission, verification, goal_verified: bool | None = None):
+        """Registra la experiencia y la frontera de aprendizaje.
+
+        `goal_verified` es el valor que el runtime ya calculó en `settle()`, y es el único
+        que significa «el OBJETIVO se consiguió», no «la herramienta funcionó». Por eso se
+        pasa explícitamente en vez de deducirlo aquí.
+
+        **Por qué antes se adivinaba, y por qué adivinar rompía el ciclo entero.**
+        La versión anterior hacía `getattr(verification, "verified", False)`. Ese atributo
+        existe en `GoalVerification`, pero el runtime pasa un `Verification`, que trae
+        `.passed`. `getattr` con valor por defecto no lanza: devolvía `False` siempre y en
+        silencio. Los tests no lo detectaban porque llamaban con `GoalVerification`, el tipo
+        que sí tiene `.verified`.
+
+        Consecuencia medida en la base real: 466 verificaciones exitosas, 431 misiones
+        completadas, y 229 lecciones guardadas — las 229 con `outcome='unknown'` y la tabla
+        `skills` vacía. `classify_outcome(goal_verified=False)` nunca devuelve SUCCESS, y
+        `runtime._advance_learning` corta antes de `skill_from_lesson`. El sistema guardaba
+        historial y no aprendía nada.
+
+        Sin `goal_verified` explícito se sigue leyendo `.verified`, que es la vía correcta
+        para quien llega con un `GoalVerification`. Deliberadamente NO se deduce de
+        `.passed`: `passed=True` significa que la herramienta pasó, y el módulo entero
+        sostiene la distinción ACTION SUCCESS → OBJECTIVE SUCCESS. Adivinar aquí
+        reintroduciría exactamente el error que se acaba de corregir.
+        """
+        if goal_verified is None:
+            goal_verified = bool(getattr(verification, "verified", False))
         knowledge = self._knowledge(mission)
         reflection = build_reflection(mission, knowledge, verification)
         experience = Experience(
@@ -54,7 +80,7 @@ class ExperienceLearner(LearningSystem):
             reflection=reflection.to_dict(),
         )
         verified = self.boundary.evaluate(experience, reflection)
-# CORE-11: los `evidence_refs` viajan vacíos. La `LearningBoundary` puede afirmar sin
+        # CORE-11: los `evidence_refs` viajan vacíos. La `LearningBoundary` puede afirmar sin
         # ellos, pero una `Experience` sin evidencia no puede sostener una `Lesson` que sí la
         # tenga: el aprendizaje se cortaba justo después de verificarse. Se rellenan desde los
         # claims REALES de la misión, los mismos que respaldan la verificación.
@@ -92,7 +118,14 @@ class ExperienceLearner(LearningSystem):
                 "lesson": verified.lesson,
             }
         )
-        await self.store.publish(verified)
+        # R-02: aquí antes había `await self.store.publish(verified)`, que NUNCA hacía nada.
+        # `ExperienceStore.publish()` sólo publica si tiene un `observation_repo`, y el
+        # learner se construía sin él, así que devolvía `False` en silencio. La publicación
+        # real la hace `runtime.py` —que sí tiene el repo— justo antes de cerrar la misión.
+        #
+        # No se inyecta el repo aquí a propósito: entonces se publicaría DOS veces la misma
+        # experiencia (una por el learner, otra por el runtime) y `observations` se
+        # duplicaría sin que nada lo pidiera. El runtime es el único dueño de esa vía.
         return verified
 
     def lessons(self) -> list[str]:

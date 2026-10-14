@@ -39,11 +39,23 @@ def _cron_field(spec, lo: int, hi: int) -> set[int]:
             continue
         base, _, step = part.partition("/")
         step_n = int(step) if step.isdigit() else 1
-        rng = range(lo, hi + 1) if base in ("", "*") else (
-            range(*((int(x) for x in base.split("-")) + (1,) if "-" in base else (int(base), int(base) + 1)))
-        )
+        # R-01: antes era `(int(x) for x in base.split("-")) + (1,)`, que une un GENERADOR
+        # con una tupla y lanza TypeError. Todo cron con rango se caía: `0 8 * * 1-5` es
+        # "laborables a las ocho". Ahora el rango se construye con dos enteros.
+        if base in ("", "*"):
+            rng = range(lo, hi + 1)
+        elif "-" in base:
+            inicio, _, fin = base.partition("-")
+            rng = range(int(inicio), int(fin) + 1)
+        else:
+            rng = range(int(base), int(base) + 1)
         values.update(rng[::step_n])
     return values
+
+
+def _sin_restriccion(spec) -> bool:
+    """`*` significa que el campo no restringe, que es como lo lee el cron estándar."""
+    return str(spec).strip() == "*"
 
 
 def cron_next(now: _dt.datetime, expr: str) -> _dt.datetime:
@@ -56,13 +68,25 @@ def cron_next(now: _dt.datetime, expr: str) -> _dt.datetime:
     days = _cron_field(parts[2], 1, 31)
     months = _cron_field(parts[3], 1, 12)
     dows = _cron_field(parts[4], 0, 6)
+    # R-02: la condición era `candidate.day in days or candidate.weekday() in dows`, y con
+    # un `or` un campo `*` —que contiene todos los valores— hacía que el otro no contara
+    # para nada. `0 0 1 * *` («el día 1 de cada mes») devolvía el día 15, y `30 9 * * 5`
+    # («los viernes») devolvía el miércoles: en ambos se disparaba A DIARIO.
+    #
+    # Cron estándar (Vixie/ISC): si LOS DOS campos están restringidos se usa OR; si uno es
+    # `*`, sólo cuenta el restringido (AND). Eso es exactamente lo que se aplica abajo.
+    dia_restringido = not _sin_restriccion(parts[2])
+    dow_restringido = not _sin_restriccion(parts[4])
+    candidato_ok = (
+        (lambda d, w: d or w) if dia_restringido and dow_restringido else (lambda d, w: d and w)
+    )
     candidate = now.replace(second=0, microsecond=0) + _dt.timedelta(minutes=1)
     for _ in range(366 * 24 * 60):
         if (
             candidate.minute in minutes
             and candidate.hour in hours
             and candidate.month in months
-            and (candidate.day in days or candidate.weekday() in dows)
+            and candidato_ok(candidate.day in days, candidate.weekday() in dows)
         ):
             return candidate
         candidate += _dt.timedelta(minutes=1)
