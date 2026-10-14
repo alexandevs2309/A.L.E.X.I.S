@@ -12,6 +12,28 @@ run-api:
 test:
 	pytest -q
 
+# EL PROCEDIMIENTO CORRECTO DE LA SUITE. Va aquí y no en `test` a propósito:
+#
+# `launch-isolated.sh` levanta un net-ns con CERO rutas. Ahí el DNS no existe, y por eso las
+# pruebas marcadas `external` —que necesitan resolver nombres de verdad para distinguir
+# «permitido» de «no verificable»— tienen su premisa anulada y fallan. No es un defecto: es
+# que son pruebas de otro entorno.
+#
+# Lo que NO se hace aquí, y por qué: no hay un hook en `conftest.py` que salte `external`
+# automáticamente. Un hook así cambiaría el comportamiento de pytest en TODOS los entornos,
+# incluido el que sí tiene red, donde esas pruebas deben correr. La exclusión es explícita
+# y está en el comando, que es donde se puede ver, auditar y revertir.
+#
+# Las pruebas de `external` no desaparecen de la suite general: son `make test-external`, y
+# son las que `test_isolation_gate.py` sustituye bajo aislamiento. Ver docs/DISENO-AISLAMIENTO.md.
+test-isolated:
+	scripts/launch-isolated.sh $(VENV_PYTHON) -m pytest -q -m "not external"
+
+# Las 7 pruebas `external`, que exigen red real y credenciales. Fuera del aislamiento, a
+# propósito: aquí el DNS existe y es la única forma de que signifiquen algo.
+test-external:
+	$(VENV_PYTHON) -m pytest -q -m external
+
 # R1: falla si hay credenciales en texto plano en archivos versionables.
 secrets-check:
 	$(VENV_PYTHON) scripts/check_secrets.py

@@ -33,5 +33,5 @@ include = ["alexis*", "apps*", "apps.api*", "apps.demo*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [
-    "external: requiere red y credenciales reales. No lo ejecuta la suite por defecto: se marca y se salta solo si no hay credencial.",
+    "external: requiere red y credenciales reales. La exclusión es EXPLICITA y va en el comando, no automática: bajo el despliegue aislado (`scripts/launch-isolated.sh`, net-ns sin rutas) el DNS no existe y su premisa es falsa, de modo que se lanzan con `make test-isolated`, que añade `-m 'not external'`. Fuera del aislamiento se ejecutan con `make test-external`. Antes este texto decía que se omitían solas 'si no hay credencial': era falso, no hay hook en `conftest.py` que lo haga, y `pytest -q` a secas las ejecutaba todas. Ver `docs/DISENO-AISLAMIENTO.md`.",
 ]

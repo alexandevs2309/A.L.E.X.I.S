@@ -55,6 +55,35 @@ browser no pide **nada** a la red: pedir y luego descartar ya es haber transmiti
 
 Verificado que los tres siguen **pasando fuera** del aislamiento, donde sí hay red.
 
+### Cómo se ejecuta la suite, y por qué hay dos comandos
+
+Hay dos familias de pruebas y cada una sólo significa algo en un entorno. Confundirlas es lo
+que hace que `pytest -q` a secas parezca que el repositorio está roto cuando no lo está:
+
+| Familia | Cuántas | Necesita | Si se ejecuta en el entorno equivocado |
+|---|---|---|---|
+| `external` | 7 | DNS real + credenciales | **3 fallan** dentro del aislamiento |
+| `tests/test_isolation_gate.py` | 13 | el net-ns sin rutas | **8-10 fallan** fuera del aislamiento |
+
+Por eso el procedimiento correcto es explícito y vive en el `Makefile`:
+
+```bash
+make test-isolated   # scripts/launch-isolated.sh … -m "not external"  ← el de verdad
+make test-external   # … -m external, fuera del aislamiento, donde hay red
+```
+
+Medido hoy: `make test-isolated` → **1886 passed, 7 deselected, 0 failed**. `pytest -q` a secas
+→ 3 failed, 1887 passed, 3 skipped.
+
+**Lo que no se hizo, a propósito.** No hay un hook en `tests/conftest.py` que salte `external`
+solas. Un hook así cambiaría el comportamiento de pytest en **todos** los entornos, incluido el
+que sí tiene red y donde esas pruebas deben correr. La exclusión está en el comando: se ve, se
+audita y se revierte. El marcador `external` está registrado y aplicado, pero nada lo consumía
+—esto era lo que hacía que `pyproject.toml` afirmara algo que no ocurría.
+
+Las pruebas `external` **no desaparecen de la suite general**: son `make test-external`, y bajo
+aislamiento las sustituyen las dos contraprobas de arriba, que viven en `test_isolation_gate.py`.
+
 ## 1. Qué hay que cerrar
 
 El hook de auditoría de sockets de Python (`alexis/tools/net.py`) **no ve `libpq`**, que es

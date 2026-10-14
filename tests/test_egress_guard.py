@@ -144,7 +144,7 @@ def test_06_el_dns_sigue_funcionando():
     **Requiere un despliegue CON salida a red.** En el despliegue aislado
     (`scripts/launch-isolated.sh`) el DNS no existe a propósito, así que este test no puede
     seguir afirmándolo. Lo que sí debe cumplirse allí —y se comprueba en
-    `test_aislamiento.py::test_el_guardian_falla_cerrado_sin_dns`— es que la resolución
+    `test_isolation_gate.py::test_el_guardian_falla_cerrado_sin_dns`— es que la resolución
     fallida provoque un DENEGUE, no una excepción ni un permiso.
 
     Si el guardián bloqueara la resolución, se rompería el propio control que dice
